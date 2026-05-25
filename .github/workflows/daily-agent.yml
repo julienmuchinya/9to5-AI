@@ -1,0 +1,111 @@
+name: 9to5 AI Daily Agent
+
+on:
+  schedule:
+    - cron: "0 12 * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Agent mode"
+        required: true
+        default: mock
+        type: choice
+        options:
+          - mock
+          - live
+      dry_run:
+        description: "Dry run (no side effects)"
+        required: true
+        default: true
+        type: boolean
+      scan_email:
+        description: "Scan Gmail job alerts"
+        required: true
+        default: true
+        type: boolean
+      scan_companies:
+        description: "Scan company career pages"
+        required: true
+        default: true
+        type: boolean
+
+jobs:
+  run-agent:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - run: npm ci
+
+      - name: Resolve run mode
+        id: mode
+        env:
+          LIVE_ENABLED: ${{ secrets.LIVE_AGENT_ENABLED }}
+          INPUT_MODE: ${{ github.event.inputs.mode }}
+        run: |
+          if [ "${INPUT_MODE}" = "live" ] && [ "${LIVE_ENABLED}" = "true" ]; then
+            echo "effective=live" >> $GITHUB_OUTPUT
+          else
+            echo "effective=mock" >> $GITHUB_OUTPUT
+          fi
+          echo "dry_run=${{ github.event.inputs.dry_run != 'false' }}" >> $GITHUB_OUTPUT
+
+      - name: Validate secrets (live only)
+        if: steps.mode.outputs.effective == 'live'
+        env:
+          AGENT_SECRET: ${{ secrets.AGENT_SECRET }}
+          SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          AGENT_USER: ${{ secrets.AGENT_USER_ID }}
+        run: |
+          missing=""
+          [ -z "$AGENT_SECRET" ] && missing="$missing AGENT_SECRET"
+          [ -z "$SUPABASE_URL" ] && missing="$missing NEXT_PUBLIC_SUPABASE_URL"
+          [ -z "$SERVICE_KEY" ] && missing="$missing SUPABASE_SERVICE_ROLE_KEY"
+          [ -z "$AGENT_USER" ] && missing="$missing AGENT_USER_ID"
+          if [ -n "$missing" ]; then
+            echo "::error::Missing required secrets for live mode:$missing"
+            exit 1
+          fi
+          echo "Live mode secrets present (values not printed)"
+
+      - name: Run 9to5 AI agent (mock — safe default)
+        if: steps.mode.outputs.effective == 'mock'
+        env:
+          MOCK_MODE: "true"
+          NEXT_PUBLIC_MOCK_MODE: "true"
+          AGENT_SECRET: ${{ secrets.AGENT_SECRET }}
+          SCAN_EMAIL: ${{ github.event.inputs.scan_email != 'false' }}
+          SCAN_COMPANIES: ${{ github.event.inputs.scan_companies != 'false' }}
+          DRY_RUN: "true"
+        run: npm run agent:mock
+
+      - name: Run 9to5 AI agent (live)
+        if: steps.mode.outputs.effective == 'live' && steps.mode.outputs.dry_run != 'true'
+        env:
+          MOCK_MODE: "false"
+          NEXT_PUBLIC_MOCK_MODE: "false"
+          LIVE_AGENT_ENABLED: "true"
+          AGENT_SECRET: ${{ secrets.AGENT_SECRET }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GMAIL_REFRESH_TOKEN: ${{ secrets.GMAIL_REFRESH_TOKEN }}
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          AGENT_USER_ID: ${{ secrets.AGENT_USER_ID }}
+        run: npm run agent
+
+      - name: Live dry run (no agent execution)
+        if: steps.mode.outputs.effective == 'live' && steps.mode.outputs.dry_run == 'true'
+        run: echo "Live dry run — secrets validated, agent not executed"
+
+      - name: Summary
+        run: |
+          echo "9to5 AI daily agent finished"
+          echo "mode=${{ steps.mode.outputs.effective }} dry_run=${{ steps.mode.outputs.dry_run }}"
