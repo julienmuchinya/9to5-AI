@@ -115,6 +115,11 @@ jobs:
           MOCK_MODE: "false"
           NEXT_PUBLIC_MOCK_MODE: "false"
           LIVE_AGENT_ENABLED: "true"
+          # The live runner only runs in "production"; Actions doesn't set this itself.
+          NODE_ENV: production
+          SCAN_EMAIL: ${{ github.event.inputs.scan_email != 'false' }}
+          SCAN_COMPANIES: ${{ github.event.inputs.scan_companies != 'false' }}
+          GEMINI_MODEL: gemini-2.5-flash
           AGENT_SECRET: ${{ secrets.AGENT_SECRET }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GMAIL_REFRESH_TOKEN: ${{ secrets.GMAIL_REFRESH_TOKEN }}
