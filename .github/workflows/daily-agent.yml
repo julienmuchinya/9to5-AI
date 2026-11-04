@@ -120,6 +120,9 @@ jobs:
           SCAN_EMAIL: ${{ github.event.inputs.scan_email != 'false' }}
           SCAN_COMPANIES: ${{ github.event.inputs.scan_companies != 'false' }}
           GEMINI_MODEL: gemini-2.5-flash
+          NEXT_PUBLIC_APP_URL: https://9to5-ai-julienmuchinyas-projects.vercel.app
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           AGENT_SECRET: ${{ secrets.AGENT_SECRET }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GMAIL_REFRESH_TOKEN: ${{ secrets.GMAIL_REFRESH_TOKEN }}

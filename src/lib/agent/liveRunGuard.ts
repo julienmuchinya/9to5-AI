@@ -15,7 +15,16 @@ export interface LiveRunGuardInput {
   store: LocalStore;
   agentSecretHeader?: string | null;
   setupContext?: Partial<SetupCheckContext>;
+  /** When false, Gmail setup items are not required for this run. */
+  scanEmail?: boolean;
 }
+
+const GMAIL_SETUP_IDS = new Set([
+  "gmail_scan_ready",
+  "email_scan_enabled",
+  "gmail_configured",
+  "gmail_oauth",
+]);
 
 export function evaluateLiveRunGuard(input: LiveRunGuardInput): {
   allowed: boolean;
@@ -85,8 +94,11 @@ export function evaluateLiveRunGuard(input: LiveRunGuardInput): {
     geminiOrMock: Boolean(process.env.GEMINI_API_KEY) || false,
     geminiDisabledInSettings: false,
     costLimitZero: DEFAULT_USAGE_LIMITS.maxCostPerDay === 0,
-    gmailConfigured: false,
-    gmailOAuthConnected: false,
+    gmailConfigured: Boolean(
+      (process.env.GOOGLE_CLIENT_ID || process.env.GMAIL_CLIENT_ID) &&
+        (process.env.GOOGLE_CLIENT_SECRET || process.env.GMAIL_CLIENT_SECRET)
+    ),
+    gmailOAuthConnected: Boolean(process.env.GMAIL_REFRESH_TOKEN),
     jobEmailSet: Boolean(input.store.profile.job_email),
     outreachDisabled: true,
     emergencyStop: input.store.autopilot_settings.emergency_stop,
@@ -104,7 +116,9 @@ export function evaluateLiveRunGuard(input: LiveRunGuardInput): {
     ...input.setupContext,
   };
 
-  const checklist = evaluateSetupChecklist(ctx);
+  const checklist = evaluateSetupChecklist(ctx).filter(
+    (item) => input.scanEmail !== false || !GMAIL_SETUP_IDS.has(item.id)
+  );
   if (!isSetupComplete(checklist, { mockMode: false })) {
     for (const item of checklist.filter((i) => !i.complete)) {
       reasons.push({

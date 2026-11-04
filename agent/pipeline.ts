@@ -147,9 +147,20 @@ export async function runAgentPipeline(
 
   // Step 3: Live run guard + setup
   beginStep("live_guard");
+  // When the store was loaded from live storage (not passed in), the database
+  // is reachable and its tables exist; seed data shows up as resume templates.
+  const loadedLive = !inputStore && !mockMode;
   const liveGuard = evaluateLiveRunGuard({
     store,
     agentSecretHeader: options?.agentSecret ?? null,
+    scanEmail: options?.scanEmail !== false,
+    setupContext: loadedLive
+      ? {
+          databaseReachable: true,
+          tablesExist: true,
+          seedInstalled: store.resume_templates.length > 0,
+        }
+      : undefined,
   });
   if (!liveGuard.allowed && !mockMode) {
     logStep("live_guard", "warn", "Live agent blocked", {
