@@ -102,8 +102,13 @@ export async function sendResetEmail(email: string): Promise<Result> {
   const { error } = await supabase.auth.resetPasswordForEmail(e, { redirectTo: `${origin}/auth/reset` });
   if (error && /rate|limit|seconds/i.test(error.message))
     return { ok: false, message: "The free email service is busy (it sends only a few emails per hour). Try again later or use your security questions." };
+  if (error) return { ok: false, message: `Couldn't send the email: ${error.message}` };
   // Same message whether or not the account exists.
-  return { ok: true, message: "If that email has an account, we sent a 6-digit code and a reset link. Check your inbox and spam folder." };
+  return {
+    ok: true,
+    message:
+      "If that email has an account, we sent a reset link (and a 6-digit code). Check inbox and spam. Nothing after 5 minutes? You probably signed up with a different email — try that one.",
+  };
 }
 
 export async function resetWithCode(email: string, code: string, newPassword: string): Promise<Result> {
