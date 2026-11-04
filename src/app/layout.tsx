@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { APP_NAME, APP_TAGLINE } from "@/lib/constants";
-import { MockBanner } from "@/components/mock-banner";
 import { Sidebar } from "@/components/sidebar";
+import { createServerSupabaseClient } from "@/lib/supabase/server";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -9,17 +9,23 @@ export const metadata: Metadata = {
   description: APP_TAGLINE,
 };
 
-export default function RootLayout({
-  children,
-}: Readonly<{ children: React.ReactNode }>) {
+export default async function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
+  const supabase = await createServerSupabaseClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
   return (
     <html lang="en">
       <body className="min-h-screen antialiased">
-        <MockBanner />
-        <div className="flex min-h-screen">
-          <Sidebar />
-          <main className="flex-1 overflow-auto p-6 lg:p-8">{children}</main>
-        </div>
+        {user ? (
+          <div className="flex min-h-screen flex-col md:flex-row">
+            <Sidebar email={user.email ?? ""} />
+            <main className="min-w-0 flex-1 overflow-auto p-4 md:p-8">{children}</main>
+          </div>
+        ) : (
+          children
+        )}
       </body>
     </html>
   );

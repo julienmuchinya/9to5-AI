@@ -1,72 +1,140 @@
-"use client";
+import { requireUser } from "@/lib/v2/session";
+import { saveProfile } from "../actions";
+import { Card, PageHeader } from "@/components/ui";
+import { ResumeUpload } from "./resume-upload";
+import { SubmitButton } from "@/components/submit-button";
 
-import { useLocalStore } from "@/hooks/use-store";
-import { Button, Card, PageHeader } from "@/components/ui";
+export const dynamic = "force-dynamic";
 
-export default function ProfilePage() {
-  const { store, update, ready } = useLocalStore();
+const input =
+  "mt-1 w-full rounded-lg border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-sm outline-none focus:border-[var(--accent)]";
 
-  if (!ready || !store) return <p>Loading…</p>;
-
-  const p = store.profile;
-
+function Field({ label, name, value, placeholder, type = "text" }: { label: string; name: string; value?: string | number | null; placeholder?: string; type?: string }) {
   return (
-    <div>
-      <PageHeader title="Profile" description="Your job search profile for 9to5 AI" />
-      <Card>
-        <form
-          className="space-y-4"
-          onSubmit={(e) => {
-            e.preventDefault();
-            const fd = new FormData(e.currentTarget);
-            update((s) => ({
-              ...s,
-              profile: {
-                ...s.profile,
-                full_name: String(fd.get("full_name") ?? ""),
-                school: String(fd.get("school") ?? ""),
-                job_email: String(fd.get("job_email") ?? ""),
-                location_preference: String(fd.get("location") ?? ""),
-                work_mode: String(fd.get("work_mode") ?? ""),
-                skills: String(fd.get("skills") ?? "")
-                  .split(",")
-                  .map((x) => x.trim())
-                  .filter(Boolean),
-                target_roles: String(fd.get("target_roles") ?? "")
-                  .split(",")
-                  .map((x) => x.trim())
-                  .filter(Boolean),
-              },
-            }));
-          }}
-        >
-          <Field label="Full name" name="full_name" defaultValue={p.full_name} />
-          <Field label="School" name="school" defaultValue={p.school} />
-          <Field label="Job-search email" name="job_email" defaultValue={p.job_email} />
-          <Field label="Location preference" name="location" defaultValue={p.location_preference} />
-          <Field label="Work mode" name="work_mode" defaultValue={p.work_mode} />
-          <Field label="Skills (comma-separated)" name="skills" defaultValue={p.skills?.join(", ")} />
-          <Field label="Target roles (comma-separated)" name="target_roles" defaultValue={p.target_roles?.join(", ")} />
-          <label className="flex items-center gap-2 text-sm">
-            <input type="checkbox" name="relocation" defaultChecked={p.relocation} />
-            Open to relocation
-          </label>
-          <Button type="submit">Save profile</Button>
-        </form>
-      </Card>
-    </div>
+    <label className="block text-sm">
+      {label}
+      <input className={input} name={name} type={type} defaultValue={value ?? ""} placeholder={placeholder} />
+    </label>
   );
 }
 
-function Field({ label, name, defaultValue }: { label: string; name: string; defaultValue?: string }) {
+function YesNo({ label, name, value }: { label: string; name: string; value: boolean | null }) {
   return (
-    <div>
-      <label className="mb-1 block text-sm text-[var(--muted)]">{label}</label>
-      <input
-        name={name}
-        defaultValue={defaultValue}
-        className="w-full rounded-lg border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-sm"
-      />
+    <label className="block text-sm">
+      {label}
+      <select className={input} name={name} defaultValue={value == null ? "" : value ? "yes" : "no"}>
+        <option value="">Not set — the agent will ask you</option>
+        <option value="yes">Yes</option>
+        <option value="no">No</option>
+      </select>
+    </label>
+  );
+}
+
+export default async function ProfilePage() {
+  const { supabase, user } = await requireUser();
+  const { data: p } = await supabase.from("profiles").select("*").eq("id", user.id).single();
+  const levels: string[] = p?.job_levels ?? ["internship", "new_grad", "entry"];
+  const locs: string[] = p?.locations ?? ["remote_us", "GA"];
+  const parsed = (p?.resume_parsed ?? {}) as { experience?: unknown[]; projects?: unknown[] };
+
+  return (
+    <div className="max-w-3xl">
+      <PageHeader title="Resume & profile" description="The agent reads your resume to find matching jobs and fill applications truthfully." />
+
+      <Card className="mb-6">
+        <h2 className="mb-1 font-semibold">1. Your resume</h2>
+        <p className="mb-4 text-sm text-[var(--muted)]">
+          Upload a PDF. AI reads it once (free tier) and fills the fields below. For each application the agent reorders your real
+          experience so the most relevant parts come first — it never adds anything that isn’t on your resume.
+        </p>
+        <ResumeUpload hasResume={Boolean(p?.resume_path)} updatedAt={p?.resume_updated_at ?? null} />
+        {p?.resume_path && (
+          <p className="mt-3 text-xs text-[var(--muted)]">
+            Found {parsed.experience?.length ?? 0} jobs and {parsed.projects?.length ?? 0} projects.
+          </p>
+        )}
+      </Card>
+
+      <form action={saveProfile} className="space-y-6">
+        <Card>
+          <h2 className="mb-4 font-semibold">2. Contact details (used on applications)</h2>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field label="First name" name="first_name" value={p?.first_name} />
+            <Field label="Last name" name="last_name" value={p?.last_name} />
+            <Field label="Email for applications" name="job_email" value={p?.job_email ?? user.email} type="email" />
+            <Field label="Phone" name="phone" value={p?.phone} />
+            <Field label="City" name="city" value={p?.city} placeholder="Kennesaw" />
+            <Field label="State" name="state" value={p?.state} placeholder="GA" />
+            <Field label="LinkedIn URL" name="linkedin_url" value={p?.linkedin_url} />
+            <Field label="GitHub URL" name="github_url" value={p?.github_url} />
+            <Field label="Portfolio / website" name="website_url" value={p?.website_url} />
+            <Field label="School" name="school" value={p?.school} />
+            <Field label="Graduation (e.g. May 2027)" name="graduation_date" value={p?.graduation_date} />
+          </div>
+        </Card>
+
+        <Card>
+          <h2 className="mb-1 font-semibold">3. Work eligibility</h2>
+          <p className="mb-4 text-sm text-[var(--muted)]">Applications always ask these. Until you answer, the agent sends those jobs to you instead of guessing.</p>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <YesNo label="Authorized to work in the US?" name="work_authorized_us" value={p?.work_authorized_us ?? null} />
+            <YesNo label="Will you need visa sponsorship?" name="sponsorship_needed" value={p?.sponsorship_needed ?? null} />
+          </div>
+        </Card>
+
+        <Card>
+          <h2 className="mb-4 font-semibold">4. What jobs to look for</h2>
+          <div className="space-y-4">
+            <div className="text-sm">
+              Levels
+              <div className="mt-2 flex flex-wrap gap-4">
+                {[
+                  ["internship", "Internships"],
+                  ["new_grad", "New grad"],
+                  ["entry", "Entry level"],
+                  ["mid", "Mid level"],
+                  ["senior", "Senior"],
+                ].map(([v, l]) => (
+                  <label key={v} className="flex items-center gap-2">
+                    <input type="checkbox" name="job_levels" value={v} defaultChecked={levels.includes(v)} /> {l}
+                  </label>
+                ))}
+              </div>
+            </div>
+            <div className="text-sm">
+              Locations
+              <div className="mt-2 flex flex-wrap gap-4">
+                {[
+                  ["remote_us", "Remote (US)"],
+                  ["GA", "Georgia / Atlanta"],
+                  ["anywhere_us", "Anywhere in the US"],
+                ].map(([v, l]) => (
+                  <label key={v} className="flex items-center gap-2">
+                    <input type="checkbox" name="locations" value={v} defaultChecked={locs.includes(v)} /> {l}
+                  </label>
+                ))}
+                <label className="flex items-center gap-2">
+                  <input type="checkbox" name="relocation" defaultChecked={p?.relocation ?? true} /> Open to relocating for internships/new grad
+                </label>
+              </div>
+            </div>
+            <Field label="Minimum yearly pay for full-time roles (USD)" name="min_salary" value={p?.min_salary ?? 80000} type="number" />
+            <Field label="Target roles (comma separated)" name="target_roles" value={(p?.target_roles ?? []).join(", ")} placeholder="Software Engineer, Data Engineer" />
+            <label className="block text-sm">
+              Skills (comma separated — from your resume, edit freely)
+              <textarea className={input} name="skills" rows={3} defaultValue={(p?.skills ?? []).join(", ")} />
+            </label>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <Field label="Prefer jobs mentioning" name="keywords_include" value={(p?.keywords_include ?? []).join(", ")} placeholder="Python, AWS" />
+              <Field label="Skip jobs mentioning" name="keywords_exclude" value={(p?.keywords_exclude ?? []).join(", ")} placeholder="clearance, PHP" />
+            </div>
+            <Field label="Never apply to these companies" name="excluded_companies" value={(p?.excluded_companies ?? []).join(", ")} />
+          </div>
+        </Card>
+
+        <SubmitButton>Save profile</SubmitButton>
+      </form>
     </div>
   );
 }

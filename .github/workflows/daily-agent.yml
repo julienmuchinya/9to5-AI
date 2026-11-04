@@ -1,4 +1,4 @@
-name: 9to5 AI Daily Agent
+name: 9to5 AI Agent
 
 on:
   schedule:
@@ -6,29 +6,22 @@ on:
     - cron: "17 */3 * * *"
   workflow_dispatch:
     inputs:
-      mode:
-        description: "Agent mode"
-        required: true
-        default: mock
-        type: choice
-        options:
-          - mock
-          - live
-      dry_run:
-        description: "Dry run (no side effects)"
-        required: true
-        default: true
+      discover:
+        description: "Discover new jobs"
         type: boolean
-      scan_email:
-        description: "Scan Gmail job alerts"
-        required: true
         default: true
+      apply:
+        description: "Submit applications for users with auto-submit on"
         type: boolean
-      scan_companies:
-        description: "Scan company career pages"
-        required: true
         default: true
+      apply_dry_run:
+        description: "Fill forms but do NOT submit (testing)"
         type: boolean
+        default: false
+      only_user:
+        description: "Only run for this user id (optional)"
+        type: string
+        default: ""
 
 concurrency:
   group: 9to5-agent
@@ -37,7 +30,7 @@ concurrency:
 jobs:
   run-agent:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
 
@@ -48,95 +41,24 @@ jobs:
 
       - run: npm ci
 
-      - name: Resolve run mode
-        id: mode
-        env:
-          LIVE_ENABLED: ${{ secrets.LIVE_AGENT_ENABLED }}
-          EVENT_NAME: ${{ github.event_name }}
-          INPUT_MODE: ${{ github.event.inputs.mode }}
-          INPUT_DRY_RUN: ${{ github.event.inputs.dry_run }}
-        run: |
-          # Scheduled runs have no inputs: they go live (not dry run) only when
-          # the LIVE_AGENT_ENABLED secret is "true"; otherwise they stay mock.
-          if [ "${EVENT_NAME}" = "schedule" ]; then
-            if [ "${LIVE_ENABLED}" = "true" ]; then
-              echo "effective=live" >> $GITHUB_OUTPUT
-              echo "dry_run=false" >> $GITHUB_OUTPUT
-            else
-              echo "effective=mock" >> $GITHUB_OUTPUT
-              echo "dry_run=true" >> $GITHUB_OUTPUT
-            fi
-          else
-            if [ "${INPUT_MODE}" = "live" ] && [ "${LIVE_ENABLED}" = "true" ]; then
-              echo "effective=live" >> $GITHUB_OUTPUT
-            else
-              echo "effective=mock" >> $GITHUB_OUTPUT
-            fi
-            if [ "${INPUT_DRY_RUN}" = "false" ]; then
-              echo "dry_run=false" >> $GITHUB_OUTPUT
-            else
-              echo "dry_run=true" >> $GITHUB_OUTPUT
-            fi
-          fi
+      - name: Cache Playwright browser
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
 
-      - name: Validate secrets (live only)
-        if: steps.mode.outputs.effective == 'live'
-        env:
-          AGENT_SECRET: ${{ secrets.AGENT_SECRET }}
-          SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
-          SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          AGENT_USER: ${{ secrets.AGENT_USER_ID }}
-        run: |
-          missing=""
-          [ -z "$AGENT_SECRET" ] && missing="$missing AGENT_SECRET"
-          [ -z "$SUPABASE_URL" ] && missing="$missing NEXT_PUBLIC_SUPABASE_URL"
-          [ -z "$SERVICE_KEY" ] && missing="$missing SUPABASE_SERVICE_ROLE_KEY"
-          [ -z "$AGENT_USER" ] && missing="$missing AGENT_USER_ID"
-          if [ -n "$missing" ]; then
-            echo "::error::Missing required secrets for live mode:$missing"
-            exit 1
-          fi
-          echo "Live mode secrets present (values not printed)"
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
 
-      - name: Run 9to5 AI agent (mock — safe default)
-        if: steps.mode.outputs.effective == 'mock'
+      - name: Run agent
         env:
-          MOCK_MODE: "true"
-          NEXT_PUBLIC_MOCK_MODE: "true"
-          AGENT_SECRET: ${{ secrets.AGENT_SECRET }}
-          SCAN_EMAIL: ${{ github.event.inputs.scan_email != 'false' }}
-          SCAN_COMPANIES: ${{ github.event.inputs.scan_companies != 'false' }}
-          DRY_RUN: "true"
-        run: npm run agent:mock
-
-      - name: Run 9to5 AI agent (live)
-        if: steps.mode.outputs.effective == 'live' && steps.mode.outputs.dry_run != 'true'
-        env:
-          MOCK_MODE: "false"
-          NEXT_PUBLIC_MOCK_MODE: "false"
-          LIVE_AGENT_ENABLED: "true"
-          # The live runner only runs in "production"; Actions doesn't set this itself.
-          NODE_ENV: production
-          SCAN_EMAIL: ${{ github.event.inputs.scan_email != 'false' }}
-          SCAN_COMPANIES: ${{ github.event.inputs.scan_companies != 'false' }}
-          GEMINI_MODEL: gemini-2.5-flash
-          NEXT_PUBLIC_APP_URL: https://9to5-ai-julienmuchinyas-projects.vercel.app
-          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
-          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
-          AGENT_SECRET: ${{ secrets.AGENT_SECRET }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GMAIL_REFRESH_TOKEN: ${{ secrets.GMAIL_REFRESH_TOKEN }}
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
-          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          AGENT_USER_ID: ${{ secrets.AGENT_USER_ID }}
-        run: npm run agent
-
-      - name: Live dry run (no agent execution)
-        if: steps.mode.outputs.effective == 'live' && steps.mode.outputs.dry_run == 'true'
-        run: echo "Live dry run — secrets validated, agent not executed"
-
-      - name: Summary
-        run: |
-          echo "9to5 AI daily agent finished"
-          echo "mode=${{ steps.mode.outputs.effective }} dry_run=${{ steps.mode.outputs.dry_run }}"
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: gemini-2.5-flash
+          GITHUB_REPO_PUBLIC: ${{ github.event.repository.private == false }}
+          DISCOVER: ${{ github.event.inputs.discover || 'true' }}
+          APPLY: ${{ github.event.inputs.apply || 'true' }}
+          APPLY_DRY_RUN: ${{ github.event.inputs.apply_dry_run || 'false' }}
+          ONLY_USER: ${{ github.event.inputs.only_user }}
+        run: npx tsx agent/v2/run.ts
