@@ -96,8 +96,43 @@ export async function markApplied(appId: string) {
   const { supabase, user } = await requireUser();
   await supabase
     .from("applications")
-    .update({ status: "submitted", submitted_at: new Date().toISOString(), error: null, requested_by: "user" })
+    .update({ status: "submitted", submitted_at: new Date().toISOString(), status_updated_at: new Date().toISOString(), error: null, requested_by: "user" })
     .eq("id", appId)
     .eq("user_id", user.id);
+  await supabase.from("application_events").insert({ user_id: user.id, application_id: appId, kind: "submitted", source: "user", detail: "You applied yourself" });
   revalidatePath("/applications");
+}
+
+const TRACK_STATUSES = ["submitted", "received", "under_review", "interview", "offer", "rejected", "withdrawn"];
+
+/** Manual status change from the Applications page (e.g. a recruiter called you). */
+export async function setApplicationStatus(appId: string, form: FormData) {
+  const { supabase, user } = await requireUser();
+  const status = String(form.get("status") ?? "");
+  if (!TRACK_STATUSES.includes(status)) return;
+  const note = text(form.get("note"));
+  await supabase.from("applications").update({ status, status_updated_at: new Date().toISOString() }).eq("id", appId).eq("user_id", user.id);
+  await supabase.from("application_events").insert({ user_id: user.id, application_id: appId, kind: status, source: "user", detail: note });
+  revalidatePath("/applications");
+}
+
+/** Connect an inbox (Gmail app password) so the agent can track replies. */
+export async function saveInbox(form: FormData) {
+  const { supabase, user } = await requireUser();
+  const { encryptSecret } = await import("@/lib/v2/vault");
+  const email = text(form.get("inbox_email"));
+  const pass = String(form.get("inbox_password") ?? "").replace(/\s+/g, "");
+  const host = text(form.get("inbox_host")) ?? "imap.gmail.com";
+  if (!email || !pass) throw new Error("Enter the email and its app password.");
+  await supabase
+    .from("profiles")
+    .update({ inbox_email: email, inbox_host: host, inbox_password_enc: encryptSecret(pass), inbox_error: null })
+    .eq("id", user.id);
+  revalidatePath("/settings");
+}
+
+export async function disconnectInbox() {
+  const { supabase, user } = await requireUser();
+  await supabase.from("profiles").update({ inbox_email: null, inbox_password_enc: null, inbox_error: null }).eq("id", user.id);
+  revalidatePath("/settings");
 }

@@ -13,6 +13,7 @@ KEYS=(
   AGENT_SECRET
   GEMINI_API_KEY
   GMAIL_REFRESH_TOKEN
+  VAULT_KEY
 )
 
 for k in "${KEYS[@]}"; do

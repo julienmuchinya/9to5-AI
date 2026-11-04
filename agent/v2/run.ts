@@ -23,6 +23,9 @@ import { matchPosting, type MatchProfile } from "../../src/lib/v2/match";
 import { bumpUsage, freeTierSnapshot, checkGemini, today } from "../../src/lib/v2/freeTier";
 import { renderResumePdf, tailorResume, resumeToText, type ParsedResume } from "../../src/lib/v2/resume";
 import { applyToJob, type Applicant } from "./apply";
+import { scanInbox } from "./inbox";
+import { resumeFocus } from "../../src/lib/v2/tracking";
+import { encryptSecret, generatePortalPassword } from "../../src/lib/v2/vault";
 
 const startedAt = Date.now();
 const env = (k: string, d = "") => process.env[k] ?? d;
@@ -33,6 +36,61 @@ function db(): SupabaseClient {
   const key = env("SUPABASE_SERVICE_ROLE_KEY");
   if (!url || !key) throw new Error("NEXT_PUBLIC_SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required");
   return createClient(url, key, { auth: { persistSession: false } });
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const hostOf = (u: string) => {
+  try {
+    return new URL(u).hostname.toLowerCase();
+  } catch {
+    return "";
+  }
+};
+/** "job-boards.greenhouse.io/acme" — one company's board, so a CAPTCHA at one company doesn't pause the rest. */
+const siteKey = (u: string) => {
+  try {
+    const x = new URL(u);
+    return `${x.hostname.toLowerCase()}/${x.pathname.split("/").filter(Boolean)[0] ?? ""}`;
+  } catch {
+    return "";
+  }
+};
+// Career sites that make you create an account before applying.
+const ACCOUNT_SITES = /(myworkdayjobs\.com|myworkdaysite\.com|icims\.com|taleo\.net|successfactors\.(com|eu)|oraclecloud\.com|brassring\.com|ultipro\.com|ukg\.net|jobvite\.com|avature\.net|phenompeople\.com|eightfold\.ai)/i;
+
+// ── Anti-ban pacing (all tunable by env) ──────────────────────────────────
+const PACE_MIN_S = Number(env("PACE_MIN_S", "40"));
+const PACE_MAX_S = Number(env("PACE_MAX_S", "90"));
+const ATS_DAILY_CAP = Number(env("ATS_DAILY_CAP", "25")); // per ATS host, all users combined
+const COMPANY_GAP_DAYS = Number(env("COMPANY_GAP_DAYS", "14")); // agent applies to a company at most once per N days
+
+async function activeCooldowns(sb: SupabaseClient): Promise<Map<string, string>> {
+  const { data } = await sb.from("site_cooldowns").select("host,reason").gt("until", new Date().toISOString());
+  return new Map((data ?? []).map((r) => [r.host as string, (r.reason as string) ?? ""]));
+}
+async function coolDown(sb: SupabaseClient, key: string, hours: number, reason: string) {
+  if (!key) return;
+  await sb.from("site_cooldowns").upsert({ host: key, until: new Date(Date.now() + hours * 3600_000).toISOString(), reason, updated_at: new Date().toISOString() });
+  log(`cooldown ${key} for ${hours}h: ${reason}`);
+}
+
+/** Makes sure there's one saved login per company portal, so every job there reuses it. */
+async function ensurePortalLogin(sb: SupabaseClient, userId: string, email: string, company: string, url: string) {
+  const host = hostOf(url);
+  if (!host) return;
+  const { data } = await sb.from("application_accounts").select("id").eq("user_id", userId).eq("portal_host", host).maybeSingle();
+  if (data) return;
+  await sb.from("application_accounts").insert({
+    user_id: userId,
+    company_name: company,
+    portal_host: host,
+    portal_name: host,
+    login_url: `https://${host}`,
+    email_used: email,
+    password_enc: encryptSecret(generatePortalPassword()),
+    created_by: "agent",
+    account_created: false,
+  });
 }
 
 const chunk = <T,>(a: T[], n: number) => Array.from({ length: Math.ceil(a.length / n) }, (_, i) => a.slice(i * n, i * n + n));
@@ -264,6 +322,24 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
   const companiesApplied = new Set<string>();
   for (const j of (best ?? []) as unknown as JobRow[]) if (!taken.has(j.id)) queue.push({ job: j });
 
+  // Pacing data: cooldowns, companies applied to recently, and today's per-site volume (all users).
+  const cooldowns = await activeCooldowns(sb);
+  const { data: recentApps } = await sb
+    .from("applications")
+    .select("jobs(company_name)")
+    .eq("user_id", u.id)
+    .in("status", ["submitted", "received", "under_review", "interview", "offer", "rejected"])
+    .gte("submitted_at", new Date(Date.now() - COMPANY_GAP_DAYS * 86400_000).toISOString());
+  for (const a of (recentApps ?? []) as unknown as { jobs: { company_name: string } | null }[])
+    if (a.jobs?.company_name) companiesApplied.add(a.jobs.company_name.toLowerCase());
+  const { data: todayAll } = await sb.from("applications").select("apply_url").eq("status", "submitted").gte("submitted_at", `${today()}T00:00:00Z`);
+  const hostCount: Record<string, number> = {};
+  for (const a of todayAll ?? []) {
+    const h = hostOf(a.apply_url ?? "");
+    hostCount[h] = (hostCount[h] ?? 0) + 1;
+  }
+  let submittedThisRun = 0;
+
   const dir = mkdtempSync(join(tmpdir(), "9to5-"));
   let original: string | null = null;
   if (u.resume_path) {
@@ -297,10 +373,31 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
     const p = job.job_postings;
     const auto = canAutoSubmit({ ats: p.ats, verification_status: p.verification_status, apply_url: p.apply_url, url: p.url });
     const base = { user_id: u.id, job_id: job.id, posting_id: job.posting_id, apply_url: p.apply_url || p.url, ats: p.ats, fit_score: undefined as number | undefined };
+    const applyUrl = p.apply_url || p.url;
     if (!auto) {
-      await sb.from("applications").upsert({ ...base, status: "needs_user", error: "Not an auto-submit site or not fully verified — apply yourself" }, { onConflict: "user_id,job_id" });
+      const needsAccount = ACCOUNT_SITES.test(applyUrl);
+      if (needsAccount) await ensurePortalLogin(sb, u.id, email, job.company_name, applyUrl);
+      const why = needsAccount
+        ? "This site needs an account. Your login for it is ready under Portal logins — create the account, then apply."
+        : "Not an auto-submit site or not fully verified — apply yourself";
+      await sb.from("applications").upsert({ ...base, status: "needs_user", error: why }, { onConflict: "user_id,job_id" });
       result.needs_user = (result.needs_user ?? 0) + 1;
       continue;
+    }
+    const key = siteKey(applyUrl);
+    const host = hostOf(applyUrl);
+    if (cooldowns.has(key) || cooldowns.has(host)) {
+      result.cooling_down = (result.cooling_down ?? 0) + 1;
+      continue; // retried after the cooldown ends
+    }
+    if ((hostCount[host] ?? 0) >= ATS_DAILY_CAP) {
+      result.site_daily_cap = (result.site_daily_cap ?? 0) + 1;
+      continue;
+    }
+    const dryRun = env("APPLY_DRY_RUN") === "true";
+    if (submittedThisRun > 0 && !dryRun) {
+      // Human pace between submissions instead of bursts.
+      await sleep((PACE_MIN_S + Math.random() * Math.max(0, PACE_MAX_S - PACE_MIN_S)) * 1000);
     }
     const budget = await checkGemini(sb);
     if (!budget.allowed) {
@@ -310,8 +407,11 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
     }
 
     let resumePath = original;
+    let focus: string | null = null;
     if (u.resume_parsed?.experience?.length) {
-      const pdf = await renderResumePdf(tailorResume(u.resume_parsed, `${job.title}\n${p.description ?? ""}`));
+      const tailored = tailorResume(u.resume_parsed, `${job.title}\n${p.description ?? ""}`);
+      focus = resumeFocus(tailored.skills);
+      const pdf = await renderResumePdf(tailored);
       resumePath = join(dir, `${(applicant.first_name + "_" + applicant.last_name).replace(/[^a-z0-9_]/gi, "")}_Resume.pdf`);
       writeFileSync(resumePath, pdf);
     }
@@ -325,7 +425,7 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
       jobTitle: job.title,
       company: job.company_name,
       userId: u.id,
-      dryRun: env("APPLY_DRY_RUN") === "true",
+      dryRun,
     });
     log(`apply ${u.id.slice(0, 8)} → ${job.company_name} / ${job.title}: ${r.status} (${r.detail})`);
     const status = r.status === "closed" ? "closed" : r.status;
@@ -337,12 +437,25 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
         answers: r.answers ?? {},
         submitted_at: r.status === "submitted" ? new Date().toISOString() : null,
         requested_by: appId ? "user" : "agent",
+        resume_focus: focus,
+        status_updated_at: new Date().toISOString(),
       },
       { onConflict: "user_id,job_id" }
     );
+    // Back off from sites that push back, instead of retrying through them.
+    if (/captcha/i.test(r.detail)) await coolDown(sb, key, 24, "CAPTCHA shown");
+    else if (/\b(429|403)\b|too many|rate limit|blocked|access denied/i.test(r.detail)) {
+      await coolDown(sb, key, 24, r.detail.slice(0, 120));
+      await coolDown(sb, host, 6, "rate limited");
+    }
     result[status] = (result[status] ?? 0) + 1;
     if (r.status === "submitted") {
       remaining--;
+      submittedThisRun++;
+      hostCount[host] = (hostCount[host] ?? 0) + 1;
+      const { data: appRow } = await sb.from("applications").select("id").eq("user_id", u.id).eq("job_id", job.id).maybeSingle();
+      if (appRow)
+        await sb.from("application_events").insert({ user_id: u.id, application_id: appRow.id, kind: "submitted", source: "agent", detail: focus ? `Resume led with ${focus}` : null });
       companiesApplied.add(company);
       await bumpUsage(sb, "applications_submitted", 1);
       await bumpUsage(sb, "applications_submitted", 1, u.id);
@@ -385,6 +498,7 @@ async function main() {
         }
         summary.applications = await applyForUser(sb, u, s, browser);
       }
+      if (env("INBOX", "true") !== "false") summary.inbox = await scanInbox(sb, u as never, (m) => log(m));
       await sb.from("agent_runs").update({ status: "completed", ended_at: new Date().toISOString(), summary }).eq("id", run?.id);
       await sb.from("agent_logs").insert({ user_id: u.id, run_id: run?.id, level: "info", message: "Agent run completed", metadata: summary });
       log(`user ${u.id.slice(0, 8)}:`, JSON.stringify(summary));

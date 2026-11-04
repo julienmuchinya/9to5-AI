@@ -11,9 +11,11 @@ const NAV = [
   { href: "/chat", label: "Chat with agent" },
   { href: "/jobs", label: "Matched jobs" },
   { href: "/applications", label: "Applications" },
+  { href: "/accounts", label: "Portal logins" },
   { href: "/profile", label: "Resume & profile" },
-  { href: "/settings", label: "Autopilot" },
+  { href: "/settings", label: "Autopilot & inbox" },
   { href: "/usage", label: "Free-tier usage" },
+  { href: "/account", label: "Account & security" },
 ];
 
 export function Sidebar({ email }: { email: string }) {

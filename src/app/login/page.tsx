@@ -2,13 +2,17 @@
 
 import { useState } from "react";
 import { createClient } from "@/lib/supabase/client";
+import Link from "next/link";
 import { APP_NAME } from "@/lib/constants";
+import { SecurityQuestionsFields, type QA } from "@/components/security-questions";
+import { saveSecurityQuestions } from "../auth-actions";
 
 export default function LoginPage() {
   const [mode, setMode] = useState<"signin" | "signup">("signin");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [name, setName] = useState("");
+  const [qa, setQa] = useState<QA>({ q: ["", "", ""], a: ["", "", ""] });
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ kind: "error" | "info"; text: string } | null>(null);
 
@@ -25,6 +29,10 @@ export default function LoginPage() {
           options: { data: { full_name: name }, emailRedirectTo: `${window.location.origin}/dashboard` },
         });
         if (error) throw error;
+        if (data.session) {
+          const r = await saveSecurityQuestions(qa);
+          if (!r.ok) throw new Error(`Account created, but security questions were not saved: ${r.message}. You can set them on the Account page.`);
+        }
         if (!data.session) {
           setMsg({ kind: "info", text: "Account created. Check your email to confirm it, then sign in." });
           setMode("signin");
@@ -73,6 +81,18 @@ export default function LoginPage() {
             autoComplete={mode === "signin" ? "current-password" : "new-password"}
           />
         </label>
+        {mode === "signin" && (
+          <Link href="/forgot" className="-mt-2 mb-4 block text-right text-xs text-[var(--muted)] hover:text-[var(--foreground)]">
+            Forgot password?
+          </Link>
+        )}
+        {mode === "signup" && (
+          <div className="mb-4">
+            <p className="mb-2 text-sm font-medium">Security questions</p>
+            <p className="mb-3 text-xs text-[var(--muted)]">If you forget your password, answering all three lets you reset it.</p>
+            <SecurityQuestionsFields value={qa} onChange={setQa} />
+          </div>
+        )}
         {msg && (
           <p className={`mb-4 text-sm ${msg.kind === "error" ? "text-red-400" : "text-emerald-400"}`}>{msg.text}</p>
         )}

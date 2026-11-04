@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { requireUser } from "@/lib/v2/session";
+import { hasSecurityQuestions } from "../auth-actions";
 import { Badge, Button, Card, PageHeader, StatCard } from "@/components/ui";
 
 export const dynamic = "force-dynamic";
@@ -22,7 +23,9 @@ export default async function DashboardPage() {
   const by: Record<string, number> = {};
   for (const a of apps ?? []) by[a.status] = (by[a.status] ?? 0) + 1;
 
+  const hasQ = await hasSecurityQuestions();
   const steps = [
+    { done: hasQ, label: "Set 3 security questions (password recovery)", href: "/account" },
     { done: Boolean(p?.resume_path), label: "Upload your resume", href: "/profile" },
     { done: Boolean(p?.first_name && p?.phone), label: "Add your contact details", href: "/profile" },
     { done: p?.work_authorized_us != null && p?.sponsorship_needed != null, label: "Answer work authorization & sponsorship", href: "/profile" },

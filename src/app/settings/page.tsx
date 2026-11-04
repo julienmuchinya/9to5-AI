@@ -1,7 +1,7 @@
 import { requireUser } from "@/lib/v2/session";
 import { Card, PageHeader } from "@/components/ui";
 import { SubmitButton } from "@/components/submit-button";
-import { saveAutopilot } from "../actions";
+import { disconnectInbox, saveAutopilot, saveInbox } from "../actions";
 
 export const dynamic = "force-dynamic";
 
@@ -10,7 +10,7 @@ const input = "mt-1 w-32 rounded-lg border border-[var(--border)] bg-[var(--back
 export default async function SettingsPage() {
   const { supabase, user } = await requireUser();
   const { data: s } = await supabase.from("autopilot_settings").select("*").eq("user_id", user.id).single();
-  const { data: p } = await supabase.from("profiles").select("resume_path,work_authorized_us,sponsorship_needed,phone,first_name,last_name").eq("id", user.id).single();
+  const { data: p } = await supabase.from("profiles").select("resume_path,work_authorized_us,sponsorship_needed,phone,first_name,last_name,inbox_email,inbox_last_scan_at,inbox_error").eq("id", user.id).single();
   const missing = [
     !p?.resume_path && "upload your resume",
     (!p?.first_name || !p?.last_name) && "add your first and last name",
@@ -21,7 +21,7 @@ export default async function SettingsPage() {
 
   return (
     <div className="max-w-2xl">
-      <PageHeader title="Autopilot" description="Control what the agent does on its own." />
+      <PageHeader title="Autopilot & inbox" description="Control what the agent does on its own." />
       <form action={saveAutopilot} className="space-y-6">
         <Card>
           <label className="flex items-start gap-3">
@@ -66,6 +66,48 @@ export default async function SettingsPage() {
         </Card>
         <SubmitButton>Save autopilot settings</SubmitButton>
       </form>
+
+      <Card className="mt-8">
+        <h2 className="mb-1 font-semibold">Track replies from your inbox (free)</h2>
+        <p className="mb-4 text-sm text-[var(--muted)]">
+          Every run, the agent reads recent emails (read-only) and moves applications to “Under consideration”, “Interview”, “Offer” or
+          “Rejected”. It never sends, deletes or marks mail as read. Uses a Gmail <b>app password</b>, not your real password.
+        </p>
+        {p?.inbox_email ? (
+          <div className="space-y-2 text-sm">
+            <p>
+              Connected: <b>{p.inbox_email}</b>
+              {p.inbox_last_scan_at ? ` · last checked ${new Date(p.inbox_last_scan_at).toLocaleString()}` : " · not checked yet (next agent run)"}
+            </p>
+            {p.inbox_error && <p className="rounded-lg bg-red-900/30 p-2 text-red-300">{p.inbox_error}</p>}
+            <form action={disconnectInbox}>
+              <button className="rounded-lg bg-[var(--border)] px-3 py-1.5 text-sm">Disconnect inbox</button>
+            </form>
+          </div>
+        ) : (
+          <form action={saveInbox} className="space-y-3">
+            <ol className="list-decimal space-y-1 pl-5 text-sm text-[var(--muted)]">
+              <li>Turn on 2-Step Verification for your Google account (myaccount.google.com → Security).</li>
+              <li>
+                Open <b>myaccount.google.com/apppasswords</b>, type the name “9to5 AI”, click Create, and copy the 16-letter password.
+              </li>
+              <li>Paste it below. You can revoke it there at any time.</li>
+            </ol>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className="block text-sm">
+                Gmail address
+                <input className={`${input} w-full`} type="email" name="inbox_email" defaultValue={user.email ?? ""} required />
+              </label>
+              <label className="block text-sm">
+                App password
+                <input className={`${input} w-full`} type="password" name="inbox_password" autoComplete="off" required />
+              </label>
+            </div>
+            <input type="hidden" name="inbox_host" value="imap.gmail.com" />
+            <SubmitButton>Connect inbox</SubmitButton>
+          </form>
+        )}
+      </Card>
     </div>
   );
 }
