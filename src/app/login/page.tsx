@@ -1,11 +1,31 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import Link from "next/link";
 import { APP_NAME } from "@/lib/constants";
 import { SecurityQuestionsFields, type QA } from "@/components/security-questions";
 import { saveSecurityQuestions } from "../auth-actions";
+import { friendlyAuthError, safeNext } from "@/lib/site";
+
+const PENDING_QA = "9to5:pending-security-questions";
+
+function readPending(): QA | null {
+  try {
+    const raw = localStorage.getItem(PENDING_QA);
+    return raw ? (JSON.parse(raw) as QA) : null;
+  } catch {
+    return null;
+  }
+}
+function writePending(qa: QA | null) {
+  try {
+    if (qa) localStorage.setItem(PENDING_QA, JSON.stringify(qa));
+    else localStorage.removeItem(PENDING_QA);
+  } catch {
+    /* private window — the dashboard will remind them instead */
+  }
+}
 
 export default function LoginPage() {
   const [mode, setMode] = useState<"signin" | "signup">("signin");
@@ -15,36 +35,77 @@ export default function LoginPage() {
   const [qa, setQa] = useState<QA>({ q: ["", "", ""], a: ["", "", ""] });
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ kind: "error" | "info"; text: string } | null>(null);
+  const [canResend, setCanResend] = useState(false);
+  const [next, setNext] = useState("/dashboard");
+
+  useEffect(() => {
+    const p = new URLSearchParams(window.location.search);
+    setNext(safeNext(p.get("next")));
+    const err = p.get("error");
+    if (err) setMsg({ kind: "error", text: err });
+    if (p.get("confirmed")) setMsg({ kind: "info", text: "Email confirmed — sign in below." });
+  }, []);
+
+  async function afterSignIn() {
+    const pending = readPending();
+    if (pending) {
+      const r = await saveSecurityQuestions(pending);
+      if (r.ok) writePending(null);
+    }
+    window.location.href = next;
+  }
+
+  async function resend() {
+    setBusy(true);
+    const { error } = await createClient().auth.resend({
+      type: "signup",
+      email,
+      options: { emailRedirectTo: `${window.location.origin}/auth/callback?type=signup` },
+    });
+    setBusy(false);
+    setMsg(error ? { kind: "error", text: friendlyAuthError(error.message, error.code) } : { kind: "info", text: "Sent. Check your inbox and spam folder." });
+  }
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setBusy(true);
     setMsg(null);
+    setCanResend(false);
     const supabase = createClient();
     try {
       if (mode === "signup") {
         const { data, error } = await supabase.auth.signUp({
           email,
           password,
-          options: { data: { full_name: name }, emailRedirectTo: `${window.location.origin}/dashboard` },
+          options: { data: { full_name: name }, emailRedirectTo: `${window.location.origin}/auth/callback?type=signup` },
         });
         if (error) throw error;
-        if (data.session) {
-          const r = await saveSecurityQuestions(qa);
-          if (!r.ok) throw new Error(`Account created, but security questions were not saved: ${r.message}. You can set them on the Account page.`);
-        }
-        if (!data.session) {
-          setMsg({ kind: "info", text: "Account created. Check your email to confirm it, then sign in." });
+        // Supabase hides "already registered" by returning a user with no identities.
+        if (data.user && (data.user.identities?.length ?? 0) === 0) {
           setMode("signin");
+          setMsg({ kind: "error", text: "That email already has an account. Sign in, or use “Forgot password?”." });
           return;
         }
-      } else {
-        const { error } = await supabase.auth.signInWithPassword({ email, password });
-        if (error) throw error;
+        if (data.session) {
+          const r = await saveSecurityQuestions(qa);
+          if (!r.ok) writePending(qa);
+          return afterSignIn();
+        }
+        writePending(qa); // saved automatically the first time they sign in
+        setMode("signin");
+        setCanResend(true);
+        setMsg({ kind: "info", text: `Account created. We emailed a confirmation link to ${email} — click it, then sign in. Check spam if you don’t see it.` });
+        return;
       }
-      window.location.href = "/dashboard";
+      const { error } = await supabase.auth.signInWithPassword({ email, password });
+      if (error) {
+        if (/not confirmed/i.test(error.message)) setCanResend(true);
+        throw error;
+      }
+      await afterSignIn();
     } catch (err) {
-      setMsg({ kind: "error", text: (err as Error).message });
+      const e2 = err as { message?: string; code?: string };
+      setMsg({ kind: "error", text: friendlyAuthError(e2.message, e2.code) });
     } finally {
       setBusy(false);
     }
@@ -67,7 +128,7 @@ export default function LoginPage() {
         )}
         <label className="mb-3 block text-sm">
           Email
-          <input className={`${input} mt-1`} type="email" value={email} onChange={(e) => setEmail(e.target.value)} required autoComplete="email" />
+          <input className={`${input} mt-1`} type="email" value={email} onChange={(e) => setEmail(e.target.value.trim())} required autoComplete="email" />
         </label>
         <label className="mb-4 block text-sm">
           Password
@@ -80,6 +141,7 @@ export default function LoginPage() {
             required
             autoComplete={mode === "signin" ? "current-password" : "new-password"}
           />
+          {mode === "signup" && <span className="mt-1 block text-xs text-[var(--muted)]">8+ characters with letters and numbers.</span>}
         </label>
         {mode === "signin" && (
           <Link href="/forgot" className="-mt-2 mb-4 block text-right text-xs text-[var(--muted)] hover:text-[var(--foreground)]">
@@ -94,7 +156,14 @@ export default function LoginPage() {
           </div>
         )}
         {msg && (
-          <p className={`mb-4 text-sm ${msg.kind === "error" ? "text-red-400" : "text-emerald-400"}`}>{msg.text}</p>
+          <p role="status" className={`mb-4 text-sm ${msg.kind === "error" ? "text-red-400" : "text-emerald-400"}`}>
+            {msg.text}
+          </p>
+        )}
+        {canResend && email && (
+          <button type="button" onClick={resend} disabled={busy} className="mb-4 w-full rounded-lg bg-[var(--border)] px-4 py-2 text-sm disabled:opacity-50">
+            Resend confirmation email
+          </button>
         )}
         <button
           disabled={busy}
@@ -107,6 +176,7 @@ export default function LoginPage() {
           onClick={() => {
             setMode(mode === "signin" ? "signup" : "signin");
             setMsg(null);
+            setCanResend(false);
           }}
           className="mt-4 w-full text-center text-sm text-[var(--muted)] hover:text-[var(--foreground)]"
         >

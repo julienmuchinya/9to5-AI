@@ -3,6 +3,7 @@
 import { headers } from "next/headers";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
 import { serviceClient } from "@/lib/v2/session";
+import { friendlyAuthError, siteOrigin } from "@/lib/site";
 import { SECURITY_QUESTIONS, checkAnswer, decoyQuestions, hashAnswer } from "@/lib/v2/vault";
 
 type Result = { ok: boolean; message: string };
@@ -97,12 +98,10 @@ export async function sendResetEmail(email: string): Promise<Result> {
   const e = emailLc(email);
   if ((await failuresToday(e)) >= MAX_FAILURES_PER_DAY) return { ok: false, message: "Too many tries. Try again in 24 hours." };
   const h = await headers();
-  const origin = h.get("origin") ?? `https://${h.get("host")}`;
+  const origin = siteOrigin(h);
   const supabase = await createServerSupabaseClient();
-  const { error } = await supabase.auth.resetPasswordForEmail(e, { redirectTo: `${origin}/auth/reset` });
-  if (error && /rate|limit|seconds/i.test(error.message))
-    return { ok: false, message: "The free email service is busy (it sends only a few emails per hour). Try again later or use your security questions." };
-  if (error) return { ok: false, message: `Couldn't send the email: ${error.message}` };
+  const { error } = await supabase.auth.resetPasswordForEmail(e, { redirectTo: `${origin}/auth/callback?type=recovery` });
+  if (error) return { ok: false, message: `${friendlyAuthError(error.message, error.code)} You can also use your security questions.` };
   // Same message whether or not the account exists.
   return {
     ok: true,
@@ -119,7 +118,7 @@ export async function resetWithCode(email: string, code: string, newPassword: st
   const { error } = await supabase.auth.verifyOtp({ email: e, token: code.trim(), type: "recovery" });
   if (error) {
     await logAttempt(e, "email", false);
-    return { ok: false, message: "That code is wrong or expired. Codes last 1 hour." };
+    return { ok: false, message: "That code is wrong or expired. Codes last 1 hour and only the newest code works." };
   }
   const { error: upErr } = await supabase.auth.updateUser({ password: newPassword });
   if (upErr) return { ok: false, message: upErr.message };

@@ -5,8 +5,9 @@ import { Badge, Button, Card, PageHeader, StatCard } from "@/components/ui";
 
 export const dynamic = "force-dynamic";
 
-export default async function DashboardPage() {
+export default async function DashboardPage({ searchParams }: { searchParams: Promise<{ welcome?: string }> }) {
   const { supabase, user } = await requireUser();
+  const { welcome } = await searchParams;
   const [{ data: p }, { data: s }, { count: matched }, { count: verified }, { data: apps }, { data: runs }] = await Promise.all([
     supabase.from("profiles").select("first_name,resume_path,phone,work_authorized_us,sponsorship_needed").eq("id", user.id).single(),
     supabase.from("autopilot_settings").select("auto_submit_enabled,paused,daily_apply_cap").eq("user_id", user.id).single(),
@@ -40,6 +41,10 @@ export default async function DashboardPage() {
         description="Your agent finds STEM jobs that fit your resume, checks the employer is real, and applies for you."
         action={<Button href="/chat">Chat with agent</Button>}
       />
+
+      {welcome && (
+        <p className="mb-6 rounded-lg bg-emerald-900/30 p-3 text-sm text-emerald-300">Your email is confirmed and you’re signed in. Follow the steps below to get your agent working.</p>
+      )}
 
       {steps.some((x) => !x.done) && (
         <Card className="mb-6">

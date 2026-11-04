@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { APP_NAME } from "@/lib/constants";
 import { inputCls } from "@/components/security-questions";
@@ -18,7 +18,11 @@ export default function ForgotPage() {
   const [pw2, setPw2] = useState("");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; message: string } | null>(null);
-  const expired = typeof window !== "undefined" && new URLSearchParams(window.location.search).has("expired");
+  const [expired, setExpired] = useState<string | null>(null);
+  useEffect(() => {
+    const p = new URLSearchParams(window.location.search);
+    if (p.has("expired")) setExpired(p.get("error") || "That reset link expired or was already used. Start again below.");
+  }, []);
 
   async function run(fn: () => Promise<void>) {
     setBusy(true);
@@ -54,7 +58,7 @@ export default function ForgotPage() {
           <h1 className="text-xl font-bold text-[var(--accent)]">{APP_NAME}</h1>
           <p className="mt-1 text-sm text-[var(--muted)]">Reset your password</p>
         </div>
-        {expired && step === "email" && <p className="text-sm text-amber-300">That reset link expired or was already used. Start again below.</p>}
+        {expired && step === "email" && <p className="text-sm text-amber-300">{expired}</p>}
 
         {step === "email" && (
           <form
@@ -66,7 +70,8 @@ export default function ForgotPage() {
           >
             <label className="block text-sm">
               Your account email
-              <input className={`${inputCls} mt-1`} type="email" value={email} onChange={(e) => setEmail(e.target.value)} required autoComplete="email" />
+              <input className={`${inputCls} mt-1`} type="email" value={email} onChange={(e) => setEmail(e.target.value.trim())} required autoComplete="email" />
+              <span className="mt-1 block text-xs text-[var(--muted)]">Use the exact email you signed up with.</span>
             </label>
             <button className={btn}>Continue</button>
           </form>
@@ -153,7 +158,13 @@ export default function ForgotPage() {
               });
             }}
           >
-            <p className="text-xs text-[var(--muted)]">You can also just click the link in the email instead of typing the code.</p>
+            <p className="text-xs text-[var(--muted)]">
+              Sent to <b>{email}</b>. Click the link in the email, or type the code here (if the email shows one). Nothing after 5 minutes? Check spam, or{" "}
+              <button type="button" className="underline" onClick={() => setStep("choose")}>
+                go back
+              </button>
+              .
+            </p>
             <label className="block text-sm">
               6-digit code from the email
               <input className={`${inputCls} mt-1 tracking-widest`} inputMode="numeric" value={code} onChange={(e) => setCode(e.target.value)} required autoComplete="one-time-code" />

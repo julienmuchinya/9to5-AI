@@ -48,7 +48,11 @@ export default function ChatPage() {
     setBusy(true);
     try {
       const res = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: t }) });
-      const d = await res.json();
+      if (res.status === 401) {
+        window.location.href = "/login?next=/chat&error=" + encodeURIComponent("Your session expired. Sign in again to keep chatting.");
+        return;
+      }
+      const d = await res.json().catch(() => ({ error: `The server had a problem (${res.status}). Try again in a minute.` }));
       setMessages((m) => [...m, { role: "assistant", content: d.reply ?? d.error ?? "No reply", actions: d.actions }]);
     } catch (e) {
       setMessages((m) => [...m, { role: "assistant", content: `Network error: ${(e as Error).message}` }]);
