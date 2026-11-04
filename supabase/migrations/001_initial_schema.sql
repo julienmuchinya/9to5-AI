@@ -1,5 +1,5 @@
 -- 9to5 AI initial schema
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+-- Using gen_random_uuid() which is built-in to PostgreSQL 13+
 
 -- profiles
 CREATE TABLE profiles (
@@ -21,7 +21,7 @@ CREATE TABLE profiles (
 );
 
 CREATE TABLE companies (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   name TEXT NOT NULL,
   domain TEXT,
@@ -34,7 +34,7 @@ CREATE TABLE companies (
 );
 
 CREATE TABLE jobs (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   company_id UUID REFERENCES companies(id) ON DELETE SET NULL,
   title TEXT NOT NULL,
@@ -52,7 +52,7 @@ CREATE TABLE jobs (
 );
 
 CREATE TABLE applications (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   job_id UUID NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
   status TEXT DEFAULT 'pending',
@@ -69,7 +69,7 @@ CREATE TABLE applications (
 );
 
 CREATE TABLE application_accounts (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   application_id UUID REFERENCES applications(id) ON DELETE CASCADE,
   portal_name TEXT,
@@ -83,7 +83,7 @@ CREATE TABLE application_accounts (
 );
 
 CREATE TABLE password_access_logs (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   application_account_id UUID REFERENCES application_accounts(id) ON DELETE CASCADE,
   action TEXT NOT NULL,
@@ -92,7 +92,7 @@ CREATE TABLE password_access_logs (
 );
 
 CREATE TABLE resume_templates (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   name TEXT NOT NULL,
   slug TEXT NOT NULL,
@@ -106,7 +106,7 @@ CREATE TABLE resume_templates (
 );
 
 CREATE TABLE resume_versions (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   job_id UUID REFERENCES jobs(id) ON DELETE SET NULL,
   application_id UUID REFERENCES applications(id) ON DELETE SET NULL,
@@ -124,7 +124,7 @@ CREATE TABLE resume_versions (
 );
 
 CREATE TABLE cover_letter_templates (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   name TEXT NOT NULL,
   slug TEXT NOT NULL,
@@ -136,7 +136,7 @@ CREATE TABLE cover_letter_templates (
 );
 
 CREATE TABLE cover_letters (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   job_id UUID REFERENCES jobs(id) ON DELETE SET NULL,
   application_id UUID REFERENCES applications(id) ON DELETE SET NULL,
@@ -149,7 +149,7 @@ CREATE TABLE cover_letters (
 );
 
 CREATE TABLE application_answers (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   application_id UUID NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
   question TEXT NOT NULL,
@@ -159,7 +159,7 @@ CREATE TABLE application_answers (
 );
 
 CREATE TABLE application_submissions (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   application_id UUID NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
   channel TEXT,
@@ -172,7 +172,7 @@ CREATE TABLE application_submissions (
 );
 
 CREATE TABLE outreach_contacts (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   name TEXT,
   email TEXT NOT NULL,
@@ -184,7 +184,7 @@ CREATE TABLE outreach_contacts (
 );
 
 CREATE TABLE outreach_messages (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   contact_id UUID REFERENCES outreach_contacts(id) ON DELETE SET NULL,
   application_id UUID REFERENCES applications(id) ON DELETE SET NULL,
@@ -198,7 +198,7 @@ CREATE TABLE outreach_messages (
 );
 
 CREATE TABLE followups (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   application_id UUID NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
   scheduled_at TIMESTAMPTZ NOT NULL,
@@ -209,7 +209,7 @@ CREATE TABLE followups (
 );
 
 CREATE TABLE scam_checks (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   job_id UUID NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
   passed BOOLEAN DEFAULT false,
@@ -219,7 +219,7 @@ CREATE TABLE scam_checks (
 );
 
 CREATE TABLE best_answers_library (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   question_pattern TEXT NOT NULL,
   answer TEXT NOT NULL,
@@ -229,7 +229,7 @@ CREATE TABLE best_answers_library (
 );
 
 CREATE TABLE autopilot_settings (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL UNIQUE REFERENCES auth.users(id) ON DELETE CASCADE,
   auto_apply_enabled BOOLEAN DEFAULT false,
   mock_mode BOOLEAN DEFAULT true,
@@ -242,7 +242,7 @@ CREATE TABLE autopilot_settings (
 );
 
 CREATE TABLE agent_usage_limits (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL UNIQUE REFERENCES auth.users(id) ON DELETE CASCADE,
   max_applications_per_day INT DEFAULT 50,
   max_outreach_per_day INT DEFAULT 10,
@@ -269,7 +269,7 @@ CREATE TABLE agent_usage_limits (
 );
 
 CREATE TABLE agent_limit_events (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   event_type TEXT NOT NULL,
   metric TEXT NOT NULL,
@@ -279,7 +279,7 @@ CREATE TABLE agent_limit_events (
 );
 
 CREATE TABLE agent_runs (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   status TEXT DEFAULT 'running',
   started_at TIMESTAMPTZ DEFAULT now(),
@@ -290,7 +290,7 @@ CREATE TABLE agent_runs (
 );
 
 CREATE TABLE agent_logs (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   run_id UUID REFERENCES agent_runs(id) ON DELETE CASCADE,
   level TEXT DEFAULT 'info',
@@ -300,7 +300,7 @@ CREATE TABLE agent_logs (
 );
 
 CREATE TABLE blocked_actions (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   job_id UUID REFERENCES jobs(id) ON DELETE SET NULL,
   reason_code TEXT NOT NULL,
@@ -311,7 +311,7 @@ CREATE TABLE blocked_actions (
 );
 
 CREATE TABLE skill_gaps (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   job_id UUID REFERENCES jobs(id) ON DELETE SET NULL,
   missing_skills TEXT[] DEFAULT '{}',
@@ -320,7 +320,7 @@ CREATE TABLE skill_gaps (
 );
 
 CREATE TABLE prompt_versions (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   name TEXT NOT NULL,
   version TEXT NOT NULL,
   purpose TEXT,
@@ -332,7 +332,7 @@ CREATE TABLE prompt_versions (
 );
 
 CREATE TABLE evidence_bank (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   category TEXT NOT NULL,
   title TEXT NOT NULL,
@@ -346,7 +346,7 @@ CREATE TABLE evidence_bank (
 );
 
 CREATE TABLE resume_match_results (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   job_id UUID NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
   resume_template_id UUID REFERENCES resume_templates(id) ON DELETE SET NULL,
@@ -357,7 +357,7 @@ CREATE TABLE resume_match_results (
 );
 
 CREATE TABLE cover_letter_match_results (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   job_id UUID NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
   cover_letter_template_id UUID REFERENCES cover_letter_templates(id) ON DELETE SET NULL,
@@ -368,7 +368,7 @@ CREATE TABLE cover_letter_match_results (
 );
 
 CREATE TABLE ai_cache (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   jd_hash TEXT NOT NULL,
   selected_resume_template_id UUID,
@@ -460,3 +460,4 @@ CREATE TRIGGER profiles_updated BEFORE UPDATE ON profiles FOR EACH ROW EXECUTE F
 CREATE TRIGGER companies_updated BEFORE UPDATE ON companies FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 CREATE TRIGGER jobs_updated BEFORE UPDATE ON jobs FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 CREATE TRIGGER applications_updated BEFORE UPDATE ON applications FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+

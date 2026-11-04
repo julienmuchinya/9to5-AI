@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { evaluateLiveRunGuard } from "./liveRunGuard";
-import { getDefaultStore } from "@/lib/store/local-store";
+import { getDefaultStore } from "@/lib/store/default-store";
 
 describe("liveRunGuard", () => {
   const orig = { ...process.env };

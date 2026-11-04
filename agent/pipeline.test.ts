@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { runAgentPipeline } from "./pipeline";
-import { getDefaultStore } from "../src/lib/store/local-store";
+import { getDefaultStore } from "../src/lib/store/default-store";
 
 describe("9to5 AI agent pipeline Part 3", () => {
   beforeEach(() => {

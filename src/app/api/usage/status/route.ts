@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getDefaultStore } from "@/lib/store/local-store";
+import { getDefaultStore } from "@/lib/store/default-store";
 import { DEFAULT_USAGE_LIMITS } from "@/lib/constants";
 
 export async function GET() {

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getDefaultStore } from "@/lib/store/local-store";
+import { getDefaultStore } from "@/lib/store/default-store";
 import { isMockModeEnv } from "@/lib/config/env";
 import { evaluateLiveRunGuard } from "@/lib/agent/liveRunGuard";
 import { scanCompanies } from "@/lib/company/companyScanner";

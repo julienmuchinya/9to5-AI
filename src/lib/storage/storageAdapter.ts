@@ -1,4 +1,4 @@
-import type { LocalStore } from "@/lib/store/local-store";
+import type { LocalStore } from "@/lib/store/default-store";
 
 export type AppStore = LocalStore;
 

@@ -2,7 +2,8 @@ name: 9to5 AI Daily Agent
 
 on:
   schedule:
-    - cron: "0 12 * * *"
+    # Every 3 hours (UTC). GitHub may delay scheduled runs by a few minutes.
+    - cron: "17 */3 * * *"
   workflow_dispatch:
     inputs:
       mode:
@@ -29,6 +30,10 @@ on:
         default: true
         type: boolean
 
+concurrency:
+  group: 9to5-agent
+  cancel-in-progress: false
+
 jobs:
   run-agent:
     runs-on: ubuntu-latest
@@ -47,14 +52,32 @@ jobs:
         id: mode
         env:
           LIVE_ENABLED: ${{ secrets.LIVE_AGENT_ENABLED }}
+          EVENT_NAME: ${{ github.event_name }}
           INPUT_MODE: ${{ github.event.inputs.mode }}
+          INPUT_DRY_RUN: ${{ github.event.inputs.dry_run }}
         run: |
-          if [ "${INPUT_MODE}" = "live" ] && [ "${LIVE_ENABLED}" = "true" ]; then
-            echo "effective=live" >> $GITHUB_OUTPUT
+          # Scheduled runs have no inputs: they go live (not dry run) only when
+          # the LIVE_AGENT_ENABLED secret is "true"; otherwise they stay mock.
+          if [ "${EVENT_NAME}" = "schedule" ]; then
+            if [ "${LIVE_ENABLED}" = "true" ]; then
+              echo "effective=live" >> $GITHUB_OUTPUT
+              echo "dry_run=false" >> $GITHUB_OUTPUT
+            else
+              echo "effective=mock" >> $GITHUB_OUTPUT
+              echo "dry_run=true" >> $GITHUB_OUTPUT
+            fi
           else
-            echo "effective=mock" >> $GITHUB_OUTPUT
+            if [ "${INPUT_MODE}" = "live" ] && [ "${LIVE_ENABLED}" = "true" ]; then
+              echo "effective=live" >> $GITHUB_OUTPUT
+            else
+              echo "effective=mock" >> $GITHUB_OUTPUT
+            fi
+            if [ "${INPUT_DRY_RUN}" = "false" ]; then
+              echo "dry_run=false" >> $GITHUB_OUTPUT
+            else
+              echo "dry_run=true" >> $GITHUB_OUTPUT
+            fi
           fi
-          echo "dry_run=${{ github.event.inputs.dry_run != 'false' }}" >> $GITHUB_OUTPUT
 
       - name: Validate secrets (live only)
         if: steps.mode.outputs.effective == 'live'

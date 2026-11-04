@@ -1,4 +1,5 @@
-import { getDefaultStore, loadStore, saveStore } from "@/lib/store/local-store";
+import { getDefaultStore } from "@/lib/store/default-store";
+import { loadStore, saveStore } from "@/lib/store/local-store";
 import type { AppStore, StorageAdapter } from "./storageAdapter";
 
 export class MockStorageAdapter implements StorageAdapter {

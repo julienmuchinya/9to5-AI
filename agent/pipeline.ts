@@ -43,7 +43,7 @@ import {
   assertNoOutreachOrApply,
   type HumanLikeGuardState,
 } from "../src/lib/agent/humanLikeActivityGuard";
-import type { LocalStore } from "../src/lib/store/local-store";
+import type { LocalStore } from "../src/lib/store/default-store";
 import type { EvidenceItem, JobIntakeDecision, UsageLimits } from "../src/lib/types";
 import { DEFAULT_USAGE_LIMITS } from "../src/lib/constants";
 

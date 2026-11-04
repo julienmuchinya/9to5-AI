@@ -1,4 +1,4 @@
-import { getDefaultStore, type LocalStore } from "@/lib/store/local-store";
+import { getDefaultStore, type LocalStore } from "@/lib/store/default-store";
 import { createAdminClient, getAgentUserId } from "@/lib/supabase/admin";
 import { isMockModeEnv } from "@/lib/config/env";
 import type { AppStore, StorageAdapter } from "./storageAdapter";

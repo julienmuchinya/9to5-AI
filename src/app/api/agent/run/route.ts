@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { runAgentPipeline } from "../../../../../agent/pipeline";
-import { getDefaultStore } from "@/lib/store/local-store";
+import { getDefaultStore } from "@/lib/store/default-store";
 import { isMockModeEnv } from "@/lib/config/env";
 import { evaluateLiveRunGuard } from "@/lib/agent/liveRunGuard";
 export async function POST(request: Request) {

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { evaluateLiveRunGuard } from "./liveRunGuard";
-import { getDefaultStore } from "@/lib/store/local-store";
+import { getDefaultStore } from "@/lib/store/default-store";
 
 describe("liveRunGuard Part 3", () => {
   beforeEach(() => {

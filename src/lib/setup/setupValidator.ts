@@ -7,7 +7,7 @@ import {
   isSetupComplete,
   type SetupCheckContext,
 } from "./setupChecklist";
-import type { LocalStore } from "@/lib/store/local-store";
+import type { LocalStore } from "@/lib/store/default-store";
 import { isMockMode as isGeminiMock } from "@/lib/gemini/client";
 import { isMockMode as isGmailMock } from "@/lib/gmail/scanner";
 

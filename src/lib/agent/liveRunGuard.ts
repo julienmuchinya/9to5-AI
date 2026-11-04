@@ -2,7 +2,7 @@ import { isMockModeEnv, validateAllEnv } from "@/lib/config/env";
 import { detectRuntimeMode } from "@/lib/config/runtimeMode";
 import { isSetupComplete, type SetupCheckContext } from "@/lib/setup/setupChecklist";
 import { evaluateSetupChecklist } from "@/lib/setup/setupChecklist";
-import type { LocalStore } from "@/lib/store/local-store";
+import type { LocalStore } from "@/lib/store/default-store";
 import { DEFAULT_USAGE_LIMITS } from "@/lib/constants";
 
 export interface LiveRunBlockReason {

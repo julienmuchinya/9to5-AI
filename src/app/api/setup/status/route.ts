@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getDefaultStore } from "@/lib/store/local-store";
+import { getDefaultStore } from "@/lib/store/default-store";
 import { validateSetupForStore } from "@/lib/setup/setupValidator";
 import { getPublicEnvSnapshot } from "@/lib/config/env";
 import { detectRuntimeMode } from "@/lib/config/runtimeMode";

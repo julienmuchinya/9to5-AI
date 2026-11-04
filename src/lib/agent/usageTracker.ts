@@ -1,5 +1,5 @@
 import type { BudgetCounters } from "@/lib/types";
-import type { LocalStore } from "@/lib/store/local-store";
+import type { LocalStore } from "@/lib/store/default-store";
 
 export interface UsageSnapshot {
   emailsScanned: number;
