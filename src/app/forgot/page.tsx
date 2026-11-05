@@ -159,7 +159,7 @@ export default function ForgotPage() {
             }}
           >
             <p className="text-xs text-[var(--muted)]">
-              Sent to <b>{email}</b>. Click the link in the email, or type the code here (if the email shows one). Nothing after 5 minutes? Check spam, or{" "}
+              We emailed a 6-digit code to <b>{email}</b>. It works for 1 hour. Nothing after 5 minutes? Check spam, or{" "}
               <button type="button" className="underline" onClick={() => setStep("choose")}>
                 go back
               </button>
@@ -167,7 +167,7 @@ export default function ForgotPage() {
             </p>
             <label className="block text-sm">
               6-digit code from the email
-              <input className={`${inputCls} mt-1 tracking-widest`} inputMode="numeric" value={code} onChange={(e) => setCode(e.target.value)} required autoComplete="one-time-code" />
+              <input className={`${inputCls} mt-1 tracking-widest`} inputMode="numeric" pattern="[0-9]{6,8}" maxLength={8} placeholder="123456" value={code} onChange={(e) => setCode(e.target.value.replace(/D/g, ""))} required autoComplete="one-time-code" />
             </label>
             {newPasswordFields}
             <button disabled={busy || pwMismatch} className={btn}>

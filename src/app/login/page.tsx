@@ -35,14 +35,17 @@ export default function LoginPage() {
   const [qa, setQa] = useState<QA>({ q: ["", "", ""], a: ["", "", ""] });
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ kind: "error" | "info"; text: string } | null>(null);
-  const [canResend, setCanResend] = useState(false);
   const [next, setNext] = useState("/dashboard");
+  const [verifying, setVerifying] = useState(false);
+  const [code, setCode] = useState("");
 
   useEffect(() => {
     const p = new URLSearchParams(window.location.search);
     setNext(safeNext(p.get("next")));
-    const err = p.get("error");
+    const hash = new URLSearchParams(window.location.hash.slice(1));
+    const err = p.get("error") ?? (hash.get("error") ? friendlyAuthError(hash.get("error_description"), hash.get("error_code")) : null);
     if (err) setMsg({ kind: "error", text: err });
+    if (window.location.hash) history.replaceState(null, "", window.location.pathname + window.location.search);
     if (p.get("confirmed")) setMsg({ kind: "info", text: "Email confirmed — sign in below." });
   }, []);
 
@@ -63,14 +66,26 @@ export default function LoginPage() {
       options: { emailRedirectTo: `${window.location.origin}/auth/callback?type=signup` },
     });
     setBusy(false);
-    setMsg(error ? { kind: "error", text: friendlyAuthError(error.message, error.code) } : { kind: "info", text: "Sent. Check your inbox and spam folder." });
+    setMsg(error ? { kind: "error", text: friendlyAuthError(error.message, error.code) } : { kind: "info", text: `New code sent to ${email}. Check inbox and spam.` });
+  }
+
+  async function verifyCode(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setMsg(null);
+    const { error } = await createClient().auth.verifyOtp({ email, token: code.trim(), type: "signup" });
+    if (error) {
+      setBusy(false);
+      setMsg({ kind: "error", text: /expired|invalid/i.test(error.message) ? "That code is wrong or expired. Codes last 1 hour — only the newest one works." : friendlyAuthError(error.message, error.code) });
+      return;
+    }
+    await afterSignIn();
   }
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setBusy(true);
     setMsg(null);
-    setCanResend(false);
     const supabase = createClient();
     try {
       if (mode === "signup") {
@@ -91,15 +106,18 @@ export default function LoginPage() {
           if (!r.ok) writePending(qa);
           return afterSignIn();
         }
-        writePending(qa); // saved automatically the first time they sign in
-        setMode("signin");
-        setCanResend(true);
-        setMsg({ kind: "info", text: `Account created. We emailed a confirmation link to ${email} — click it, then sign in. Check spam if you don’t see it.` });
+        writePending(qa); // saved automatically once they're signed in
+        setVerifying(true);
+        setMsg({ kind: "info", text: `Account created. We emailed a 6-digit code to ${email} — enter it below. Check spam if you don’t see it.` });
         return;
       }
       const { error } = await supabase.auth.signInWithPassword({ email, password });
       if (error) {
-        if (/not confirmed/i.test(error.message)) setCanResend(true);
+        if (/not confirmed/i.test(error.message)) {
+          setVerifying(true);
+          setMsg({ kind: "error", text: "Your email isn’t confirmed yet. Enter the 6-digit code we emailed you, or send a new one." });
+          return;
+        }
         throw error;
       }
       await afterSignIn();
@@ -113,6 +131,55 @@ export default function LoginPage() {
 
   const input =
     "w-full rounded-lg border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-sm outline-none focus:border-[var(--accent)]";
+  if (verifying)
+    return (
+      <div className="flex min-h-screen items-center justify-center p-4">
+        <form onSubmit={verifyCode} className="w-full max-w-sm space-y-4 rounded-xl border border-[var(--border)] bg-[var(--card)] p-6">
+          <div>
+            <h1 className="text-xl font-bold text-[var(--accent)]">{APP_NAME}</h1>
+            <p className="mt-1 text-sm text-[var(--muted)]">Confirm your email</p>
+          </div>
+          <label className="block text-sm">
+            6-digit code sent to <b>{email}</b>
+            <input
+              className={`${input} mt-1 text-center text-lg tracking-[0.4em]`}
+              inputMode="numeric"
+              pattern="[0-9]{6,8}"
+              maxLength={8}
+              placeholder="123456"
+              value={code}
+              onChange={(e) => setCode(e.target.value.replace(/D/g, ""))}
+              required
+              autoFocus
+              autoComplete="one-time-code"
+            />
+          </label>
+          {msg && (
+            <p role="status" className={`text-sm ${msg.kind === "error" ? "text-red-400" : "text-emerald-400"}`}>
+              {msg.text}
+            </p>
+          )}
+          <button disabled={busy || code.length < 6} className="w-full rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-medium text-white disabled:opacity-50">
+            {busy ? "Checking…" : "Confirm and sign in"}
+          </button>
+          <button type="button" onClick={resend} disabled={busy} className="w-full rounded-lg bg-[var(--border)] px-4 py-2 text-sm disabled:opacity-50">
+            Send a new code
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setVerifying(false);
+              setMode("signin");
+              setMsg(null);
+            }}
+            className="w-full text-center text-sm text-[var(--muted)] hover:text-[var(--foreground)]"
+          >
+            Back to sign in
+          </button>
+        </form>
+      </div>
+    );
+
   return (
     <div className="flex min-h-screen items-center justify-center p-4">
       <form onSubmit={submit} className="w-full max-w-sm rounded-xl border border-[var(--border)] bg-[var(--card)] p-6">
@@ -160,11 +227,6 @@ export default function LoginPage() {
             {msg.text}
           </p>
         )}
-        {canResend && email && (
-          <button type="button" onClick={resend} disabled={busy} className="mb-4 w-full rounded-lg bg-[var(--border)] px-4 py-2 text-sm disabled:opacity-50">
-            Resend confirmation email
-          </button>
-        )}
         <button
           disabled={busy}
           className="w-full rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-medium text-white hover:bg-[var(--accent-hover)] disabled:opacity-50"
@@ -176,7 +238,6 @@ export default function LoginPage() {
           onClick={() => {
             setMode(mode === "signin" ? "signup" : "signin");
             setMsg(null);
-            setCanResend(false);
           }}
           className="mt-4 w-full text-center text-sm text-[var(--muted)] hover:text-[var(--foreground)]"
         >

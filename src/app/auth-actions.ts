@@ -106,7 +106,7 @@ export async function sendResetEmail(email: string): Promise<Result> {
   return {
     ok: true,
     message:
-      "If that email has an account, we sent a reset link (and a 6-digit code). Check inbox and spam. Nothing after 5 minutes? You probably signed up with a different email — try that one.",
+      "If that email has an account, we sent it a 6-digit code. Check inbox and spam. Nothing after 5 minutes? You may have signed up with a different email — try that one.",
   };
 }
 
