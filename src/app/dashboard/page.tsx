@@ -1,6 +1,5 @@
 import Link from "next/link";
-import { requireUser } from "@/lib/v2/session";
-import { hasSecurityQuestions } from "../auth-actions";
+import { requireUser, serviceClient } from "@/lib/v2/session";
 import { Badge, Button, Card, PageHeader, StatCard } from "@/components/ui";
 
 export const dynamic = "force-dynamic";
@@ -8,9 +7,10 @@ export const dynamic = "force-dynamic";
 export default async function DashboardPage({ searchParams }: { searchParams: Promise<{ welcome?: string }> }) {
   const { supabase, user } = await requireUser();
   const { welcome } = await searchParams;
-  const [{ data: p }, { data: s }, { count: matched }, { count: verified }, { data: apps }, { data: runs }] = await Promise.all([
-    supabase.from("profiles").select("first_name,resume_path,phone,work_authorized_us,sponsorship_needed").eq("id", user.id).single(),
-    supabase.from("autopilot_settings").select("auto_submit_enabled,paused,daily_apply_cap").eq("user_id", user.id).single(),
+  const db = serviceClient();
+  const [{ data: p }, { data: s }, { count: matched }, { count: verified }, { data: apps }, { data: runs }, { data: sq }, { data: lastGlobal }, { count: recentErrors }] = await Promise.all([
+    supabase.from("profiles").select("first_name,resume_path,resume_parsed,phone,work_authorized_us,sponsorship_needed").eq("id", user.id).maybeSingle(),
+    supabase.from("autopilot_settings").select("auto_submit_enabled,paused,daily_apply_cap").eq("user_id", user.id).maybeSingle(),
     supabase.from("jobs").select("id", { count: "exact", head: true }).eq("user_id", user.id).eq("dismissed", false),
     supabase
       .from("jobs")
@@ -20,14 +20,25 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
       .eq("job_postings.verification_status", "verified"),
     supabase.from("applications").select("status").eq("user_id", user.id),
     supabase.from("agent_runs").select("started_at,status,summary").eq("user_id", user.id).order("started_at", { ascending: false }).limit(5),
+    db.from("security_questions").select("user_id").eq("user_id", user.id).maybeSingle(),
+    db.from("agent_runs").select("started_at").order("started_at", { ascending: false }).limit(1).maybeSingle(),
+    db.from("agent_logs").select("id", { count: "exact", head: true }).eq("user_id", user.id).eq("level", "error").gte("created_at", new Date(Date.now() - 86400_000).toISOString()),
   ]);
+  // Self-heal accounts created before the sign-up trigger existed.
+  if (!p || !s) {
+    await Promise.all([
+      db.from("profiles").upsert({ id: user.id, job_email: user.email }, { onConflict: "id", ignoreDuplicates: true }),
+      db.from("autopilot_settings").upsert({ user_id: user.id, auto_apply_enabled: false, mock_mode: false, emergency_stop: false }, { onConflict: "user_id", ignoreDuplicates: true }),
+    ]);
+  }
+  const parsed = Boolean(p?.resume_parsed && Object.keys(p.resume_parsed as object).length);
   const by: Record<string, number> = {};
   for (const a of apps ?? []) by[a.status] = (by[a.status] ?? 0) + 1;
 
-  const hasQ = await hasSecurityQuestions();
+  const hasQ = Boolean(sq);
   const steps = [
     { done: hasQ, label: "Set 3 security questions (password recovery)", href: "/account" },
-    { done: Boolean(p?.resume_path), label: "Upload your resume", href: "/profile" },
+    { done: Boolean(p?.resume_path) && parsed, label: p?.resume_path && !parsed ? "Your resume is saved but not read yet — click “Read it again”" : "Upload your resume", href: "/profile" },
     { done: Boolean(p?.first_name && p?.phone), label: "Add your contact details", href: "/profile" },
     { done: p?.work_authorized_us != null && p?.sponsorship_needed != null, label: "Answer work authorization & sponsorship", href: "/profile" },
     { done: Boolean(s?.auto_submit_enabled), label: "Turn on auto-submit (optional)", href: "/settings" },
@@ -42,6 +53,11 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
         action={<Button href="/chat">Chat with agent</Button>}
       />
 
+      {(recentErrors ?? 0) > 0 && (
+        <Link href="/status?level=error" className="mb-6 block rounded-lg bg-red-900/30 p-3 text-sm text-red-300 hover:underline">
+          {recentErrors} error{recentErrors === 1 ? "" : "s"} in the last 24 hours — open System status to see what failed and how to fix it.
+        </Link>
+      )}
       {welcome && (
         <p className="mb-6 rounded-lg bg-emerald-900/30 p-3 text-sm text-emerald-300">Your email is confirmed and you’re signed in. Follow the steps below to get your agent working.</p>
       )}
@@ -81,7 +97,11 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
         <Card>
           <h2 className="mb-2 font-semibold">Recent runs</h2>
           {!last ? (
-            <p className="text-sm text-[var(--muted)]">No runs yet for your account. After you upload your resume, the next run picks you up.</p>
+            <p className="text-sm text-[var(--muted)]">
+              No runs for your account yet.{" "}
+              {parsed ? "Your resume is ready, so the next run picks you up" : "Once your resume is read, the next run picks you up"}
+              {lastGlobal?.started_at ? ` (last agent run: ${new Date(lastGlobal.started_at).toLocaleString()}; runs about every 3 hours).` : "."}
+            </p>
           ) : (
             <ul className="space-y-1 text-sm">
               {(runs ?? []).map((r, i) => (

@@ -48,7 +48,7 @@ export default async function ProfilePage() {
           Upload a PDF. AI reads it once (free tier) and fills the fields below. For each application the agent reorders your real
           experience so the most relevant parts come first — it never adds anything that isn’t on your resume.
         </p>
-        <ResumeUpload hasResume={Boolean(p?.resume_path)} updatedAt={p?.resume_updated_at ?? null} />
+        <ResumeUpload hasResume={Boolean(p?.resume_path)} hasParsed={Boolean(p?.resume_parsed && Object.keys(p.resume_parsed).length)} updatedAt={p?.resume_updated_at ?? null} />
         {p?.resume_path && (
           <p className="mt-3 text-xs text-[var(--muted)]">
             Found {parsed.experience?.length ?? 0} jobs and {parsed.projects?.length ?? 0} projects.

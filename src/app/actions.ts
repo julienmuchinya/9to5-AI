@@ -20,7 +20,8 @@ export async function saveProfile(form: FormData) {
   const last = text(form.get("last_name"));
   const { error } = await supabase
     .from("profiles")
-    .update({
+    .upsert({
+      id: user.id,
       first_name: first,
       last_name: last,
       full_name: [first, last].filter(Boolean).join(" ") || null,
@@ -45,9 +46,8 @@ export async function saveProfile(form: FormData) {
       keywords_exclude: list(form.get("keywords_exclude")),
       excluded_companies: list(form.get("excluded_companies")),
       updated_at: new Date().toISOString(),
-    })
-    .eq("id", user.id);
-  if (error) throw new Error(error.message);
+    }, { onConflict: "id" });
+  if (error) throw new Error(`Couldn’t save your profile: ${error.message}`);
   revalidatePath("/profile");
   revalidatePath("/dashboard");
 }
@@ -56,7 +56,8 @@ export async function saveAutopilot(form: FormData) {
   const { supabase, user } = await requireUser();
   const { error } = await supabase
     .from("autopilot_settings")
-    .update({
+    .upsert({
+      user_id: user.id,
       auto_submit_enabled: form.get("auto_submit_enabled") === "on",
       paused: form.get("paused") === "on",
       emergency_stop: false,
@@ -64,9 +65,8 @@ export async function saveAutopilot(form: FormData) {
       daily_apply_cap: Math.max(0, Math.min(25, Number(form.get("daily_apply_cap") || 5))),
       min_fit_score: Math.max(40, Math.min(95, Number(form.get("min_fit_score") || 65))),
       updated_at: new Date().toISOString(),
-    })
-    .eq("user_id", user.id);
-  if (error) throw new Error(error.message);
+    }, { onConflict: "user_id" });
+  if (error) throw new Error(`Couldn’t save autopilot settings: ${error.message}`);
   revalidatePath("/settings");
   revalidatePath("/dashboard");
 }
@@ -124,10 +124,10 @@ export async function saveInbox(form: FormData) {
   const pass = String(form.get("inbox_password") ?? "").replace(/\s+/g, "");
   const host = text(form.get("inbox_host")) ?? "imap.gmail.com";
   if (!email || !pass) throw new Error("Enter the email and its app password.");
-  await supabase
+  const { error } = await supabase
     .from("profiles")
-    .update({ inbox_email: email, inbox_host: host, inbox_password_enc: encryptSecret(pass), inbox_error: null })
-    .eq("id", user.id);
+    .upsert({ id: user.id, inbox_email: email, inbox_host: host, inbox_password_enc: encryptSecret(pass), inbox_error: null }, { onConflict: "id" });
+  if (error) throw new Error(`Couldn’t save the inbox: ${error.message}`);
   revalidatePath("/settings");
 }
 

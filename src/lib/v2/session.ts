@@ -1,23 +1,30 @@
+import { cache } from "react";
 import { redirect } from "next/navigation";
 import { createClient } from "@supabase/supabase-js";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
 
-/** Signed-in user + a Supabase client that only sees their rows (RLS). */
-export async function requireUser() {
+/**
+ * Look up the signed-in user once per request. The layout, the page and server
+ * helpers all call this; React's cache() makes them share one network call.
+ */
+export const currentUser = cache(async () => {
   const supabase = await createServerSupabaseClient();
   const {
     data: { user },
   } = await supabase.auth.getUser();
+  return { supabase, user };
+});
+
+/** Signed-in user + a Supabase client that only sees their rows (RLS). */
+export async function requireUser() {
+  const { supabase, user } = await currentUser();
   if (!user) redirect("/login");
   return { supabase, user };
 }
 
 /** API-route version: returns null instead of redirecting. */
 export async function apiUser() {
-  const supabase = await createServerSupabaseClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  const { supabase, user } = await currentUser();
   return user ? { supabase, user } : null;
 }
 

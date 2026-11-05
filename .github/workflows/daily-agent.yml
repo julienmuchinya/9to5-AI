@@ -56,7 +56,7 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           VAULT_KEY: ${{ secrets.VAULT_KEY }}
-          GEMINI_MODEL: gemini-2.5-flash
+          GEMINI_MODEL: gemini-3.5-flash
           GITHUB_REPO_PUBLIC: ${{ github.event.repository.private == false }}
           DISCOVER: ${{ github.event.inputs.discover || 'true' }}
           APPLY: ${{ github.event.inputs.apply || 'true' }}

@@ -2,7 +2,7 @@
 
 import { headers } from "next/headers";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
-import { serviceClient } from "@/lib/v2/session";
+import { currentUser, serviceClient } from "@/lib/v2/session";
 import { friendlyAuthError, siteOrigin } from "@/lib/site";
 import { SECURITY_QUESTIONS, checkAnswer, decoyQuestions, hashAnswer } from "@/lib/v2/vault";
 
@@ -52,10 +52,7 @@ export async function saveSecurityQuestions(input: { q: string[]; a: string[] })
 }
 
 export async function hasSecurityQuestions(): Promise<boolean> {
-  const supabase = await createServerSupabaseClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  const { user } = await currentUser();
   if (!user) return false;
   const { data } = await serviceClient().from("security_questions").select("user_id").eq("user_id", user.id).maybeSingle();
   return Boolean(data);

@@ -483,8 +483,21 @@ async function main() {
   let browser: import("playwright").Browser | null = null;
   for (const u of (users ?? []) as UserRow[]) {
     const s = settingsBy.get(u.id);
-    if (!s || s.paused || s.emergency_stop) continue;
-    if (!u.resume_parsed || !Object.keys(u.resume_parsed).length) continue;
+    const skip = !s
+      ? "no autopilot settings row"
+      : s.paused
+        ? "paused by you"
+        : s.emergency_stop
+          ? "emergency stop is on"
+          : !u.resume_parsed || !Object.keys(u.resume_parsed).length
+            ? "resume not uploaded or not read yet"
+            : null;
+    if (skip) {
+      log(`user ${u.id.slice(0, 8)} skipped: ${skip}`);
+      await sb.from("agent_logs").insert({ user_id: u.id, level: "warn", message: `Agent skipped your account: ${skip}`, metadata: { area: "agent" } });
+      continue;
+    }
+    if (!s) continue;
 
     const { data: lastRun } = await sb.from("agent_runs").select("started_at").eq("user_id", u.id).eq("status", "completed").order("started_at", { ascending: false }).limit(1).maybeSingle();
     const { data: run } = await sb.from("agent_runs").insert({ user_id: u.id, status: "running", mock_mode: false }).select("id").single();
@@ -500,12 +513,12 @@ async function main() {
       }
       if (env("INBOX", "true") !== "false") summary.inbox = await scanInbox(sb, u as never, (m) => log(m));
       await sb.from("agent_runs").update({ status: "completed", ended_at: new Date().toISOString(), summary }).eq("id", run?.id);
-      await sb.from("agent_logs").insert({ user_id: u.id, run_id: run?.id, level: "info", message: "Agent run completed", metadata: summary });
+      await sb.from("agent_logs").insert({ user_id: u.id, run_id: run?.id, level: "info", message: "Agent run completed", metadata: { area: "agent", ...summary } });
       log(`user ${u.id.slice(0, 8)}:`, JSON.stringify(summary));
     } catch (e) {
       const msg = (e as Error).message;
       await sb.from("agent_runs").update({ status: "failed", ended_at: new Date().toISOString(), summary: { ...summary, error: msg } }).eq("id", run?.id);
-      await sb.from("agent_logs").insert({ user_id: u.id, run_id: run?.id, level: "error", message: msg });
+      await sb.from("agent_logs").insert({ user_id: u.id, run_id: run?.id, level: "error", message: `Agent run failed: ${msg}`, metadata: { area: "agent" } });
       log(`user ${u.id.slice(0, 8)} failed:`, msg);
     }
   }

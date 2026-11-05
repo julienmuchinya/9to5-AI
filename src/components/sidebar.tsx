@@ -16,6 +16,7 @@ const NAV = [
   { href: "/settings", label: "Autopilot & inbox" },
   { href: "/usage", label: "Free-tier usage" },
   { href: "/account", label: "Account & security" },
+  { href: "/status", label: "System status" },
 ];
 
 export function Sidebar({ email }: { email: string }) {
