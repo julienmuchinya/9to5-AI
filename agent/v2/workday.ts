@@ -15,7 +15,7 @@ const AUTH_FORM = [WD("createAccountSubmitButton"), WD("signInSubmitButton"), WD
 const NEXT = [WD("pageFooterNextButton"), WD("bottom-navigation-next-button"), "button:has-text('Save and Continue')", "button:has-text('Next')"].join(", ");
 const ERRORS = [WD("errorMessage"), WD("errorBanner"), "[role=alert]"].join(", ");
 
-const text = async (page: Page) => ((await page.textContent("body").catch(() => "")) ?? "").replace(/\s+/g, " ");
+const text = async (page: Page) => ((await page.innerText("body").catch(() => "")) ?? "").replace(/\s+/g, " ");
 /** True when ANY element matching `sel` is visible (the first match can be a hidden one). */
 const visible = async (page: Page, sel: string) => {
   const all = page.locator(sel);

@@ -75,7 +75,9 @@ export interface Field {
 }
 
 const STAND_OUT = /(why (do you|are you|this|our|us)|cover letter|anything else|additional (information|comments)|tell us|what (excites|interests)|interest(ed)? in)/i;
-export const SUCCESS = /thank you for (applying|your (application|interest))|application (has been |was )?(received|submitted)|we('|’)ve received your application|successfully submitted|application submitted|congratulations[^.]{0,40}(submitted|applied)|you('|’)ve (successfully )?applied/i;
+/** Confirmation wording across ATSs ("Thank you for applying", Ashby "Thanks so much for applying", Lever "Thanks for applying!"…). */
+export const SUCCESS =
+  /thank(s| you)( so much| very much)? for (applying|your (application|interest|submission)|submitting)|application (has been |was )?(successfully )?(received|submitted|sent)|we('|’)ve (successfully )?received your application|we have (successfully )?received your application|successfully (submitted|applied)|application submitted|congratulations[^.]{0,40}(submitted|applied)|you('|’)ve (successfully )?applied|your application is (in|complete)/i;
 const CLOSED = /no longer (accepting|available|open)|job (is )?(closed|not found)|position has been filled|page (you('|’)re looking for )?(could not be|not) found/i;
 
 function applyUrlFor(ats: string, url: string): string {
@@ -97,10 +99,22 @@ export async function collectFields(page: Page): Promise<Field[]> {
       c.querySelectorAll("[role=tooltip], [class*=tooltip], [class*=popover], [class*=Tooltip], [hidden], [aria-hidden=true], .sr-only, .visually-hidden, [class*=info-text], [class*=definition]").forEach((x) => x.remove());
       return clean(c.textContent);
     };
-    const visible = (el: Element) => {
+    const shownBox = (el: Element | null) => {
+      if (!el) return false;
       const r = (el as HTMLElement).getBoundingClientRect();
       const st = getComputedStyle(el as HTMLElement);
-      return (r.width > 0 && r.height > 0 && st.visibility !== "hidden" && st.display !== "none") || (el as HTMLInputElement).type === "file";
+      return r.width > 0 && r.height > 0 && st.visibility !== "hidden" && st.display !== "none";
+    };
+    const visible = (el: Element) => {
+      const type = ((el as HTMLInputElement).type || "").toLowerCase();
+      if (type === "file" || shownBox(el)) return true;
+      // Custom-drawn radios/checkboxes (Ashby, many React forms): the input is hidden, its label isn't.
+      if (type === "radio" || type === "checkbox") {
+        const id = el.getAttribute("id");
+        const lab = (id ? document.querySelector(`label[for="${CSS.escape(id)}"]`) : null) ?? el.closest("label");
+        return shownBox(lab) || shownBox(el.parentElement);
+      }
+      return false;
     };
     const CONTROL = "input:not([type=hidden]), select, textarea, [role=combobox]";
     /**
@@ -137,8 +151,20 @@ export async function collectFields(page: Page): Promise<Field[]> {
       const lb = labelledby ? labelledby.split(/\s+/).map((x) => document.getElementById(x)?.textContent ?? "").join(" ") : "";
       return clean(textOf(byFor) || aria || lb || textOf(el.closest("label")) || questionText(el) || el.getAttribute("placeholder") || el.getAttribute("name") || "");
     };
+    const titleMarked = (el: Element) => {
+      const id = el.getAttribute("id");
+      const title =
+        el.closest("fieldset")?.querySelector(":scope > label, :scope > legend, label, legend") ??
+        (id ? document.querySelector(`label[for="${CSS.escape(id)}"]`) : null) ??
+        el.closest("[data-field-path], .application-question, [class*=field]")?.querySelector("label, [class*=label]");
+      if (!title || title.querySelector("input")) return false;
+      if (/(^|[\s_-])required/i.test(title.className)) return true;
+      const after = getComputedStyle(title, "::after").content + getComputedStyle(title, "::before").content;
+      return /\*|✱/.test(after);
+    };
     const isRequired = (el: Element, label: string) => {
       const input = el as HTMLInputElement;
+      if (titleMarked(el)) return true;
       return (
         input.required ||
         el.getAttribute("aria-required") === "true" ||
@@ -167,6 +193,8 @@ export async function collectFields(page: Page): Promise<Field[]> {
       // Bot traps ("honeypots") real people never see or fill, and controls handled elsewhere.
       if (/beecatcher|honeypot|hp_|website_url_confirm/i.test(`${el.getAttribute("data-automation-id") ?? ""} ${input.name ?? ""} ${el.id}`)) continue;
       if (el.closest("[data-9to5-skip]")) continue;
+      // Hidden checkbox behind an Ashby Yes/No button pair — the buttons are the question.
+      if (type === "checkbox" && el.parentElement?.querySelector(":scope > button[data-option]")) continue;
 
       // Radio groups, and checkbox lists that share one name ("Which teams interest you?"), are ONE question.
       if (type === "radio" || type === "checkbox") {
@@ -218,6 +246,27 @@ export async function collectFields(page: Page): Promise<Field[]> {
       } else {
         out.push({ id, label, kind: el.tagName === "TEXTAREA" ? "textarea" : "text", required, options: [], filled: isFilled(el) });
       }
+    }
+    // Yes/No answered with two buttons (Ashby): one radio-like question per pair.
+    const pairs = new Set<Element>();
+    document.querySelectorAll("button[data-option]").forEach((b) => b.parentElement && pairs.add(b.parentElement));
+    for (const box of pairs) {
+      const btns = Array.from(box.querySelectorAll(":scope > button[data-option]")).filter(shownBox);
+      if (btns.length < 2 || btns.some((b) => b.hasAttribute("data-9to5"))) continue;
+      const id = `f${n++}`;
+      btns.forEach((b, i) => b.setAttribute("data-9to5", `${id}_${i}`));
+      const entry = box.closest("[data-field-path], [data-field-entry-id], fieldset") ?? box.parentElement;
+      const lab = entry?.querySelector("label");
+      const q = textOf(lab) || questionText(btns[0]);
+      out.push({
+        id,
+        label: q,
+        kind: "radio",
+        // Ashby marks required questions on the label; when unsure, treat as required (an answer never hurts).
+        required: !lab || /required/i.test(lab.className) || isRequired(btns[0], q) || true,
+        options: btns.map((b) => clean(b.textContent)),
+        filled: btns.some((b) => b.getAttribute("aria-pressed") === "true"),
+      });
     }
     return out;
   });
@@ -327,7 +376,18 @@ export async function fill(page: Page, f: Field, value: string, resumePath: stri
     case "radio": {
       const i = f.options.findIndex((o) => o.toLowerCase() === value.toLowerCase());
       const idx = i >= 0 ? i : f.options.findIndex((o) => o.toLowerCase().startsWith(value.toLowerCase()));
-      if (idx >= 0) await page.check(`[data-9to5="${f.id}_${idx}"]`).catch(() => page.click(`[data-9to5="${f.id}_${idx}"]`, { force: true }));
+      if (idx < 0) return;
+      const target = `[data-9to5="${f.id}_${idx}"]`;
+      const tag = await page.evaluate((s2) => document.querySelector(s2)?.tagName ?? "", target);
+      if (tag === "BUTTON") {
+        await page.click(target);
+        return;
+      }
+      const ok = await page.check(target, { timeout: 2000 }).then(() => true).catch(() => false);
+      if (ok) return;
+      const forId = await page.getAttribute(target, "id").catch(() => null);
+      if (forId && (await page.locator(`label[for="${forId}"]`).count())) await page.click(`label[for="${forId}"]`).catch(() => {});
+      else await page.click(target, { force: true }).catch(() => {});
       return;
     }
     case "checkboxes": {
@@ -356,6 +416,45 @@ export async function fill(page: Page, f: Field, value: string, resumePath: stri
       await page.waitForTimeout(800);
       await page.keyboard.press("Enter");
       return;
+    }
+  }
+}
+
+/** After a resume upload, sites parse it and re-render the form. Wait until the form stops changing. */
+export async function waitForFormToSettle(page: Page, maxMs = 25000) {
+  const snapshot = () =>
+    page
+      .evaluate(() => {
+        const busy = /(parsing|analy[sz]ing|uploading|reading) (your )?(resume|cv|file)|autofilling/i.test(document.body.innerText);
+        const vals = Array.from(document.querySelectorAll("input, textarea, select"))
+          .map((e) => (e as HTMLInputElement).value ?? "")
+          .join("|");
+        return `${busy}:${vals.length}:${vals.slice(0, 2000)}`;
+      })
+      .catch(() => "");
+  const start = Date.now();
+  let last = await snapshot();
+  let stableFor = 0;
+  await page.waitForTimeout(1200);
+  while (Date.now() - start < maxMs) {
+    await page.waitForTimeout(1000);
+    const now = await snapshot();
+    if (now === last && !now.startsWith("true")) stableFor++;
+    else stableFor = 0;
+    last = now;
+    if (stableFor >= 2) return;
+  }
+}
+
+/** Re-tag the form after a re-render wiped our markers; maps old fields to new ones by question + kind. */
+async function retag(page: Page, fields: Field[]) {
+  const fresh = await collectFields(page);
+  const used = new Set<string>();
+  for (const f of fields) {
+    const m = fresh.find((x) => !used.has(x.id) && x.kind === f.kind && x.label === f.label);
+    if (m) {
+      used.add(m.id);
+      f.id = m.id;
     }
   }
 }
@@ -394,7 +493,7 @@ async function saveDebug(context: import("playwright").BrowserContext, company: 
     const base = `${dir}/${company.replace(/[^a-z0-9]+/gi, "_")}_${Date.now()}`;
     if (page) {
       await page.screenshot({ path: `${base}.png`, fullPage: true }).catch(() => {});
-      const text = ((await page.textContent("body").catch(() => "")) ?? "").replace(/\s+/g, " ").slice(0, 20000);
+      const text = ((await page.innerText("body").catch(() => "")) ?? "").replace(/\s+/g, " ").slice(0, 20000);
       writeFileSync(`${base}.txt`, `${page.url()}\n\n${text}`);
     }
     writeFileSync(`${base}.json`, JSON.stringify(r, null, 1));
@@ -521,14 +620,15 @@ async function fillAndSubmit(
 ): Promise<ApplyResult> {
   const page = await context.newPage();
   // Default is 30s per action; a missing field would otherwise stall the run for minutes.
-  page.setDefaultTimeout(8000);
+  page.setDefaultTimeout(4000);
   page.setDefaultNavigationTimeout(30000);
   let aiCalls = 0;
+  const t0 = Date.now();
   if (opts.ats === "workday" || /myworkday(jobs|site)\.com/i.test(opts.url)) return applyWorkday(page, db, opts);
   try {
     const res = await page.goto(applyUrlFor(opts.ats, opts.url), { waitUntil: "domcontentloaded", timeout: 30000 });
     await page.waitForTimeout(2500);
-    const body = (await page.textContent("body").catch(() => "")) ?? "";
+    const body = (await page.innerText("body").catch(() => "")) ?? "";
     if ((res && res.status() === 404) || CLOSED.test(body.slice(0, 4000))) return { status: "closed", detail: "Posting is closed" };
 
     // Greenhouse sometimes needs an "Apply" click to reveal the form.
@@ -538,8 +638,20 @@ async function fillAndSubmit(
       await page.waitForTimeout(2000);
     }
 
+    // Many forms (Ashby, Lever) parse the resume on upload and autofill fields — do that first,
+    // so the autofill can't overwrite answers filled afterwards.
+    const tick = (what: string) => process.env.APPLY_DEBUG_DIR && console.log(`[9to5]   t+${Math.round((Date.now() - t0) / 1000)}s ${what}`);
+    tick("page open");
+    const resumeInput = page.locator("input[type=file]").first();
+    if ((await resumeInput.count()) && opts.resumePath) {
+      await resumeInput.setInputFiles(opts.resumePath).catch(() => {});
+      await waitForFormToSettle(page);
+    }
+    tick("resume uploaded");
     const fields = await collectFields(page);
+    tick(`read ${fields.length} fields`);
     await readComboboxOptions(page, fields);
+    tick("read dropdowns");
     if (!fields.some((f) => f.kind === "file") && !fields.some((f) => /e-?mail/i.test(f.label)))
       return { status: "needs_user", detail: "Couldn't find the application form" };
 
@@ -571,8 +683,18 @@ async function fillAndSubmit(
     for (const f of fields) {
       const v = answers[f.id];
       if (!v) continue;
+      if (f.kind === "file" && f.filled) continue;
+      if (f.kind === "file" && v === "__RESUME__" && (await page.locator(`[data-9to5="${f.id}"]`).evaluate((e) => ((e as HTMLInputElement).files?.length ?? 0) > 0).catch(() => false))) continue;
+      const marker = f.kind === "radio" || f.kind === "checkboxes" ? `[data-9to5^="${f.id}_"]` : `[data-9to5="${f.id}"]`;
+      if (!(await page.locator(marker).count())) {
+        tick("form re-rendered — re-tagging fields");
+        await retag(page, fields);
+      }
+      const tf = Date.now();
       await fill(page, f, v === "__RESUME__" ? "" : v, opts.resumePath).catch(() => {});
+      if (Date.now() - tf > 4000) tick(`slow fill (${Math.round((Date.now() - tf) / 1000)}s): ${f.kind} ${f.label.slice(0, 60)}`);
     }
+    tick("filled");
     await page.waitForTimeout(1500);
 
     if (await captchaVisible(page)) return { status: "needs_user", detail: "Site shows a CAPTCHA — please submit this one yourself", answers: labelled(fields, answers), learned, usedPortalLogin, aiCalls };
@@ -591,10 +713,11 @@ async function fillAndSubmit(
     if (code === "not_found")
       return { status: "needs_user", detail: "The site emailed a security code but it didn't arrive in time — open the application and enter it yourself.", answers: labelled(fields, answers), learned, usedPortalLogin, aiCalls };
 
-    const after = (await page.textContent("body").catch(() => "")) ?? "";
+    const after = (await page.innerText("body").catch(() => "")) ?? "";
     if (SUCCESS.test(after) || /confirmation|thank/i.test(page.url())) return { status: "submitted", detail: "Application submitted", answers: labelled(fields, answers), learned, usedPortalLogin, aiCalls };
     if (await captchaVisible(page)) return { status: "needs_user", detail: "CAPTCHA appeared on submit — please submit this one yourself", answers: labelled(fields, answers), learned, usedPortalLogin, aiCalls };
-    const err = after.match(/(this field is required|is required|please (enter|select|fill)[^.]{0,80}|invalid[^.]{0,60})/i)?.[0];
+    // Real validation messages only — not helper text like "please select all that apply".
+    const err = after.match(/(your form needs corrections[^.]{0,40}|missing entry for required field:?[^.?]{0,120}|this field is required|(field|question|answer) is required|please (enter|fill in|complete|provide)[^.]{0,80}|(is )?invalid (email|phone|format|value)[^.]{0,40})/i)?.[0];
     return { status: "needs_user", detail: err ? `Form rejected: ${err}` : "Submitted but no confirmation seen — please check", answers: labelled(fields, answers), learned, usedPortalLogin, aiCalls };
   } catch (e) {
     return { status: "failed", detail: (e as Error).message.slice(0, 300), aiCalls };
@@ -606,7 +729,7 @@ const ASKS_CODE = /(security|verification|confirmation|one[- ]time) code|code (w
 
 /** If the page now asks for an emailed code, fetch it from the inbox and submit it. */
 async function enterEmailCode(page: Page, emailCode: ((since: Date) => Promise<string | null>) | undefined, since: Date): Promise<"none" | "entered" | "no_inbox" | "not_found"> {
-  const body = (await page.textContent("body").catch(() => "")) ?? "";
+  const body = (await page.innerText("body").catch(() => "")) ?? "";
   if (!ASKS_CODE.test(body) || SUCCESS.test(body)) return "none";
   const boxes = page.locator(CODE_BOXES);
   const n = await boxes.count();

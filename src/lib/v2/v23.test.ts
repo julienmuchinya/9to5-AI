@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { commonSenseAnswer, questionFor } from "./app-questions";
-import { knownValue, type Applicant, type Field } from "../../../agent/v2/apply";
+import { SUCCESS, knownValue, type Applicant, type Field } from "../../../agent/v2/apply";
 
 const me: Applicant = {
   first_name: "Ada",
@@ -62,5 +62,14 @@ describe('round 3: real-form mistakes', () => {
   });
   it('answers N/A to follow-ups whose condition does not apply', () => {
     expect(commonSenseAnswer('If you selected “Yes” to requiring sponsorship now or in the future, please specify your current visa', [], 'textarea')).toBe('N/A');
+  });
+});
+
+describe('confirmation screens', () => {
+  it('recognises the wording each ATS uses', () => {
+    for (const t of ['Thanks so much for applying to join us at Quora!', 'Thank you for applying.', 'Application submitted!', 'Thanks for applying to Shield AI', 'Your application was successfully submitted', 'We have received your application', "We've received your application"])
+      expect(SUCCESS.test(t), t).toBe(true);
+    expect(SUCCESS.test('Submit application')).toBe(false);
+    expect(SUCCESS.test('Apply for this job')).toBe(false);
   });
 });
