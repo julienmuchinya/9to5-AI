@@ -140,10 +140,16 @@ export async function answerPendingQuestions(form: FormData) {
   const custom: CustomAnswers = { ...((p?.custom_answers ?? {}) as CustomAnswers) };
   const now = new Date().toISOString();
   let saved = 0;
-  for (const [name, value] of form.entries()) {
-    if (!name.startsWith("pq_")) continue;
+  const names = [...new Set([...form.keys()].filter((k) => k.startsWith("pq_")))];
+  for (const name of names) {
     const key = name.slice(3);
-    const a = String(value ?? "").trim().slice(0, 2000);
+    // Checkbox questions send one value per ticked choice.
+    const a = form
+      .getAll(name)
+      .map((v) => String(v ?? "").trim())
+      .filter(Boolean)
+      .join(", ")
+      .slice(0, 2000);
     const q = String(form.get(`pl_${key}`) ?? key).slice(0, 300);
     if (!a || !key) continue;
     custom[key] = { q, a, at: now };

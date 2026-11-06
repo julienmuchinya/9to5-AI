@@ -1,7 +1,7 @@
 import type { Browser, Page } from "playwright";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { geminiJson, FreeTierLimitError } from "../../src/lib/v2/gemini";
-import { answerFromProfile, findSimilarAnswer, memoryKey, pickOption, type AppAnswers, type PendingQuestion } from "../../src/lib/v2/app-questions";
+import { answerFromProfile, commonSenseAnswer, findSimilarAnswer, memoryKey, pickOption, type AppAnswers, type PendingQuestion } from "../../src/lib/v2/app-questions";
 
 export interface Applicant {
   first_name: string;
@@ -46,7 +46,7 @@ export interface ApplyResult {
 export interface Field {
   id: string;
   label: string;
-  kind: "text" | "textarea" | "select" | "radio" | "checkbox" | "file" | "combobox";
+  kind: "text" | "textarea" | "select" | "radio" | "checkbox" | "checkboxes" | "file" | "combobox";
   required: boolean;
   options: string[];
 }
@@ -65,11 +65,39 @@ function applyUrlFor(ats: string, url: string): string {
 async function collectFields(page: Page): Promise<Field[]> {
   return page.evaluate(() => {
     const out: Field[] = [];
-    const seenRadio = new Set<string>();
+    const seenGroup = new Set<string>();
+    const clean = (s: string | null | undefined) => (s ?? "").replace(/\s+/g, " ").trim().slice(0, 300);
     const visible = (el: Element) => {
       const r = (el as HTMLElement).getBoundingClientRect();
       const st = getComputedStyle(el as HTMLElement);
       return (r.width > 0 && r.height > 0 && st.visibility !== "hidden" && st.display !== "none") || (el as HTMLInputElement).type === "file";
+    };
+    const CONTROL = "input:not([type=hidden]), select, textarea, [role=combobox]";
+    /**
+     * The question a control belongs to: the nearest heading-like element before it that is not itself
+     * an answer choice (a label wrapping an input). Handles Lever's ".application-label", fieldset legends,
+     * and "label above the field" layouts.
+     */
+    const questionText = (el: Element): string => {
+      const legend = el.closest("fieldset")?.querySelector("legend");
+      if (legend && !legend.contains(el)) return clean(legend.textContent);
+      let a: Element | null = el.parentElement;
+      for (let depth = 0; a && depth < 7 && a.tagName !== "FORM" && a.tagName !== "BODY"; depth++, a = a.parentElement) {
+        const cands = Array.from(a.querySelectorAll("legend, label, .application-label, [class*=label], [class*=question-title], [class*=Question] > p, h3, h4")).filter(
+          (c) => !c.contains(el) && !c.querySelector(CONTROL) && !c.closest("label")?.querySelector(CONTROL) && clean(c.textContent) && c.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING
+        );
+        if (cands.length) return clean(cands[cands.length - 1].textContent);
+      }
+      return "";
+    };
+    /** Text of one control's own label (for a choice: the choice text). */
+    const ownLabel = (el: Element): string => {
+      const id = el.getAttribute("id");
+      const byFor = id ? document.querySelector(`label[for="${CSS.escape(id)}"]`) : null;
+      const aria = el.getAttribute("aria-label");
+      const labelledby = el.getAttribute("aria-labelledby");
+      const lb = labelledby ? labelledby.split(/\s+/).map((x) => document.getElementById(x)?.textContent ?? "").join(" ") : "";
+      return clean(byFor?.textContent || aria || lb || el.closest("label")?.textContent || (el as HTMLInputElement).value || "");
     };
     const labelFor = (el: Element): string => {
       const id = el.getAttribute("id");
@@ -77,14 +105,17 @@ async function collectFields(page: Page): Promise<Field[]> {
       const aria = el.getAttribute("aria-label");
       const labelledby = el.getAttribute("aria-labelledby");
       const lb = labelledby ? labelledby.split(/\s+/).map((x) => document.getElementById(x)?.textContent ?? "").join(" ") : "";
-      const wrap = el.closest("label");
-      const fieldset = el.closest("fieldset")?.querySelector("legend")?.textContent;
-      const container = el.closest("[class*=field], [class*=question], .application-question, .form-group, li");
-      const containerLabel = container?.querySelector("label, .application-label, [class*=label]")?.textContent;
-      return (byFor?.textContent || aria || lb || wrap?.textContent || fieldset || containerLabel || el.getAttribute("placeholder") || el.getAttribute("name") || "")
-        .replace(/\s+/g, " ")
-        .trim()
-        .slice(0, 300);
+      return clean(byFor?.textContent || aria || lb || el.closest("label")?.textContent || questionText(el) || el.getAttribute("placeholder") || el.getAttribute("name") || "");
+    };
+    const isRequired = (el: Element, label: string) => {
+      const input = el as HTMLInputElement;
+      return (
+        input.required ||
+        el.getAttribute("aria-required") === "true" ||
+        /[*✱]\s*(\(required\))?\s*$/.test(label) ||
+        /\(required\)\s*$/i.test(label) ||
+        Boolean(el.closest(".required-field, [class*=required-field]"))
+      );
     };
     let n = 0;
     const els = Array.from(document.querySelectorAll("input, textarea, select, [role=combobox]"));
@@ -94,32 +125,46 @@ async function collectFields(page: Page): Promise<Field[]> {
       if (["hidden", "submit", "button", "search", "image", "reset"].includes(type)) continue;
       if (!visible(el)) continue;
       if (el.closest("[aria-hidden=true]") && type !== "file") continue;
-      const required = input.required || el.getAttribute("aria-required") === "true" || /\*\s*$/.test(labelFor(el));
-      if (type === "radio") {
+
+      // Radio groups, and checkbox lists that share one name ("Which teams interest you?"), are ONE question.
+      if (type === "radio" || type === "checkbox") {
         const name = input.name;
-        if (seenRadio.has(name)) continue;
-        seenRadio.add(name);
-        const group = Array.from(document.querySelectorAll(`input[type=radio][name="${CSS.escape(name)}"]`));
-        const id = `f${n++}`;
-        group.forEach((g, i) => g.setAttribute("data-9to5", `${id}_${i}`));
-        const opts = group.map((g) => labelFor(g));
-        const q = (el.closest("fieldset")?.querySelector("legend")?.textContent ?? el.closest("[class*=question], [class*=field]")?.querySelector("label, legend, [class*=label]")?.textContent ?? name).trim();
-        out.push({ id, label: q.slice(0, 300), kind: "radio", required, options: opts });
-        continue;
+        const group = name ? Array.from(document.querySelectorAll(`input[type=${type}][name="${CSS.escape(name)}"]`)).filter(visible) : [el];
+        if (type === "radio" || group.length > 1) {
+          if (name && seenGroup.has(`${type}:${name}`)) continue;
+          if (name) seenGroup.add(`${type}:${name}`);
+          const id = `f${n++}`;
+          group.forEach((g, i) => g.setAttribute("data-9to5", `${id}_${i}`));
+          const q = questionText(el) || clean(name);
+          out.push({
+            id,
+            label: q,
+            kind: type === "radio" ? "radio" : "checkboxes",
+            required: group.some((g) => (g as HTMLInputElement).required) || isRequired(el, q),
+            options: group.map((g) => ownLabel(g)),
+          });
+          continue;
+        }
       }
+
       const id = `f${n++}`;
       el.setAttribute("data-9to5", id);
+      const label = labelFor(el);
+      const required = isRequired(el, label);
       if (el.tagName === "SELECT") {
-        const opts = Array.from((el as HTMLSelectElement).options).map((o) => o.text.trim()).filter((t) => t && !/^select|^--/i.test(t));
-        out.push({ id, label: labelFor(el), kind: "select", required, options: opts });
+        const opts = Array.from((el as HTMLSelectElement).options)
+          .map((o) => o.text.trim())
+          .filter((t) => t && !/^(select|choose|please select|--)/i.test(t));
+        out.push({ id, label, kind: "select", required, options: opts });
       } else if (el.getAttribute("role") === "combobox" && el.tagName !== "SELECT") {
-        out.push({ id, label: labelFor(el), kind: "combobox", required, options: [] });
+        out.push({ id, label, kind: "combobox", required, options: [] });
       } else if (type === "file") {
-        out.push({ id, label: labelFor(el), kind: "file", required, options: [] });
+        out.push({ id, label, kind: "file", required, options: [] });
       } else if (type === "checkbox") {
-        out.push({ id, label: labelFor(el), kind: "checkbox", required, options: [] });
+        // A single checkbox: usually a consent ("I agree…") — its own text is the question.
+        out.push({ id, label: ownLabel(el) || label, kind: "checkbox", required, options: [] });
       } else {
-        out.push({ id, label: labelFor(el), kind: el.tagName === "TEXTAREA" ? "textarea" : "text", required, options: [] });
+        out.push({ id, label, kind: el.tagName === "TEXTAREA" ? "textarea" : "text", required, options: [] });
       }
     }
     return out;
@@ -157,7 +202,10 @@ export function knownValue(f: Field, a: Applicant): string | null {
   if (/graduat/.test(l) && /date|year|when|expected/.test(l) && f.kind === "text" && a.graduation_date) return a.graduation_date;
   // Sponsorship before authorization: "authorized … without sponsorship" questions mention both.
   // Only real questions about NEEDING sponsorship — not notices like "sponsorship is not available, select Yes to confirm".
-  const asksSponsorship = /(require|need|requiring|needing).{0,60}sponsor|sponsor.{0,40}(require|need)/.test(l) && !/not (available|allowed|offered|provided)|unable to (sponsor|offer)|confirm/.test(l);
+  const asksSponsorship =
+    (/(require|need|requiring|needing).{0,60}sponsor|sponsor.{0,40}(require|need)/.test(l) ||
+      /(file|submit)s? (a )?petition|employment.?based immigration|immigration (status|sponsorship|benefit)|(h-?1b|o-1|tn) (visa|status)/.test(l)) &&
+    !/not (available|allowed|offered|provided)|unable to (sponsor|offer)|please confirm|confirm (that|your)/.test(l);
   if (asksSponsorship && !/without (requiring )?(visa )?sponsor/.test(l) && a.sponsorship_needed != null) {
     const future = a.answers?.future_sponsorship;
     const needs = /future/.test(l) && future ? /^y/i.test(future) : a.sponsorship_needed;
@@ -174,6 +222,10 @@ export function knownValue(f: Field, a: Applicant): string | null {
   // The user's own answer to this (or a very similar) question beats anything the AI said before.
   const mine = findSimilarAnswer(f.label, opts, a.custom ?? {});
   if (mine) return mine;
+  // Sensible defaults for low-stakes questions ("How did you hear about us?" → LinkedIn, referral → No…).
+  // Before remembered AI answers, so an old AI guess (e.g. "Referral") can't keep coming back.
+  const sense = commonSenseAnswer(f.label, opts, f.kind);
+  if (sense) return sense;
   const remembered = findSimilarAnswer(f.label, opts, a.memory ?? {}, 0.85);
   if (remembered) return remembered;
   return null;
@@ -182,11 +234,22 @@ export function knownValue(f: Field, a: Applicant): string | null {
 const captchaVisible = (page: Page) =>
   page.evaluate(() => {
     const frames = Array.from(document.querySelectorAll("iframe"));
+    // Only a puzzle a person would actually see counts. Lever/Ashby keep invisible hCaptcha/reCAPTCHA
+    // frames on every page (visibility:hidden, "enclave" frames, size=invisible) that pass silently.
+    const shown = (el: Element | null): boolean => {
+      for (let e = el; e && e !== document.documentElement; e = e.parentElement) {
+        const st = getComputedStyle(e);
+        if (st.visibility === "hidden" || st.display === "none" || Number(st.opacity) === 0) return false;
+      }
+      return true;
+    };
     return frames.some((f) => {
       const src = f.getAttribute("src") ?? "";
       const r = f.getBoundingClientRect();
-      // Visible challenge widgets only; invisible reCAPTCHA v3 badges are fine.
-      return /hcaptcha|recaptcha\/(api2|enterprise)\/(anchor|bframe)|challenges\.cloudflare|turnstile/.test(src) && r.width > 60 && r.height > 60 && !/size=invisible/.test(src);
+      if (!/hcaptcha|recaptcha\/(api2|enterprise)\/(anchor|bframe)|challenges\.cloudflare|turnstile/.test(src)) return false;
+      if (/size=invisible|enclave/.test(src)) return false;
+      const onScreen = r.width > 60 && r.height > 60 && r.bottom > 0 && r.right > 0 && r.top < innerHeight * 3;
+      return onScreen && shown(f);
     });
   });
 
@@ -210,6 +273,16 @@ async function fill(page: Page, f: Field, value: string, resumePath: string) {
       const i = f.options.findIndex((o) => o.toLowerCase() === value.toLowerCase());
       const idx = i >= 0 ? i : f.options.findIndex((o) => o.toLowerCase().startsWith(value.toLowerCase()));
       if (idx >= 0) await page.check(`[data-9to5="${f.id}_${idx}"]`).catch(() => page.click(`[data-9to5="${f.id}_${idx}"]`, { force: true }));
+      return;
+    }
+    case "checkboxes": {
+      // The answer may list several choices: "Backend, Cloud infrastructure".
+      const wanted = value.split(/\s*[,;|]\s*|\s+and\s+/).filter(Boolean);
+      for (const w of wanted) {
+        const hit = pickOption(w, f.options);
+        const idx = hit ? f.options.indexOf(hit) : -1;
+        if (idx >= 0) await page.check(`[data-9to5="${f.id}_${idx}"]`).catch(() => page.click(`[data-9to5="${f.id}_${idx}"]`, { force: true }));
+      }
       return;
     }
     case "combobox":
@@ -243,6 +316,27 @@ async function readComboboxOptions(page: Page, fields: Field[]) {
   }
 }
 
+/** Testing aid: with APPLY_DEBUG_DIR set, keep a screenshot, the page text and the result of every attempt. */
+async function saveDebug(context: import("playwright").BrowserContext, company: string, r: ApplyResult) {
+  const dir = process.env.APPLY_DEBUG_DIR;
+  // Successes need no evidence; everything else gets a screenshot to diagnose from.
+  if (!dir || r.status === "submitted" || r.status === "closed") return;
+  try {
+    const { mkdirSync, writeFileSync } = await import("fs");
+    mkdirSync(dir, { recursive: true });
+    const page = context.pages().at(-1);
+    const base = `${dir}/${company.replace(/[^a-z0-9]+/gi, "_")}_${Date.now()}`;
+    if (page) {
+      await page.screenshot({ path: `${base}.png`, fullPage: true }).catch(() => {});
+      const text = ((await page.textContent("body").catch(() => "")) ?? "").replace(/\s+/g, " ").slice(0, 20000);
+      writeFileSync(`${base}.txt`, `${page.url()}\n\n${text}`);
+    }
+    writeFileSync(`${base}.json`, JSON.stringify(r, null, 1));
+  } catch {
+    // debugging only
+  }
+}
+
 /** Hard limit for one application, so a slow or broken site can't hold up the whole run. */
 const APPLY_TIMEOUT_MS = Number(process.env.APPLY_TIMEOUT_S ?? "240") * 1000;
 
@@ -269,7 +363,9 @@ export async function applyToJob(
     );
   });
   try {
-    return await Promise.race([fillAndSubmit(context, db, opts), timeout]);
+    const r = await Promise.race([fillAndSubmit(context, db, opts), timeout]);
+    await saveDebug(context, opts.company, r);
+    return r;
   } finally {
     clearTimeout(timer);
     await context.close().catch(() => {});
@@ -340,10 +436,11 @@ GOAL: answers that make a recruiter put this applicant in the top pile — speci
 RULES:
 - Use ONLY the facts below (saved_answers are the applicant's own answers to common questions). Never invent experience, numbers, dates, employers or skills.
 - Skill/experience screening questions ("Do you have experience with X?", "Years of Y?"): answer from the resume; if the resume clearly shows it, answer in the applicant's favour. If it doesn't, return null so the applicant answers it themselves.
+- Use common sense like a careful human applicant: never claim a referral, a relationship to employees, past employment there, a certification or a clearance that isn't in the facts. "How did you hear about us" → LinkedIn or the company website. Required consents/acknowledgements → yes.
 - If a question can't be answered truthfully from the facts, return null for it. Personal facts (dates, salary, location preferences, relationships to employees) are null unless in the facts.
 - Voluntary demographic/EEO questions: use saved_answers if present, otherwise pick the "decline to self-identify"/"prefer not to say" option.
 - Work authorization and sponsorship must match the facts exactly; if they are null, return null.
-- For select/radio questions, return one of the listed options exactly.
+- For select/radio questions, return one of the listed options exactly. For "checkboxes" (pick any), return the fitting options exactly, comma separated.
 - Checkbox: return "yes" only for required acknowledgements/consents to apply or privacy policies.
 - Free-text ("why this company", "anything else", "cover letter"): 3-5 sentences in first person. Name the role and company, connect 2-3 concrete resume achievements/skills to what the job description asks for, end with enthusiasm. No clichés, no placeholders.
 FACTS: ${JSON.stringify(facts)}
@@ -428,7 +525,10 @@ async function enterEmailCode(page: Page, emailCode: ((since: Date) => Promise<s
   const n = await boxes.count();
   if (!n) return "none";
   if (!emailCode) return "no_inbox";
-  const code = await emailCode(since).catch(() => null);
+  const code = await emailCode(since).catch((e) => {
+    console.log(`[9to5]   email code lookup failed: ${(e as Error).message}`);
+    return null;
+  });
   if (!code) return "not_found";
   if (n > 1 && n >= code.length) for (let i = 0; i < code.length; i++) await boxes.nth(i).fill(code[i]);
   else await boxes.first().fill(code);

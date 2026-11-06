@@ -338,7 +338,7 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
     .from("applications")
     .select("id,job_id")
     .eq("user_id", u.id)
-    .or("status.eq.queued,and(status.eq.failed,or(attempts.is.null,attempts.lt.3))")
+    .or(env("APPLY_ONLY_COMPANY") ? "status.in.(queued,failed,needs_user)" : "status.eq.queued,and(status.eq.failed,or(attempts.is.null,attempts.lt.3))")
     .order("created_at")
     .limit(400);
   const { data: existing } = await sb.from("applications").select("job_id").eq("user_id", u.id);
@@ -419,7 +419,12 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
   const inbox = { inbox_email: u.inbox_email ?? null, inbox_host: u.inbox_host ?? null, inbox_password_enc: u.inbox_password_enc ?? null };
   const emailCode: ((since: Date) => Promise<string | null>) | undefined =
     inbox.inbox_email && inbox.inbox_password_enc && !u.inbox_error
-      ? (since) => waitForVerification(() => openMailbox(inbox), { since, match: /code|verif|security|greenhouse|lever|ashby/i, want: "code", timeoutMs: 75_000 })
+      ? async (since) => {
+          const t0 = Date.now();
+          const c = await waitForVerification(() => openMailbox(inbox), { since, match: /code|verif|security|greenhouse|lever|ashby/i, want: "code", timeoutMs: 90_000 });
+          log(`  email code ${c ? "found" : "not found"} after ${Math.round((Date.now() - t0) / 1000)}s`);
+          return c;
+        }
       : undefined;
   const save = async (row: Record<string, unknown>) => {
     if (dryRun) return; // dry runs never change the user's applications
@@ -429,7 +434,9 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
 
   const attemptLimit = Number(env("APPLY_LIMIT", "0")) || Infinity; // for testing: try at most N forms
   let attempts = 0;
+  const onlyCompany = env("APPLY_ONLY_COMPANY", "").toLowerCase(); // testing: one company only
   for (const { appId, job } of picked) {
+    if (onlyCompany && !job.company_name.toLowerCase().includes(onlyCompany)) continue;
     if (remaining <= 0 || attempts >= attemptLimit) break;
     if (timeLeft() < 4 * 60_000) {
       log("run time budget used; leaving the rest of the queue for the next run");

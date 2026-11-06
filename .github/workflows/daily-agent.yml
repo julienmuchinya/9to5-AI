@@ -67,4 +67,15 @@ jobs:
           ONLY_USER: ${{ github.event.inputs.only_user }}
           # Stop starting new applications after this many minutes (job timeout is 55).
           RUN_BUDGET_MIN: "42"
+          # Screenshot + page text of every application that didn't go through (kept 3 days).
+          APPLY_DEBUG_DIR: debug
         run: npx tsx agent/v2/run.ts
+
+      - name: Keep evidence of applications that didn't go through
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: apply-debug
+          path: debug
+          retention-days: 3
+          if-no-files-found: ignore

@@ -357,3 +357,46 @@ export function findSimilarAnswer(label: string, options: string[], store: Recor
 /** CustomAnswers → plain memoryKey → answer map. */
 export const customStore = (c: CustomAnswers | null | undefined): Record<string, string> =>
   Object.fromEntries(Object.entries(c ?? {}).map(([k, v]) => [k, v?.a ?? ""]).filter(([, a]) => a));
+
+// ── Common sense ─────────────────────────────────────────────────────────
+/**
+ * What a sensible applicant answers when they haven't saved an answer themselves.
+ * Only low-stakes, never-misleading answers: nothing about demographics, disability,
+ * criminal history or anything that would be a false claim.
+ */
+export function commonSenseAnswer(label: string, options: string[], kind: string): string | null {
+  const l = squash(label);
+  const q = questionFor(label)?.key;
+  const pick = (...prefs: RegExp[]) => {
+    if (!options.length) return null;
+    for (const re of prefs) {
+      const hit = options.find((o) => re.test(o));
+      if (hit) return hit;
+    }
+    return null;
+  };
+  const yes = () => (options.length ? pickOption("Yes", options) : "Yes");
+  const no = () => (options.length ? pickOption("No", options) : "No");
+
+  // "How did you hear about us?" — never claim a referral or a person that didn't happen.
+  if (q === "how_heard") {
+    if (!options.length) return "LinkedIn";
+    return pick(/^linkedin\b(?!.*(employee|recruiter|post by))/i, /linkedin/i, /company (web)?site|careers? (page|site)/i, /job (board|site|posting)/i, /indeed|glassdoor|google|online|internet|web/i, /^other\b/i);
+  }
+  // Referrals / knowing employees / relatives: the honest default is No.
+  if (/(referred|referral|know (anyone|someone)|relative|family member|related to).{0,80}(employ|work|compan|organi[sz]ation|here)|were you referred|employee referral/.test(l) && !/name of/.test(l))
+    return kind === "text" || kind === "textarea" ? (/name|who/.test(l) ? "N/A" : "No") : no();
+  // Pay: "Negotiable" is a normal answer and never disqualifies.
+  if (q === "desired_salary" && (kind === "text" || kind === "textarea")) return "Negotiable";
+  if (q === "start_date" && (kind === "text" || kind === "textarea")) return "Flexible — I can start soon after an offer";
+  if (q === "notice_period" && (kind === "text" || kind === "textarea")) return "2 weeks";
+  if (q === "notice_period" && options.length) return pick(/2 weeks|two weeks/i, /immediate/i);
+  // Standard consents to apply.
+  if (/(background check|drug (test|screen)|reference check|e-?verify)/.test(l) && /(willing|consent|agree|able|submit|undergo|authori[sz]e)/.test(l)) return yes();
+  // Texting/marketing opt-ins: leave unticked / say No (checked before generic "I agree").
+  const optIn = /(text message|sms|marketing|newsletter|talent (community|network)|future (job )?opportunities|job alerts)/.test(l) && /(opt|consent|receive|subscribe|join|agree|send)/.test(l);
+  if (optIn) return kind === "checkbox" ? null : no();
+  if (/(i (agree|acknowledge|consent|certify|confirm|understand|have read))|privacy (policy|notice)|terms (and|&) conditions|accurate (and|&) complete|true and correct/.test(l))
+    return kind === "checkbox" || kind === "checkboxes" ? "yes" : yes();
+  return null;
+}

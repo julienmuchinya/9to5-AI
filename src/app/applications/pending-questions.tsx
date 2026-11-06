@@ -54,7 +54,19 @@ export function PendingQuestions({
                     ? ` and ${q.companies.length - 4} more`
                     : ""}
                 </p>
-                {opts.length > 0 && opts.length <= 6 ? (
+                {q.kind === "checkboxes" && opts.length > 0 ? (
+                  <div className="flex flex-wrap gap-2">
+                    {opts.map((o) => (
+                      <label
+                        key={o}
+                        className="flex cursor-pointer items-center gap-2 rounded-lg border border-[var(--border)] px-3 py-1.5 text-sm transition hover:border-[var(--border-strong)] has-[:checked]:border-[var(--accent)] has-[:checked]:bg-[var(--accent-soft)]"
+                      >
+                        <input type="checkbox" name={name} value={o} className="accent-[var(--accent)]" />
+                        {o}
+                      </label>
+                    ))}
+                  </div>
+                ) : opts.length > 0 && opts.length <= 6 ? (
                   <div className="flex flex-wrap gap-2">
                     {opts.map((o) => (
                       <label
