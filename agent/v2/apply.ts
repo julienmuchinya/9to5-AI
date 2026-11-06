@@ -730,6 +730,8 @@ async function fillAndSubmit(
       return { status: "needs_user", detail: "The site emailed a security code but it didn't arrive in time — open the application and enter it yourself.", answers: labelled(fields, answers), learned, usedPortalLogin, aiCalls };
 
     const after = (await page.innerText("body").catch(() => "")) ?? "";
+    if (code === "entered" && !SUCCESS.test(after) && ASKS_CODE.test(after) && /(incorrect|invalid|expired|wrong|doesn.t match|try again)/i.test(after))
+      return { status: "needs_user", detail: "The site rejected the emailed security code — open the application and finish it (the answers are listed below).", answers: labelled(fields, answers), learned, usedPortalLogin, aiCalls };
     if (SUCCESS.test(after) || /confirmation|thank/i.test(page.url())) return { status: "submitted", detail: "Application submitted", answers: labelled(fields, answers), learned, usedPortalLogin, aiCalls };
     if (await captchaVisible(page)) return { status: "needs_user", detail: "CAPTCHA appeared on submit — please submit this one yourself", answers: labelled(fields, answers), learned, usedPortalLogin, aiCalls };
     // Real validation messages only — not helper text like "please select all that apply".
