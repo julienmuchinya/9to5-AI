@@ -1,6 +1,7 @@
 import type { Browser, Page } from "playwright";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { geminiJson, FreeTierLimitError } from "../../src/lib/v2/gemini";
+import { applyWorkday } from "./workday";
 import { answerFromProfile, commonSenseAnswer, findSimilarAnswer, memoryKey, pickOption, type AppAnswers, type PendingQuestion } from "../../src/lib/v2/app-questions";
 
 export interface Applicant {
@@ -29,6 +30,24 @@ export interface Applicant {
   portal?: { email: string; password: string } | null;
 }
 
+export interface ApplyOpts {
+  url: string;
+  ats: string;
+  applicant: Applicant;
+  resumePath: string;
+  jobTitle: string;
+  company: string;
+  userId: string;
+  dryRun?: boolean;
+  jobDescription?: string;
+  /** Reads a one-time code a site emailed during the application. */
+  emailCode?: (since: Date) => Promise<string | null>;
+  /** Reads a "verify your account" link a site emailed (Workday account creation). */
+  emailLink?: (since: Date, match: RegExp) => Promise<string | null>;
+  /** True when this portal account was already created on an earlier run. */
+  accountExists?: boolean;
+}
+
 export type ApplyStatus = "submitted" | "needs_user" | "failed" | "closed";
 export interface ApplyResult {
   status: ApplyStatus;
@@ -41,6 +60,8 @@ export interface ApplyResult {
   aiCalls?: number;
   /** Required questions with no answer — shown to the user to answer once. */
   pending?: PendingQuestion[];
+  /** A portal account was created (or confirmed working) during this attempt. */
+  accountCreated?: boolean;
 }
 
 export interface Field {
@@ -49,10 +70,12 @@ export interface Field {
   kind: "text" | "textarea" | "select" | "radio" | "checkbox" | "checkboxes" | "file" | "combobox";
   required: boolean;
   options: string[];
+  /** The control already has a value (pre-filled by the site). */
+  filled?: boolean;
 }
 
 const STAND_OUT = /(why (do you|are you|this|our|us)|cover letter|anything else|additional (information|comments)|tell us|what (excites|interests)|interest(ed)? in)/i;
-const SUCCESS = /thank you for (applying|your (application|interest))|application (has been |was )?(received|submitted)|we('|’)ve received your application|successfully submitted/i;
+export const SUCCESS = /thank you for (applying|your (application|interest))|application (has been |was )?(received|submitted)|we('|’)ve received your application|successfully submitted|application submitted|congratulations[^.]{0,40}(submitted|applied)|you('|’)ve (successfully )?applied/i;
 const CLOSED = /no longer (accepting|available|open)|job (is )?(closed|not found)|position has been filled|page (you('|’)re looking for )?(could not be|not) found/i;
 
 function applyUrlFor(ats: string, url: string): string {
@@ -62,7 +85,7 @@ function applyUrlFor(ats: string, url: string): string {
 }
 
 /** Tag every visible form control and describe it. */
-async function collectFields(page: Page): Promise<Field[]> {
+export async function collectFields(page: Page): Promise<Field[]> {
   return page.evaluate(() => {
     const out: Field[] = [];
     const seenGroup = new Set<string>();
@@ -118,18 +141,39 @@ async function collectFields(page: Page): Promise<Field[]> {
       );
     };
     let n = 0;
-    const els = Array.from(document.querySelectorAll("input, textarea, select, [role=combobox]"));
+    const isFilled = (el: Element): boolean => {
+      const input = el as HTMLInputElement;
+      const t = (input.type || "").toLowerCase();
+      if (el.tagName === "SELECT") return (el as HTMLSelectElement).selectedIndex > 0;
+      if (t === "checkbox" || t === "radio") return input.checked;
+      if (el.tagName === "BUTTON") return !/^\s*(select one|select|choose)\b/i.test(el.textContent ?? "") && clean(el.textContent).length > 0;
+      return Boolean(input.value && input.value.trim());
+    };
+    const els = Array.from(document.querySelectorAll("input, textarea, select, [role=combobox], button[aria-haspopup=listbox]"));
     for (const el of els) {
       const input = el as HTMLInputElement;
       const type = (input.type || "").toLowerCase();
-      if (["hidden", "submit", "button", "search", "image", "reset"].includes(type)) continue;
+      if (["hidden", "submit", "search", "image", "reset"].includes(type)) continue;
+      if (type === "button" && el.getAttribute("aria-haspopup") !== "listbox") continue;
       if (!visible(el)) continue;
       if (el.closest("[aria-hidden=true]") && type !== "file") continue;
+      // Bot traps ("honeypots") real people never see or fill, and controls handled elsewhere.
+      if (/beecatcher|honeypot|hp_|website_url_confirm/i.test(`${el.getAttribute("data-automation-id") ?? ""} ${input.name ?? ""} ${el.id}`)) continue;
+      if (el.closest("[data-9to5-skip]")) continue;
 
       // Radio groups, and checkbox lists that share one name ("Which teams interest you?"), are ONE question.
       if (type === "radio" || type === "checkbox") {
         const name = input.name;
-        const group = name ? Array.from(document.querySelectorAll(`input[type=${type}][name="${CSS.escape(name)}"]`)).filter(visible) : [el];
+        let group = name ? Array.from(document.querySelectorAll(`input[type=${type}][name="${CSS.escape(name)}"]`)).filter(visible) : [el];
+        if (type === "checkbox" && group.length <= 1) {
+          const box = el.closest("fieldset, [role=group], [data-automation-id^=formField], .application-question");
+          const inBox = box ? Array.from(box.querySelectorAll("input[type=checkbox]")).filter(visible) : [];
+          if (inBox.length > 1) {
+            group = inBox;
+            if (seenGroup.has(`box:${inBox[0].id || inBox[0].getAttribute("data-9to5") || ""}`)) continue;
+          }
+        }
+        if (group.length > 1 && group[0] !== el && group.includes(el) && group.some((g) => g.hasAttribute("data-9to5"))) continue;
         if (type === "radio" || group.length > 1) {
           if (name && seenGroup.has(`${type}:${name}`)) continue;
           if (name) seenGroup.add(`${type}:${name}`);
@@ -142,6 +186,7 @@ async function collectFields(page: Page): Promise<Field[]> {
             kind: type === "radio" ? "radio" : "checkboxes",
             required: group.some((g) => (g as HTMLInputElement).required) || isRequired(el, q),
             options: group.map((g) => ownLabel(g)),
+            filled: group.some((g) => (g as HTMLInputElement).checked),
           });
           continue;
         }
@@ -155,16 +200,16 @@ async function collectFields(page: Page): Promise<Field[]> {
         const opts = Array.from((el as HTMLSelectElement).options)
           .map((o) => o.text.trim())
           .filter((t) => t && !/^(select|choose|please select|--)/i.test(t));
-        out.push({ id, label, kind: "select", required, options: opts });
-      } else if (el.getAttribute("role") === "combobox" && el.tagName !== "SELECT") {
-        out.push({ id, label, kind: "combobox", required, options: [] });
+        out.push({ id, label, kind: "select", required, options: opts, filled: isFilled(el) });
+      } else if ((el.getAttribute("role") === "combobox" || el.getAttribute("aria-haspopup") === "listbox") && el.tagName !== "SELECT") {
+        out.push({ id, label, kind: "combobox", required, options: [], filled: isFilled(el) });
       } else if (type === "file") {
         out.push({ id, label, kind: "file", required, options: [] });
       } else if (type === "checkbox") {
         // A single checkbox: usually a consent ("I agree…") — its own text is the question.
-        out.push({ id, label: ownLabel(el) || label, kind: "checkbox", required, options: [] });
+        out.push({ id, label: ownLabel(el) || label, kind: "checkbox", required, options: [], filled: isFilled(el) });
       } else {
-        out.push({ id, label, kind: el.tagName === "TEXTAREA" ? "textarea" : "text", required, options: [] });
+        out.push({ id, label, kind: el.tagName === "TEXTAREA" ? "textarea" : "text", required, options: [], filled: isFilled(el) });
       }
     }
     return out;
@@ -231,7 +276,7 @@ export function knownValue(f: Field, a: Applicant): string | null {
   return null;
 }
 
-const captchaVisible = (page: Page) =>
+export const captchaVisible = (page: Page) =>
   page.evaluate(() => {
     const frames = Array.from(document.querySelectorAll("iframe"));
     // Only a puzzle a person would actually see counts. Lever/Ashby keep invisible hCaptcha/reCAPTCHA
@@ -253,7 +298,7 @@ const captchaVisible = (page: Page) =>
     });
   });
 
-async function fill(page: Page, f: Field, value: string, resumePath: string) {
+export async function fill(page: Page, f: Field, value: string, resumePath: string) {
   const sel = `[data-9to5="${f.id}"]`;
   switch (f.kind) {
     case "file":
@@ -285,17 +330,28 @@ async function fill(page: Page, f: Field, value: string, resumePath: string) {
       }
       return;
     }
-    case "combobox":
+    case "combobox": {
       await page.click(sel);
-      await page.fill(sel, value).catch(() => page.keyboard.type(value));
-      await page.waitForTimeout(600);
+      await page.waitForTimeout(400);
+      const list = await page.getAttribute(sel, "aria-controls").catch(() => null);
+      const scope = list ? `[id="${list}"] ` : "";
+      const option = page.locator(`${scope}[role=option]`).filter({ hasText: value }).first();
+      if (await option.isVisible().catch(() => false)) {
+        await option.click();
+        return;
+      }
+      const tag = await page.evaluate((s2) => document.querySelector(s2)?.tagName ?? "", sel);
+      if (tag === "INPUT") await page.fill(sel, value).catch(() => page.keyboard.type(value));
+      else await page.keyboard.type(value, { delay: 30 });
+      await page.waitForTimeout(800);
       await page.keyboard.press("Enter");
       return;
+    }
   }
 }
 
 /** Custom dropdowns (React-Select etc.) only list their choices once opened — open each, read, close. */
-async function readComboboxOptions(page: Page, fields: Field[]) {
+export async function readComboboxOptions(page: Page, fields: Field[]) {
   for (const f of fields.filter((x) => x.kind === "combobox" && !x.options.length).slice(0, 25)) {
     const sel = `[data-9to5="${f.id}"]`;
     try {
@@ -337,69 +393,16 @@ async function saveDebug(context: import("playwright").BrowserContext, company: 
   }
 }
 
-/** Hard limit for one application, so a slow or broken site can't hold up the whole run. */
-const APPLY_TIMEOUT_MS = Number(process.env.APPLY_TIMEOUT_S ?? "240") * 1000;
-
-/** Fill and (unless dryRun) submit one application. */
-export async function applyToJob(
-  browser: Browser,
+/**
+ * Answers for a set of form fields: profile/known values first (free), then — only if a required
+ * question is still blank — one AI call for those plus optional "stand out" free-text questions.
+ */
+export async function answerFields(
   db: SupabaseClient,
-  opts: { url: string; ats: string; applicant: Applicant; resumePath: string; jobTitle: string; company: string; userId: string; dryRun?: boolean; jobDescription?: string; emailCode?: (since: Date) => Promise<string | null> }
-): Promise<ApplyResult> {
-  const context = await browser.newContext({
-    userAgent:
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36",
-    viewport: { width: 1280, height: 1600 },
-  });
-  // tsx/esbuild (keepNames) rewrites functions inside page.evaluate() to call a `__name` helper that
-  // only exists in Node. Without this shim every form scan threw "__name is not defined" in the page.
-  // Passed as a string so the bundler can't rewrite it too.
-  await context.addInitScript("globalThis.__name = globalThis.__name || function (f) { return f; };");
-  let timer: NodeJS.Timeout | undefined;
-  const timeout = new Promise<ApplyResult>((resolve) => {
-    timer = setTimeout(
-      () => resolve({ status: "failed", detail: `Timed out after ${Math.round(APPLY_TIMEOUT_MS / 1000)}s — will retry next run` }),
-      APPLY_TIMEOUT_MS
-    );
-  });
-  try {
-    const r = await Promise.race([fillAndSubmit(context, db, opts), timeout]);
-    await saveDebug(context, opts.company, r);
-    return r;
-  } finally {
-    clearTimeout(timer);
-    await context.close().catch(() => {});
-  }
-}
-
-async function fillAndSubmit(
-  context: import("playwright").BrowserContext,
-  db: SupabaseClient,
-  opts: { url: string; ats: string; applicant: Applicant; resumePath: string; jobTitle: string; company: string; userId: string; dryRun?: boolean; jobDescription?: string; emailCode?: (since: Date) => Promise<string | null> }
-): Promise<ApplyResult> {
-  const page = await context.newPage();
-  // Default is 30s per action; a missing field would otherwise stall the run for minutes.
-  page.setDefaultTimeout(8000);
-  page.setDefaultNavigationTimeout(30000);
+  fields: Field[],
+  opts: ApplyOpts
+): Promise<{ answers: Record<string, string>; learned: { label: string; answer: string }[]; aiCalls: number; quota?: boolean }> {
   let aiCalls = 0;
-  try {
-    const res = await page.goto(applyUrlFor(opts.ats, opts.url), { waitUntil: "domcontentloaded", timeout: 30000 });
-    await page.waitForTimeout(2500);
-    const body = (await page.textContent("body").catch(() => "")) ?? "";
-    if ((res && res.status() === 404) || CLOSED.test(body.slice(0, 4000))) return { status: "closed", detail: "Posting is closed" };
-
-    // Greenhouse sometimes needs an "Apply" click to reveal the form.
-    const applyBtn = page.locator("button:has-text('Apply'), a:has-text('Apply for this job')").first();
-    if ((await page.locator("form input[type=file]").count()) === 0 && (await applyBtn.count()) > 0) {
-      await applyBtn.click().catch(() => {});
-      await page.waitForTimeout(2000);
-    }
-
-    const fields = await collectFields(page);
-    await readComboboxOptions(page, fields);
-    if (!fields.some((f) => f.kind === "file") && !fields.some((f) => /e-?mail/i.test(f.label)))
-      return { status: "needs_user", detail: "Couldn't find the application form" };
-
     const answers: Record<string, string> = {};
     const unknown: Field[] = [];
     for (const f of fields) {
@@ -407,12 +410,11 @@ async function fillAndSubmit(
       if (v) answers[f.id] = v;
       else unknown.push(f);
     }
-    const usedPortalLogin = fields.some((f) => /password/i.test(f.label) && answers[f.id]);
 
     // AI only when a REQUIRED question is still blank. Optional free-text questions that help an
     // application stand out ("Why us?", "Anything else?", cover letter) ride along in the same call.
     const learned: { label: string; answer: string }[] = [];
-    const required = unknown.filter((f) => f.required && f.kind !== "file");
+    const required = unknown.filter((f) => f.required && f.kind !== "file" && !f.filled);
     const standOut = unknown.filter((f) => !f.required && (f.kind === "textarea" || STAND_OUT.test(f.label)) && f.kind !== "file" && !/password/i.test(f.label));
     const needAi = required.length ? [...required, ...standOut.slice(0, 3)] : [];
     if (needAi.length) {
@@ -457,12 +459,84 @@ Return JSON: {"<id>": "<answer or null>"}`,
           }
         }
       } catch (e) {
-        if (e instanceof FreeTierLimitError) return { status: "needs_user", detail: "AI quota used up today — finish this one yourself or it retries tomorrow", answers: labelled(fields, answers), aiCalls };
+        if (e instanceof FreeTierLimitError) return { answers, learned, aiCalls, quota: true };
         throw e;
       }
     }
 
-    const missing = fields.filter((f) => f.required && !answers[f.id]);
+    return { answers, learned, aiCalls };
+}
+
+/** Hard limit for one application, so a slow or broken site can't hold up the whole run. */
+const APPLY_TIMEOUT_MS = Number(process.env.APPLY_TIMEOUT_S ?? "240") * 1000;
+
+/** Fill and (unless dryRun) submit one application. */
+export async function applyToJob(
+  browser: Browser,
+  db: SupabaseClient,
+  opts: ApplyOpts
+): Promise<ApplyResult> {
+  const context = await browser.newContext({
+    userAgent:
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36",
+    viewport: { width: 1280, height: 1600 },
+  });
+  // tsx/esbuild (keepNames) rewrites functions inside page.evaluate() to call a `__name` helper that
+  // only exists in Node. Without this shim every form scan threw "__name is not defined" in the page.
+  // Passed as a string so the bundler can't rewrite it too.
+  await context.addInitScript("globalThis.__name = globalThis.__name || function (f) { return f; };");
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<ApplyResult>((resolve) => {
+    // Workday is several pages plus account sign-in/verification: give it more time.
+    const limit = opts.ats === "workday" ? APPLY_TIMEOUT_MS * 2 : APPLY_TIMEOUT_MS;
+    timer = setTimeout(() => resolve({ status: "failed", detail: `Timed out after ${Math.round(limit / 1000)}s — will retry next run` }), limit);
+  });
+  try {
+    const r = await Promise.race([fillAndSubmit(context, db, opts), timeout]);
+    await saveDebug(context, opts.company, r);
+    return r;
+  } finally {
+    clearTimeout(timer);
+    await context.close().catch(() => {});
+  }
+}
+
+async function fillAndSubmit(
+  context: import("playwright").BrowserContext,
+  db: SupabaseClient,
+  opts: ApplyOpts
+): Promise<ApplyResult> {
+  const page = await context.newPage();
+  // Default is 30s per action; a missing field would otherwise stall the run for minutes.
+  page.setDefaultTimeout(8000);
+  page.setDefaultNavigationTimeout(30000);
+  let aiCalls = 0;
+  if (opts.ats === "workday" || /myworkday(jobs|site)\.com/i.test(opts.url)) return applyWorkday(page, db, opts);
+  try {
+    const res = await page.goto(applyUrlFor(opts.ats, opts.url), { waitUntil: "domcontentloaded", timeout: 30000 });
+    await page.waitForTimeout(2500);
+    const body = (await page.textContent("body").catch(() => "")) ?? "";
+    if ((res && res.status() === 404) || CLOSED.test(body.slice(0, 4000))) return { status: "closed", detail: "Posting is closed" };
+
+    // Greenhouse sometimes needs an "Apply" click to reveal the form.
+    const applyBtn = page.locator("button:has-text('Apply'), a:has-text('Apply for this job')").first();
+    if ((await page.locator("form input[type=file]").count()) === 0 && (await applyBtn.count()) > 0) {
+      await applyBtn.click().catch(() => {});
+      await page.waitForTimeout(2000);
+    }
+
+    const fields = await collectFields(page);
+    await readComboboxOptions(page, fields);
+    if (!fields.some((f) => f.kind === "file") && !fields.some((f) => /e-?mail/i.test(f.label)))
+      return { status: "needs_user", detail: "Couldn't find the application form" };
+
+    const ans = await answerFields(db, fields, opts);
+    if (ans.quota) return { status: "needs_user", detail: "AI quota used up today — finish this one yourself or it retries tomorrow", answers: labelled(fields, ans.answers), aiCalls: ans.aiCalls };
+    const { answers, learned } = ans;
+    aiCalls += ans.aiCalls;
+    const usedPortalLogin = fields.some((f) => /password/i.test(f.label) && answers[f.id]);
+
+    const missing = fields.filter((f) => f.required && !answers[f.id] && !f.filled);
     if (missing.length) {
       const pending: PendingQuestion[] = missing.map((m) => ({
         key: memoryKey(m.label || m.id),
@@ -540,7 +614,7 @@ async function enterEmailCode(page: Page, emailCode: ((since: Date) => Promise<s
 }
 
 /** Answers keyed by the question text (what the user sees), not internal field ids. */
-function labelled(fields: Field[], answers: Record<string, string>): Record<string, string> {
+export function labelled(fields: Field[], answers: Record<string, string>): Record<string, string> {
   const out: Record<string, string> = {};
   for (const f of fields) {
     const v = answers[f.id];

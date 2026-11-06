@@ -386,6 +386,9 @@ export function commonSenseAnswer(label: string, options: string[], kind: string
   // Referrals / knowing employees / relatives: the honest default is No.
   if (/(referred|referral|know (anyone|someone)|relative|family member|related to).{0,80}(employ|work|compan|organi[sz]ation|here)|were you referred|employee referral/.test(l) && !/name of/.test(l))
     return kind === "text" || kind === "textarea" ? (/name|who/.test(l) ? "N/A" : "No") : no();
+  // Workday contact basics.
+  if (/phone (device )?type/.test(l)) return pick(/mobile|cell/i) ?? (options.length ? null : "Mobile");
+  if (/(country )?phone code|country code/.test(l)) return pick(/united states/i, /\+1\b/);
   // Pay: "Negotiable" is a normal answer and never disqualifies.
   if (q === "desired_salary" && (kind === "text" || kind === "textarea")) return "Negotiable";
   if (q === "start_date" && (kind === "text" || kind === "textarea")) return "Flexible — I can start soon after an offer";

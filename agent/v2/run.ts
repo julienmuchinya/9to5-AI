@@ -63,11 +63,13 @@ const siteKey = (u: string) => {
 const ACCOUNT_SITES = /(myworkdayjobs\.com|myworkdaysite\.com|icims\.com|taleo\.net|successfactors\.(com|eu)|oraclecloud\.com|brassring\.com|ultipro\.com|ukg\.net|jobvite\.com|avature\.net|phenompeople\.com|eightfold\.ai)/i;
 
 // ── Anti-ban pacing (all tunable by env) ──────────────────────────────────
-const PACE_MIN_S = Number(env("PACE_MIN_S", "20"));
-const PACE_MAX_S = Number(env("PACE_MAX_S", "45"));
-const ATS_DAILY_CAP = Number(env("ATS_DAILY_CAP", "80")); // per ATS host, all users combined
+const PACE_MIN_S = Number(env("PACE_MIN_S", "6"));
+const PACE_MAX_S = Number(env("PACE_MAX_S", "15"));
+const ATS_DAILY_CAP = Number(env("ATS_DAILY_CAP", "150")); // per ATS host, all users combined
 const COMPANY_CAP = Number(env("COMPANY_DAILY_CAP", String(COMPANY_DAILY_CAP))); // per company, per user, per day
 const MAX_DAILY_CAP = 100;
+/** Workday portals: sign in / create the account with the saved login, then apply (set WORKDAY=false to turn off). */
+const WORKDAY_ON = env("WORKDAY", "true") !== "false";
 // Stop starting new applications after this many minutes, so the run ends before the workflow timeout.
 const RUN_BUDGET_MS = Number(env("RUN_BUDGET_MIN", "40")) * 60_000;
 const timeLeft = () => RUN_BUDGET_MS - (Date.now() - startedAt);
@@ -351,7 +353,7 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
     .eq("dismissed", false)
     .gte("fit_score", minFit)
     .eq("job_postings.verification_status", "verified")
-    .in("job_postings.ats", ["greenhouse", "lever", "ashby"])
+    .in("job_postings.ats", ["greenhouse", "lever", "ashby", ...(WORKDAY_ON ? ["workday"] : [])])
     .order("fit_score", { ascending: false })
     .limit(200);
 
@@ -426,6 +428,16 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
           return c;
         }
       : undefined;
+  // Verification links sites email when an account is created (Workday).
+  const emailLink: ((since: Date, match: RegExp) => Promise<string | null>) | undefined =
+    inbox.inbox_email && inbox.inbox_password_enc && !u.inbox_error
+      ? async (since, match) => {
+          const t0 = Date.now();
+          const l = await waitForVerification(() => openMailbox(inbox), { since, match, want: "link", timeoutMs: 120_000 });
+          log(`  verification link ${l ? "found" : "not found"} after ${Math.round((Date.now() - t0) / 1000)}s`);
+          return l;
+        }
+      : undefined;
   const save = async (row: Record<string, unknown>) => {
     if (dryRun) return; // dry runs never change the user's applications
     const { error } = await sb.from("applications").upsert({ ...row, status_updated_at: new Date().toISOString() }, { onConflict: "user_id,job_id" });
@@ -450,7 +462,8 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
     }
     const p = job.job_postings;
     const applyUrl = p.apply_url || p.url;
-    const auto = canAutoSubmit({ ats: p.ats, verification_status: p.verification_status, apply_url: p.apply_url, url: p.url });
+    const isWorkday = WORKDAY_ON && /myworkday(jobs|site)\.com/i.test(applyUrl) && p.verification_status === "verified";
+    const auto = isWorkday || canAutoSubmit({ ats: p.ats, verification_status: p.verification_status, apply_url: p.apply_url, url: p.url });
     const base = { user_id: u.id, job_id: job.id, posting_id: job.posting_id, apply_url: applyUrl, ats: p.ats, requested_by: appId ? "user" : "agent" };
     if (!auto) {
       const needsAccount = ACCOUNT_SITES.test(applyUrl);
@@ -496,10 +509,13 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
     if (!resumePath) return { no_resume: 1 };
 
     attempts++;
+    // Workday needs a login: make sure one is saved (also on dry runs — the site account is real either way).
+    if (isWorkday) await ensurePortalLogin(sb, u.id, email, job.company_name, applyUrl);
     applicant.portal = await portalLogin(sb, u.id, applyUrl);
+    const { data: acct } = await sb.from("application_accounts").select("account_created").eq("user_id", u.id).eq("portal_host", host).maybeSingle();
     applicant.memory = memory;
     const t0 = Date.now();
-    const r = await applyToJob(browser, sb, { url: applyUrl, ats: p.ats, applicant, resumePath, jobTitle: job.title, company: job.company_name, userId: u.id, dryRun, jobDescription: p.description, emailCode });
+    const r = await applyToJob(browser, sb, { url: applyUrl, ats: p.ats, applicant, resumePath, jobTitle: job.title, company: job.company_name, userId: u.id, dryRun, jobDescription: p.description, emailCode, emailLink, accountExists: Boolean(acct?.account_created) });
     log(`apply ${u.id.slice(0, 8)} → ${job.company_name} / ${job.title}: ${r.status} in ${Math.round((Date.now() - t0) / 1000)}s, ${r.aiCalls ?? 0} AI call(s) (${r.detail})`);
     if (dryRun && r.answers) log("  answers:", JSON.stringify(r.answers).slice(0, 1500));
     if (dryRun && r.pending?.length) log("  waiting on user:", JSON.stringify(r.pending).slice(0, 1500));
@@ -525,7 +541,7 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
       submitted_at: r.status === "submitted" ? new Date().toISOString() : null,
       resume_focus: focus,
     });
-    if (r.usedPortalLogin && !dryRun)
+    if ((r.usedPortalLogin || r.accountCreated) && !dryRun)
       await sb.from("application_accounts").update({ account_created: true, notes: `Used on the ${job.title} application` }).eq("user_id", u.id).eq("portal_host", host);
     // Back off from sites that push back, instead of retrying through them.
     if (!dryRun) {

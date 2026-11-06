@@ -8,16 +8,27 @@ import type { Mailbox } from "./mailbox";
 import { GmailAuthError } from "../../src/lib/v2/gmail";
 
 /** Pulls the verification code out of an email body. */
+/** Looks like a one-time code, not an ordinary word ("Hearst", "Application", "HTML"). */
+const codeLike = (w: string) => {
+  if (/^(19|20)\d\d$/.test(w)) return false; // a year
+  if (/\d/.test(w)) return /[0-9]/.test(w) && w.length >= 4;
+  // Letters only: needs real case-mixing inside the word (aB3dE5fG / kQxPzRtM), not a capitalised word.
+  const upper = (w.match(/[A-Z]/g) ?? []).length;
+  const lower = (w.match(/[a-z]/g) ?? []).length;
+  return w.length >= 6 && upper >= 2 && lower >= 2 && !/^[A-Z][a-z]+$/.test(w) && !/^[A-Z]+[a-z]+$/.test(w);
+};
+
 export function extractCode(text: string): string | null {
   const t = text.replace(/\s+/g, " ");
-  // Look shortly after words like "code"/"passcode" for a 4–10 character token with a digit,
-  // or a mixed-case token (Greenhouse codes look like "aB3dE5fG").
-  const re = /(code|passcode|pin|one[- ]time password|otp)\b/gi;
+  // 1. "…code …: XXXXXXXX" — the code right after a colon is the strongest signal.
+  const colon = /(code|passcode|pin|otp)\b[^:\n]{0,120}:\s*([A-Za-z0-9]{4,12})\b/gi;
   let m: RegExpExecArray | null;
+  while ((m = colon.exec(t))) if (codeLike(m[2])) return m[2];
+  // 2. "Your verification code is 482913" / a code token shortly after the word "code".
+  const re = /(code|passcode|pin|one[- ]time password|otp)\b/gi;
   while ((m = re.exec(t))) {
     const window = t.slice(m.index + m[0].length, m.index + m[0].length + 220);
-    const tokens = window.match(/\b[A-Za-z0-9]{4,10}\b/g) ?? [];
-    const hit = tokens.find((w) => /\d/.test(w) && !/^(19|20)\d\d$/.test(w)) ?? tokens.find((w) => /[a-z]/.test(w) && /[A-Z]/.test(w) && w.length >= 6);
+    const hit = (window.match(/\b[A-Za-z0-9]{4,12}\b/g) ?? []).find(codeLike);
     if (hit) return hit;
   }
   return null;

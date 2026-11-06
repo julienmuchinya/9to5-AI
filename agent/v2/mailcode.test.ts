@@ -9,6 +9,12 @@ describe("verification emails", () => {
     expect(extractCode("Your verification code is 482913. It expires in 10 minutes.")).toBe("482913");
     expect(extractCode("© 2026 Acme. Your one-time passcode: 7731")).toBe("7731");
   });
+  it("never mistakes the company name in the subject for the code", () => {
+    const mail = "Security code for your application to Hearst\nHi Ada, Copy and paste this code into the security code field on your application: kQ7xPz2R\nAfter you enter the code, resubmit your application.";
+    expect(extractCode(mail)).toBe("kQ7xPz2R");
+    expect(extractCode("Security code for your application to Hearst\nCopy and paste this code into the security code field: AbCdEfGh")).toBe("AbCdEfGh");
+    expect(extractCode("Security code for your application to Hearst")).toBeNull();
+  });
   it("returns null when there is no code", () => {
     expect(extractCode("Thanks for applying to Acme! We'll be in touch.")).toBeNull();
   });
