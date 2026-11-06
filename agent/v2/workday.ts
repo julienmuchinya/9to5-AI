@@ -61,6 +61,18 @@ async function mouseClick(page: Page, sel: string): Promise<boolean> {
   return false;
 }
 
+/** After a click that navigates: wait until Workday shows a known screen (form, step, or message). */
+async function settle(page: Page, ms = 15000) {
+  await page.waitForLoadState("domcontentloaded", { timeout: ms }).catch(() => {});
+  await page.waitForLoadState("networkidle", { timeout: 8000 }).catch(() => {});
+  await page
+    .locator(`${AUTH_FORM}, ${NEXT}, ${WD("progressBarActiveStep")}, ${ERRORS}`)
+    .first()
+    .waitFor({ state: "visible", timeout: ms })
+    .catch(() => {});
+  await page.waitForTimeout(1000);
+}
+
 async function errorsOnPage(page: Page): Promise<string> {
   const errs = await page.locator(ERRORS).allTextContents().catch(() => [] as string[]);
   return errs.map((e) => e.replace(/\s+/g, " ").trim()).filter(Boolean).join(" · ").slice(0, 300);
@@ -82,8 +94,12 @@ async function workdayAuth(page: Page, opts: ApplyOpts): Promise<AuthResult> {
     await page.fill(WD("email"), portal.email).catch(() => {});
     await page.fill(WD("password"), portal.password).catch(() => {});
     await clickWd(page, "signInSubmitButton", "Sign In");
-    await page.waitForTimeout(5000);
-    if (!(await visible(page, AUTH_FORM))) return "ok";
+    await settle(page);
+    if (!(await visible(page, AUTH_FORM)) && ((await visible(page, NEXT)) || (await visible(page, WD("progressBarActiveStep"))))) return "ok";
+    if (!(await visible(page, AUTH_FORM))) {
+      await settle(page);
+      if (!(await visible(page, AUTH_FORM))) return "ok";
+    }
     const t = `${await errorsOnPage(page)} ${await text(page)}`;
     if (/(verify|verification|activate|not (been )?(verified|activated))/i.test(t)) return "unverified";
     if (/(incorrect|invalid|wrong|doesn.t match|locked)/i.test(t)) return "bad_password";
@@ -147,8 +163,8 @@ async function workdayAuth(page: Page, opts: ApplyOpts): Promise<AuthResult> {
     if (await agree.isVisible().catch(() => false)) await agree.check({ force: true }).catch(() => agree.click({ force: true }));
     if (await captchaVisible(page)) return { ok: false, result: { status: "needs_user", detail: `Workday (${host}) shows a CAPTCHA on account creation — create the account yourself with the login under Portal logins.` } };
     await clickWd(page, "createAccountSubmitButton", "Create Account");
-    await page.waitForTimeout(6000);
-    if (!(await visible(page, AUTH_FORM))) return { ok: true, created: true };
+    await settle(page);
+    if (!(await visible(page, AUTH_FORM)) && ((await visible(page, NEXT)) || (await visible(page, WD("progressBarActiveStep"))))) return { ok: true, created: true };
     const t = `${await errorsOnPage(page)} ${await text(page)}`;
     if (/already (exists|in use|registered|been used)|account with this email/i.test(t)) {
       const r = await signIn();
@@ -233,7 +249,19 @@ export async function applyWorkday(page: Page, db: SupabaseClient, opts: ApplyOp
         return { status: "submitted", detail: "Application submitted on Workday", answers: allAnswers, learned, aiCalls, usedPortalLogin: true, accountCreated };
       if (await captchaVisible(page)) return { status: "needs_user", detail: "Workday shows a CAPTCHA — please finish this one yourself", answers: allAnswers, learned, aiCalls, usedPortalLogin: true, accountCreated };
 
-      const stepName = ((await page.locator(WD("progressBarActiveStep")).first().textContent().catch(() => "")) ?? "").replace(/\s+/g, " ").trim() || `step ${step + 1}`;
+      if (await visible(page, AUTH_FORM)) {
+        const msg = (await errorsOnPage(page)) || "Workday asked to sign in again";
+        return { status: "needs_user", detail: `Workday sign-in didn't stick: ${msg}. If it says to verify your account, click the link Workday emailed you, then Retry.`, answers: allAnswers, learned, aiCalls, accountCreated };
+      }
+      const rawStep = ((await page.locator(WD("progressBarActiveStep")).first().textContent().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+      if (!rawStep && !(await visible(page, NEXT))) {
+        await settle(page);
+        if (!(await visible(page, NEXT)) && !(await visible(page, WD("progressBarActiveStep")))) {
+          const msg = (await errorsOnPage(page)) || (await text(page)).slice(0, 160);
+          return { status: "needs_user", detail: `Workday showed an unexpected page: ${msg}`, answers: allAnswers, learned, aiCalls, accountCreated };
+        }
+      }
+      const stepName = rawStep.replace(/^current step \d+ of \d+/i, "").trim() || `step ${step + 1}`;
       if (stepName === lastStep) sameStepTries++;
       else sameStepTries = 0;
       lastStep = stepName;

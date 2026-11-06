@@ -29,7 +29,7 @@ import { openMailbox } from "./mailbox";
 import { resumeFocus } from "../../src/lib/v2/tracking";
 import { decryptSecret, encryptSecret, generatePortalPassword } from "../../src/lib/v2/vault";
 import { COMPANY_DAILY_CAP, companyKey, planQueue } from "../../src/lib/v2/priority";
-import { customStore, rememberAnswers, type AppAnswers, type CustomAnswers } from "../../src/lib/v2/app-questions";
+import { customStore, memoryKey, rememberAnswers, type AppAnswers, type CustomAnswers } from "../../src/lib/v2/app-questions";
 
 const startedAt = Date.now();
 const env = (k: string, d = "") => process.env[k] ?? d;
@@ -515,7 +515,15 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
     if (isWorkday) await ensurePortalLogin(sb, u.id, email, job.company_name, applyUrl);
     applicant.portal = await portalLogin(sb, u.id, applyUrl);
     const { data: acct } = await sb.from("application_accounts").select("account_created").eq("user_id", u.id).eq("portal_host", host).maybeSingle();
-    applicant.memory = memory;
+    // Retrying this job? Reuse the long written answers ("Why us?", project write-ups) from the last attempt
+    // instead of paying for a new AI call. Short answers are re-derived so fixes to the rules apply.
+    const { data: prevApp } = await sb.from("applications").select("answers").eq("user_id", u.id).eq("job_id", job.id).maybeSingle();
+    const reuse = Object.fromEntries(
+      Object.entries((prevApp?.answers ?? {}) as Record<string, string>)
+        .filter(([q, v]) => typeof v === "string" && v.length >= 80 && !/^https?:/.test(v) && !/^f\d+/.test(q))
+        .map(([q, v]) => [memoryKey(q), v])
+    );
+    applicant.memory = { ...memory, ...reuse };
     const t0 = Date.now();
     const r = await applyToJob(browser, sb, { url: applyUrl, ats: p.ats, applicant, resumePath, jobTitle: job.title, company: job.company_name, userId: u.id, dryRun, jobDescription: p.description, emailCode, emailLink, accountExists: Boolean(acct?.account_created) });
     log(`apply ${u.id.slice(0, 8)} → ${job.company_name} / ${job.title}: ${r.status} in ${Math.round((Date.now() - t0) / 1000)}s, ${r.aiCalls ?? 0} AI call(s) (${r.detail})`);
