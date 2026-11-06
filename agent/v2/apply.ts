@@ -229,7 +229,22 @@ export async function collectFields(page: Page): Promise<Field[]> {
 
       const id = `f${n++}`;
       el.setAttribute("data-9to5", id);
-      const label = labelFor(el);
+      let label = labelFor(el);
+      if (/^(start|end|from|to|graduation)?\s*(date|month|year)?\s*[*✱]?$/i.test(label) && label.length < 25) {
+        // Which section is this in? ("Education", "Work experience"…)
+        let sec = "";
+        for (let a: Element | null = el.parentElement; a && !sec && a.tagName !== "FORM" && a.tagName !== "BODY"; a = a.parentElement) {
+          // The closest heading-like text above the field inside this ancestor (not the form's first heading).
+          const heads = Array.from(
+            a.querySelectorAll("h1, h2, h3, h4, h5, legend, [class*=section-title], [class*=sectionTitle], [class*=SectionHeader], [class*=heading], label")
+          ).filter((h) => !h.contains(el) && !h.querySelector("input, select, textarea") && h.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING);
+          const named = heads.map((h) => textOf(h)).filter((t) => t && !/^(start|end|from|to)?\s*(date|month|year)?\s*[*✱]?$/i.test(t));
+          if (named.length) sec = named[named.length - 1].slice(0, 60);
+        }
+        const first = el.tagName === "SELECT" ? ((el as HTMLSelectElement).options[0]?.text ?? "") : el.getAttribute("placeholder") ?? "";
+        const part = /month/i.test(first) ? " (month)" : /year/i.test(first) ? " (year)" : /day/i.test(first) ? " (day)" : "";
+        label = `${sec ? `${sec} — ` : ""}${label}${part}`;
+      }
       const required = isRequired(el, label);
       if (el.tagName === "SELECT") {
         const opts = Array.from((el as HTMLSelectElement).options)
@@ -555,6 +570,7 @@ RULES:
 - For select/radio questions, return one of the listed options exactly. For "checkboxes" (pick any), return the fitting options exactly, comma separated.
 - Checkbox: return "yes" only for required acknowledgements/consents to apply or privacy policies.
 - Free-text questions about experience, projects, tools, skills or motivation (textarea/text): ALWAYS answer (never null) in first person from the resume — pick the most relevant real project/experience; if the resume has nothing specific, answer honestly with the closest relevant experience and eagerness to learn.
+- Education / work-history dates ("Education — Start Date (year)"): take them from the resume (graduation = end date). For (month)/(year) parts return just that part as listed in the options.
 - Commute questions ("able to commute to <place>?"): Yes only if the applicant's location is in the same metro area as the job; otherwise No. Relocation questions follow willing_to_relocate.
 - Free-text ("why this company", "anything else", "cover letter"): 3-5 sentences in first person. Name the role and company, connect 2-3 concrete resume achievements/skills to what the job description asks for, end with enthusiasm. No clichés, no placeholders.
 FACTS: ${JSON.stringify(facts)}

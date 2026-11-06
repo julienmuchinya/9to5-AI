@@ -390,6 +390,9 @@ export function commonSenseAnswer(label: string, options: string[], kind: string
   // "If yes / If you selected Yes…, please specify" follow-ups: when they're free text, N/A is the honest answer
   // (the agent only reaches here when nothing else answered it).
   if (/^(if (yes|so|applicable|you (selected|answered|chose|checked) ["“']?yes)|please (specify|explain) if)/.test(l) && (kind === "text" || kind === "textarea")) return "N/A";
+  // "Which month(s) are you available to start?" with a checkbox list: flexible = tick every offered month.
+  if (kind === "checkboxes" && /(available|availability|able) to (start|begin)|start (month|date|term)|when can you start/.test(l) && options.length && options.every((o) => /(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|spring|summer|fall|autumn|winter)/i.test(o)))
+    return options.join(", ");
   // Workday contact basics.
   if (/phone (device )?type/.test(l)) return pick(/mobile|cell/i) ?? (options.length ? null : "Mobile");
   if (/(country )?phone code|country code/.test(l)) return pick(/united states/i, /\+1\b/);
