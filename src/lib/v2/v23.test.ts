@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { commonSenseAnswer } from "./app-questions";
+import { commonSenseAnswer, questionFor } from "./app-questions";
 import { knownValue, type Applicant, type Field } from "../../../agent/v2/apply";
 
 const me: Applicant = {
@@ -45,5 +45,22 @@ describe("sponsorship asked without the word 'sponsor'", () => {
   });
   it("still leaves 'please confirm' notices alone", () => {
     expect(knownValue(f("Sponsorship is not available for this role. Please confirm you understand.", "select", ["Yes", "No"]), me)).toBeNull();
+  });
+});
+
+describe('round 3: real-form mistakes', () => {
+  const withLinks: Applicant = { ...me, linkedin_url: 'https://linkedin.com/in/ada', answers: { work_mode: 'Remote, hybrid or onsite' } };
+  it('does not paste the LinkedIn URL into "how did you hear"', () => {
+    expect(knownValue(f('How did you hear about us? (LinkedIn, job board, recruiter outreach, employee referral, etc.)', 'textarea'), withLinks)).toBe('LinkedIn');
+    expect(knownValue(f('LinkedIn URL', 'text'), withLinks)).toBe('https://linkedin.com/in/ada');
+  });
+  it('a long label is classified by its start, not by tooltip text further on', () => {
+    expect(questionFor('Race' + ' '.repeat(5) + 'x'.repeat(200) + ' Hispanic or Latino: a person of Cuban, Mexican…')?.key).toBe('race');
+  });
+  it('leaves commute-distance questions to the AI (it knows both locations)', () => {
+    expect(knownValue(f('This role requires at least 3 days a week in the office, are you able to easily commute to the location the role is based in?', 'select', ['Yes', 'No']), withLinks)).toBeNull();
+  });
+  it('answers N/A to follow-ups whose condition does not apply', () => {
+    expect(commonSenseAnswer('If you selected “Yes” to requiring sponsorship now or in the future, please specify your current visa', [], 'textarea')).toBe('N/A');
   });
 });

@@ -90,6 +90,13 @@ export async function collectFields(page: Page): Promise<Field[]> {
     const out: Field[] = [];
     const seenGroup = new Set<string>();
     const clean = (s: string | null | undefined) => (s ?? "").replace(/\s+/g, " ").trim().slice(0, 300);
+    /** Visible text of a label, without tooltips, popovers or screen-reader-only helper text. */
+    const textOf = (n: Element | null | undefined): string => {
+      if (!n) return "";
+      const c = n.cloneNode(true) as Element;
+      c.querySelectorAll("[role=tooltip], [class*=tooltip], [class*=popover], [class*=Tooltip], [hidden], [aria-hidden=true], .sr-only, .visually-hidden, [class*=info-text], [class*=definition]").forEach((x) => x.remove());
+      return clean(c.textContent);
+    };
     const visible = (el: Element) => {
       const r = (el as HTMLElement).getBoundingClientRect();
       const st = getComputedStyle(el as HTMLElement);
@@ -103,13 +110,13 @@ export async function collectFields(page: Page): Promise<Field[]> {
      */
     const questionText = (el: Element): string => {
       const legend = el.closest("fieldset")?.querySelector("legend");
-      if (legend && !legend.contains(el)) return clean(legend.textContent);
+      if (legend && !legend.contains(el)) return textOf(legend);
       let a: Element | null = el.parentElement;
       for (let depth = 0; a && depth < 7 && a.tagName !== "FORM" && a.tagName !== "BODY"; depth++, a = a.parentElement) {
         const cands = Array.from(a.querySelectorAll("legend, label, .application-label, [class*=label], [class*=question-title], [class*=Question] > p, h3, h4")).filter(
           (c) => !c.contains(el) && !c.querySelector(CONTROL) && !c.closest("label")?.querySelector(CONTROL) && clean(c.textContent) && c.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING
         );
-        if (cands.length) return clean(cands[cands.length - 1].textContent);
+        if (cands.length) return textOf(cands[cands.length - 1]);
       }
       return "";
     };
@@ -120,7 +127,7 @@ export async function collectFields(page: Page): Promise<Field[]> {
       const aria = el.getAttribute("aria-label");
       const labelledby = el.getAttribute("aria-labelledby");
       const lb = labelledby ? labelledby.split(/\s+/).map((x) => document.getElementById(x)?.textContent ?? "").join(" ") : "";
-      return clean(byFor?.textContent || aria || lb || el.closest("label")?.textContent || (el as HTMLInputElement).value || "");
+      return clean(textOf(byFor) || aria || lb || textOf(el.closest("label")) || (el as HTMLInputElement).value || "");
     };
     const labelFor = (el: Element): string => {
       const id = el.getAttribute("id");
@@ -128,7 +135,7 @@ export async function collectFields(page: Page): Promise<Field[]> {
       const aria = el.getAttribute("aria-label");
       const labelledby = el.getAttribute("aria-labelledby");
       const lb = labelledby ? labelledby.split(/\s+/).map((x) => document.getElementById(x)?.textContent ?? "").join(" ") : "";
-      return clean(byFor?.textContent || aria || lb || el.closest("label")?.textContent || questionText(el) || el.getAttribute("placeholder") || el.getAttribute("name") || "");
+      return clean(textOf(byFor) || aria || lb || textOf(el.closest("label")) || questionText(el) || el.getAttribute("placeholder") || el.getAttribute("name") || "");
     };
     const isRequired = (el: Element, label: string) => {
       const input = el as HTMLInputElement;
@@ -232,8 +239,9 @@ export function knownValue(f: Field, a: Applicant): string | null {
   if (/e-?mail/.test(l) && f.kind !== "checkbox" && f.kind !== "radio") return a.portal?.email && /account|login|user/.test(l) ? a.portal.email : a.email;
   // \b so "phonetic" or "mobile apps" don't count as a phone field.
   if (/\b(phone|mobile|cell)( number| no\.?)?\b(?! app)/.test(l) && !/phonetic/.test(l) && f.kind !== "radio" && f.kind !== "checkbox" && f.kind !== "select") return a.phone ?? null;
-  if (/linkedin/.test(l)) return a.linkedin_url ?? null;
-  if (/github/.test(l)) return a.github_url ?? null;
+  const howHeard = /(hear|learn|find out|found|source|referr)/.test(l);
+  if (/linkedin/.test(l) && !howHeard && f.kind !== "select" && f.kind !== "radio") return a.linkedin_url ?? null;
+  if (/github/.test(l) && !howHeard) return a.github_url ?? null;
   if (/website|portfolio|personal (site|url)/.test(l)) return a.website_url ?? a.github_url ?? null;
   if ((/^(current )?(location|city)\b|where are you (located|based)/.test(l) || /city.{0,10}state/.test(l)) && f.kind !== "radio" && f.kind !== "checkbox")
     return [a.city, a.state].filter(Boolean).join(", ") || null;
@@ -261,6 +269,7 @@ export function knownValue(f: Field, a: Applicant): string | null {
     return yesNo(f, a.work_authorized_us);
   }
   if (/relocat/.test(l) && !a.answers?.willing_to_relocate && a.relocation != null) return yesNo(f, a.relocation);
+  if (/commut/.test(l)) return null;
   const saved = answerFromProfile(f.label, f.options, a.answers ?? {});
   if (saved) return saved;
   const opts = f.kind === "checkbox" ? ["Yes", "No"] : f.options;
@@ -291,8 +300,9 @@ export const captchaVisible = (page: Page) =>
     return frames.some((f) => {
       const src = f.getAttribute("src") ?? "";
       const r = f.getBoundingClientRect();
-      if (!/hcaptcha|recaptcha\/(api2|enterprise)\/(anchor|bframe)|challenges\.cloudflare|turnstile/.test(src)) return false;
-      if (/size=invisible|enclave/.test(src)) return false;
+      const title = f.getAttribute("title") ?? "";
+      if (!/hcaptcha|recaptcha\/(api2|enterprise)\/(anchor|bframe)|challenges\.cloudflare|turnstile/.test(src) && !/captcha|challenge/i.test(title)) return false;
+      if (/size=invisible/.test(src)) return false;
       const onScreen = r.width > 60 && r.height > 60 && r.bottom > 0 && r.right > 0 && r.top < innerHeight * 3;
       return onScreen && shown(f);
     });
@@ -425,6 +435,7 @@ export async function answerFields(
         graduation: opts.applicant.graduation_date,
         authorized_to_work_in_us: opts.applicant.work_authorized_us,
         needs_visa_sponsorship: opts.applicant.sponsorship_needed,
+        willing_to_relocate: opts.applicant.relocation,
         saved_answers: opts.applicant.answers ?? {},
         resume: opts.applicant.resume_text.slice(0, 6000),
         job_description: (opts.jobDescription ?? "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").slice(0, 3500),
@@ -444,6 +455,8 @@ RULES:
 - Work authorization and sponsorship must match the facts exactly; if they are null, return null.
 - For select/radio questions, return one of the listed options exactly. For "checkboxes" (pick any), return the fitting options exactly, comma separated.
 - Checkbox: return "yes" only for required acknowledgements/consents to apply or privacy policies.
+- Free-text questions about experience, projects, tools, skills or motivation (textarea/text): ALWAYS answer (never null) in first person from the resume — pick the most relevant real project/experience; if the resume has nothing specific, answer honestly with the closest relevant experience and eagerness to learn.
+- Commute questions ("able to commute to <place>?"): Yes only if the applicant's location is in the same metro area as the job; otherwise No. Relocation questions follow willing_to_relocate.
 - Free-text ("why this company", "anything else", "cover letter"): 3-5 sentences in first person. Name the role and company, connect 2-3 concrete resume achievements/skills to what the job description asks for, end with enthusiasm. No clichés, no placeholders.
 FACTS: ${JSON.stringify(facts)}
 QUESTIONS: ${JSON.stringify(needAi.map((f) => ({ id: f.id, question: f.label, type: f.kind, options: f.options, required: f.required })))}

@@ -219,7 +219,8 @@ export const APP_QUESTION_GROUPS = ["Eligibility", "Availability & pay", "Backgr
 export type AppAnswers = Record<string, string>;
 
 /** The saved question whose wording matches this form label, if any. */
-export function questionFor(label: string): AppQuestion | null {
+export function questionFor(rawLabel: string): AppQuestion | null {
+  const label = rawLabel.slice(0, 200);
   const l = label.toLowerCase().replace(/\s+/g, " ");
   for (const q of APP_QUESTIONS) if (q.match.test(l) && !(q.not && q.not.test(l))) return q;
   return null;
@@ -386,6 +387,9 @@ export function commonSenseAnswer(label: string, options: string[], kind: string
   // Referrals / knowing employees / relatives: the honest default is No.
   if (/(referred|referral|know (anyone|someone)|relative|family member|related to).{0,80}(employ|work|compan|organi[sz]ation|here)|were you referred|employee referral/.test(l) && !/name of/.test(l))
     return kind === "text" || kind === "textarea" ? (/name|who/.test(l) ? "N/A" : "No") : no();
+  // "If yes / If you selected Yes…, please specify" follow-ups: when they're free text, N/A is the honest answer
+  // (the agent only reaches here when nothing else answered it).
+  if (/^(if (yes|so|applicable|you (selected|answered|chose|checked) ["“']?yes)|please (specify|explain) if)/.test(l) && (kind === "text" || kind === "textarea")) return "N/A";
   // Workday contact basics.
   if (/phone (device )?type/.test(l)) return pick(/mobile|cell/i) ?? (options.length ? null : "Mobile");
   if (/(country )?phone code|country code/.test(l)) return pick(/united states/i, /\+1\b/);

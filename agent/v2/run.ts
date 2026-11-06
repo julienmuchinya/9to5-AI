@@ -447,8 +447,10 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
   const attemptLimit = Number(env("APPLY_LIMIT", "0")) || Infinity; // for testing: try at most N forms
   let attempts = 0;
   const onlyCompany = env("APPLY_ONLY_COMPANY", "").toLowerCase(); // testing: one company only
+  const onlyAts = env("APPLY_ONLY_ATS", "").split(",").map((x) => x.trim()).filter(Boolean); // testing: e.g. "lever,ashby"
   for (const { appId, job } of picked) {
     if (onlyCompany && !job.company_name.toLowerCase().includes(onlyCompany)) continue;
+    if (onlyAts.length && !onlyAts.includes(job.job_postings.ats)) continue;
     if (remaining <= 0 || attempts >= attemptLimit) break;
     if (timeLeft() < 4 * 60_000) {
       log("run time budget used; leaving the rest of the queue for the next run");
