@@ -25,6 +25,7 @@ import { renderResumePdf, tailorResume, resumeToText, type ParsedResume } from "
 import { applyToJob, type Applicant } from "./apply";
 import { scanInbox } from "./inbox";
 import { waitForVerification } from "./mailcode";
+import { openMailbox } from "./mailbox";
 import { resumeFocus } from "../../src/lib/v2/tracking";
 import { decryptSecret, encryptSecret, generatePortalPassword } from "../../src/lib/v2/vault";
 import { COMPANY_DAILY_CAP, companyKey, planQueue } from "../../src/lib/v2/priority";
@@ -414,16 +415,12 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
     memory,
     custom: customStore(u.custom_answers),
   };
-  // Gmail (app password) for codes that sites email during an application.
-  let emailCode: ((since: Date) => Promise<string | null>) | undefined;
-  if (u.inbox_email && u.inbox_password_enc && !u.inbox_error) {
-    try {
-      const creds = { email: u.inbox_email, host: u.inbox_host || "imap.gmail.com", password: decryptSecret(u.inbox_password_enc) };
-      emailCode = (since) => waitForVerification(creds, { since, match: /code|verif|security|greenhouse|lever|ashby/i, want: "code", timeoutMs: 75_000 });
-    } catch {
-      emailCode = undefined;
-    }
-  }
+  // The user's Gmail (Connect with Google, or app password) for codes sites email during an application.
+  const inbox = { inbox_email: u.inbox_email ?? null, inbox_host: u.inbox_host ?? null, inbox_password_enc: u.inbox_password_enc ?? null };
+  const emailCode: ((since: Date) => Promise<string | null>) | undefined =
+    inbox.inbox_email && inbox.inbox_password_enc && !u.inbox_error
+      ? (since) => waitForVerification(() => openMailbox(inbox), { since, match: /code|verif|security|greenhouse|lever|ashby/i, want: "code", timeoutMs: 75_000 })
+      : undefined;
   const save = async (row: Record<string, unknown>) => {
     if (dryRun) return; // dry runs never change the user's applications
     const { error } = await sb.from("applications").upsert({ ...row, status_updated_at: new Date().toISOString() }, { onConflict: "user_id,job_id" });

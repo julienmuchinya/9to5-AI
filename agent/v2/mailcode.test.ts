@@ -20,3 +20,34 @@ describe("verification emails", () => {
     expect(inboxErrorMessage({ message: "Command failed", responseText: "Invalid credentials (Failure)", authenticationFailed: true })).toMatch(/16-letter Gmail app password/);
   });
 });
+
+describe("connect with Google", () => {
+  it("asks Google for read-only Gmail and a refresh token", async () => {
+    process.env.GOOGLE_CLIENT_ID = "cid.apps.googleusercontent.com";
+    const { googleAuthUrl } = await import("../../src/lib/v2/gmail");
+    const u = new URL(googleAuthUrl({ origin: "https://app.example", state: "s1", loginHint: "a@gmail.com" }));
+    expect(u.hostname).toBe("accounts.google.com");
+    expect(u.searchParams.get("scope")).toContain("https://www.googleapis.com/auth/gmail.readonly");
+    expect(u.searchParams.get("scope")).not.toContain("https://mail.google.com/");
+    expect(u.searchParams.get("access_type")).toBe("offline");
+    expect(u.searchParams.get("redirect_uri")).toBe("https://app.example/api/google/callback");
+    expect(u.searchParams.get("state")).toBe("s1");
+  });
+  it("reads a code from whichever mailbox is connected", async () => {
+    const { waitForVerification } = await import("./mailcode");
+    let closed = false;
+    const box = {
+      kind: "gmail-api" as const,
+      list: async () => [
+        { id: "1", from: "Newsletter <news@x.com>", subject: "Weekly digest", date: new Date(), body: async () => ({ text: "code 999999", html: "" }) },
+        { id: "2", from: "Greenhouse <no-reply@us.greenhouse-mail.io>", subject: "Security code for your application to Acme", date: new Date(), body: async () => ({ text: "Paste this code into the security code field: Xy7Kp2Qa", html: "" }) },
+      ],
+      close: async () => {
+        closed = true;
+      },
+    };
+    const code = await waitForVerification(async () => box, { since: new Date(), match: /greenhouse|security code/i, want: "code", timeoutMs: 1000 });
+    expect(code).toBe("Xy7Kp2Qa");
+    expect(closed).toBe(true);
+  });
+});

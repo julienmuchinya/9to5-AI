@@ -1,14 +1,11 @@
 /**
  * Reads a one-time verification code or link from the user's inbox while an application is open
  * (e.g. Greenhouse's "enter the 8-character code we emailed you", or "verify your email" links).
- * Read-only IMAP with the user's Gmail app password; never sends, deletes or marks mail as read.
+ * Read-only (Gmail API via "Connect with Google", or IMAP); never sends, deletes or marks mail as read.
  */
 
-export interface MailCreds {
-  email: string;
-  host: string;
-  password: string;
-}
+import type { Mailbox } from "./mailbox";
+import { GmailAuthError } from "../../src/lib/v2/gmail";
 
 /** Pulls the verification code out of an email body. */
 export function extractCode(text: string): string | null {
@@ -38,46 +35,34 @@ export function extractLink(html: string, text = ""): string | null {
  * (tested against sender + subject), then returns its code or link.
  */
 export async function waitForVerification(
-  creds: MailCreds,
+  open: () => Promise<Mailbox>,
   opts: { since: Date; match: RegExp; want: "code" | "link"; timeoutMs?: number }
 ): Promise<string | null> {
-  const { ImapFlow } = await import("imapflow");
-  const { simpleParser } = await import("mailparser");
   const deadline = Date.now() + (opts.timeoutMs ?? 90_000);
-  const client = new ImapFlow({ host: creds.host || "imap.gmail.com", port: 993, secure: true, auth: { user: creds.email, pass: creds.password }, logger: false });
-  await client.connect();
+  const box = await open();
+  const seen = new Set<string>();
   try {
     while (Date.now() < deadline) {
-      const lock = await client.getMailboxLock("INBOX", { readOnly: true });
-      try {
-        // IMAP "since" is day-granular; filter by exact time below.
-        const uids = ((await client.search({ since: new Date(opts.since.getTime() - 86400_000) }, { uid: true })) || []) as number[];
-        for (const uid of uids.slice(-25).reverse()) {
-          const msg = await client.fetchOne(String(uid), { envelope: true, source: { start: 0, maxLength: 200_000 } }, { uid: true });
-          if (!msg) continue;
-          const when = msg.envelope?.date ? new Date(msg.envelope.date) : null;
-          if (when && when.getTime() < opts.since.getTime() - 60_000) continue;
-          const from = (msg.envelope?.from ?? []).map((f) => `${f.name ?? ""} ${f.address ?? ""}`).join(" ");
-          if (!opts.match.test(`${from} ${msg.envelope?.subject ?? ""}`)) continue;
-          if (!msg.source) continue;
-          const parsed = await simpleParser(msg.source);
-          const text = `${msg.envelope?.subject ?? ""}\n${parsed.text ?? ""}`;
-          const found = opts.want === "code" ? extractCode(text) : extractLink(typeof parsed.html === "string" ? parsed.html : "", parsed.text ?? "");
-          if (found) return found;
-        }
-      } finally {
-        lock.release();
+      for (const m of await box.list(new Date(opts.since.getTime() - 60_000), 25)) {
+        if (seen.has(m.id)) continue;
+        seen.add(m.id);
+        if (!opts.match.test(`${m.from} ${m.subject}`)) continue;
+        const { text, html } = await m.body();
+        const found = opts.want === "code" ? extractCode(`${m.subject}
+${text}`) : extractLink(html, text);
+        if (found) return found;
       }
       await new Promise((r) => setTimeout(r, 6000));
     }
     return null;
   } finally {
-    await client.logout().catch(() => {});
+    await box.close();
   }
 }
 
 /** Turns an IMAP error into something the user can act on. */
 export function inboxErrorMessage(e: unknown): string {
+  if (e instanceof GmailAuthError) return e.message;
   const err = e as { message?: string; responseText?: string; authenticationFailed?: boolean };
   const text = `${err.responseText ?? ""} ${err.message ?? ""}`;
   if (err.authenticationFailed || /invalid credentials|authenticat|AUTHENTICATIONFAILED|login/i.test(text))

@@ -248,6 +248,6 @@ async function testImapLogin(host: string, email: string, pass: string): Promise
 
 export async function disconnectInbox() {
   const { supabase, user } = await requireUser();
-  await supabase.from("profiles").update({ inbox_email: null, inbox_password_enc: null, inbox_error: null }).eq("id", user.id);
+  await supabase.from("profiles").update({ inbox_email: null, inbox_host: null, inbox_password_enc: null, inbox_error: null, inbox_last_scan_at: null }).eq("id", user.id);
   revalidatePath("/settings");
 }

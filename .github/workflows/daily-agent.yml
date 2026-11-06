@@ -56,6 +56,9 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           VAULT_KEY: ${{ secrets.VAULT_KEY }}
+          # "Connect with Google" inboxes: refreshes Gmail access for reply tracking and emailed codes.
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           GEMINI_MODEL: gemini-3.5-flash
           GITHUB_REPO_PUBLIC: ${{ github.event.repository.private == false }}
           DISCOVER: ${{ github.event.inputs.discover || 'true' }}
