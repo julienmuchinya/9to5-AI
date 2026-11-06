@@ -2,6 +2,7 @@
 
 import { useFormStatus } from "react-dom";
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { buttonCls } from "./ui";
 
 /** Form button that shows "Saving…" while the save runs, then "Saved ✓" briefly. Failures go to the error screen. */
 export function SubmitButton({ children, variant = "primary" }: { children: ReactNode; variant?: "primary" | "secondary" }) {
@@ -17,12 +18,8 @@ export function SubmitButton({ children, variant = "primary" }: { children: Reac
     }
     was.current = pending;
   }, [pending]);
-  const cls =
-    variant === "primary"
-      ? "bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white"
-      : "bg-[var(--border)] text-[var(--foreground)] hover:opacity-90";
   return (
-    <button type="submit" disabled={pending} className={`rounded-lg px-4 py-2 text-sm font-medium disabled:opacity-50 ${cls}`}>
+    <button type="submit" disabled={pending} className={buttonCls(variant)}>
       {pending ? "Saving…" : saved ? "Saved ✓" : children}
     </button>
   );

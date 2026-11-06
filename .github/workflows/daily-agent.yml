@@ -30,7 +30,7 @@ concurrency:
 jobs:
   run-agent:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 55
     steps:
       - uses: actions/checkout@v4
 
@@ -62,4 +62,6 @@ jobs:
           APPLY: ${{ github.event.inputs.apply || 'true' }}
           APPLY_DRY_RUN: ${{ github.event.inputs.apply_dry_run || 'false' }}
           ONLY_USER: ${{ github.event.inputs.only_user }}
+          # Stop starting new applications after this many minutes (job timeout is 55).
+          RUN_BUDGET_MIN: "42"
         run: npx tsx agent/v2/run.ts

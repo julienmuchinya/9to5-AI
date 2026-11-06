@@ -5,7 +5,7 @@ import { disconnectInbox, saveAutopilot, saveInbox } from "../actions";
 
 export const dynamic = "force-dynamic";
 
-const input = "mt-1 w-32 rounded-lg border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-sm";
+const input = "mt-1.5 w-32 rounded-xl border border-[var(--border)] bg-[var(--background-2)] px-3 py-2 text-sm outline-none focus:border-[var(--accent)]";
 
 export default async function SettingsPage() {
   const { supabase, user } = await requireUser();
@@ -45,8 +45,8 @@ export default async function SettingsPage() {
           <div className="grid gap-4 sm:grid-cols-2">
             <label className="block text-sm">
               Max applications per day
-              <input className={input} type="number" name="daily_apply_cap" min={0} max={25} defaultValue={s?.daily_apply_cap ?? 5} />
-              <span className="mt-1 block text-xs text-[var(--muted)]">0–25. Fewer, better applications beat spam.</span>
+              <input className={input} type="number" name="daily_apply_cap" min={0} max={100} defaultValue={s?.daily_apply_cap ?? 5} />
+              <span className="mt-1 block text-xs text-[var(--muted)]">0–100 in total. Never more than 5 per company per day, freshest postings first. The free AI quota is the real limit.</span>
             </label>
             <label className="block text-sm">
               Minimum fit score to auto-apply

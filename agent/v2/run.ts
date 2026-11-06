@@ -25,7 +25,9 @@ import { renderResumePdf, tailorResume, resumeToText, type ParsedResume } from "
 import { applyToJob, type Applicant } from "./apply";
 import { scanInbox } from "./inbox";
 import { resumeFocus } from "../../src/lib/v2/tracking";
-import { encryptSecret, generatePortalPassword } from "../../src/lib/v2/vault";
+import { decryptSecret, encryptSecret, generatePortalPassword } from "../../src/lib/v2/vault";
+import { COMPANY_DAILY_CAP, companyKey, planQueue } from "../../src/lib/v2/priority";
+import { rememberAnswers, type AppAnswers } from "../../src/lib/v2/app-questions";
 
 const startedAt = Date.now();
 const env = (k: string, d = "") => process.env[k] ?? d;
@@ -59,10 +61,14 @@ const siteKey = (u: string) => {
 const ACCOUNT_SITES = /(myworkdayjobs\.com|myworkdaysite\.com|icims\.com|taleo\.net|successfactors\.(com|eu)|oraclecloud\.com|brassring\.com|ultipro\.com|ukg\.net|jobvite\.com|avature\.net|phenompeople\.com|eightfold\.ai)/i;
 
 // ── Anti-ban pacing (all tunable by env) ──────────────────────────────────
-const PACE_MIN_S = Number(env("PACE_MIN_S", "40"));
-const PACE_MAX_S = Number(env("PACE_MAX_S", "90"));
-const ATS_DAILY_CAP = Number(env("ATS_DAILY_CAP", "25")); // per ATS host, all users combined
-const COMPANY_GAP_DAYS = Number(env("COMPANY_GAP_DAYS", "14")); // agent applies to a company at most once per N days
+const PACE_MIN_S = Number(env("PACE_MIN_S", "20"));
+const PACE_MAX_S = Number(env("PACE_MAX_S", "45"));
+const ATS_DAILY_CAP = Number(env("ATS_DAILY_CAP", "80")); // per ATS host, all users combined
+const COMPANY_CAP = Number(env("COMPANY_DAILY_CAP", String(COMPANY_DAILY_CAP))); // per company, per user, per day
+const MAX_DAILY_CAP = 100;
+// Stop starting new applications after this many minutes, so the run ends before the workflow timeout.
+const RUN_BUDGET_MS = Number(env("RUN_BUDGET_MIN", "40")) * 60_000;
+const timeLeft = () => RUN_BUDGET_MS - (Date.now() - startedAt);
 
 async function activeCooldowns(sb: SupabaseClient): Promise<Map<string, string>> {
   const { data } = await sb.from("site_cooldowns").select("host,reason").gt("until", new Date().toISOString());
@@ -80,17 +86,33 @@ async function ensurePortalLogin(sb: SupabaseClient, userId: string, email: stri
   if (!host) return;
   const { data } = await sb.from("application_accounts").select("id").eq("user_id", userId).eq("portal_host", host).maybeSingle();
   if (data) return;
-  await sb.from("application_accounts").insert({
-    user_id: userId,
-    company_name: company,
-    portal_host: host,
-    portal_name: host,
-    login_url: `https://${host}`,
-    email_used: email,
-    password_enc: encryptSecret(generatePortalPassword()),
-    created_by: "agent",
-    account_created: false,
-  });
+  await sb.from("application_accounts").upsert(
+    {
+      user_id: userId,
+      company_name: company,
+      portal_host: host,
+      portal_name: host,
+      login_url: `https://${host}`,
+      email_used: email,
+      password_enc: encryptSecret(generatePortalPassword()),
+      created_by: "agent",
+      account_created: false,
+    },
+    { onConflict: "user_id,portal_host", ignoreDuplicates: true }
+  );
+}
+
+/** The saved login for this portal, decrypted, if there is one. */
+async function portalLogin(sb: SupabaseClient, userId: string, url: string): Promise<{ email: string; password: string } | null> {
+  const host = hostOf(url);
+  if (!host) return null;
+  const { data } = await sb.from("application_accounts").select("email_used,password_enc").eq("user_id", userId).eq("portal_host", host).maybeSingle();
+  if (!data?.password_enc) return null;
+  try {
+    return { email: data.email_used, password: decryptSecret(data.password_enc) };
+  } catch {
+    return null;
+  }
 }
 
 const chunk = <T,>(a: T[], n: number) => Array.from({ length: Math.ceil(a.length / n) }, (_, i) => a.slice(i * n, i * n + n));
@@ -196,6 +218,8 @@ interface UserRow {
   resume_parsed: ParsedResume | null;
   resume_updated_at: string | null;
   updated_at: string | null;
+  application_answers?: AppAnswers | null;
+  answer_memory?: AppAnswers | null;
 }
 interface Settings {
   user_id: string;
@@ -267,16 +291,32 @@ async function matchUser(
 }
 
 // ── 4. Auto-apply per user ────────────────────────────────────────────────
+type JobRow = {
+  id: string;
+  title: string;
+  company_name: string;
+  url: string;
+  fit_score: number | null;
+  posting_id: string;
+  job_postings: { ats: string; apply_url: string; url: string; verification_status: string; description: string; posted_at: string | null };
+};
+const JOB_COLS = "id,title,company_name,url,fit_score,posting_id, job_postings!inner(ats,apply_url,url,verification_status,description,posted_at)";
+
 async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser: import("playwright").Browser): Promise<Record<string, number>> {
   const result: Record<string, number> = {};
-  const cap = Math.max(0, Math.min(25, s.daily_apply_cap ?? 5));
-  const { count: doneToday } = await sb
-    .from("applications")
-    .select("id", { count: "exact", head: true })
-    .eq("user_id", u.id)
-    .eq("status", "submitted")
-    .gte("submitted_at", `${today()}T00:00:00Z`);
-  let remaining = cap - (doneToday ?? 0);
+  const bump = (k: string) => (result[k] = (result[k] ?? 0) + 1);
+  const dryRun = env("APPLY_DRY_RUN") === "true";
+  const cap = Math.max(0, Math.min(MAX_DAILY_CAP, s.daily_apply_cap ?? 5));
+  const startOfDay = `${today()}T00:00:00Z`;
+
+  // Today's submissions for this user, overall and per company (max COMPANY_CAP per company per day).
+  const { data: todayApps } = await sb.from("applications").select("status, jobs(company_name)").eq("user_id", u.id).gte("submitted_at", startOfDay);
+  const perCompanyToday: Record<string, number> = {};
+  for (const a of (todayApps ?? []) as unknown as { jobs: { company_name: string } | null }[]) {
+    const k = companyKey(a.jobs?.company_name);
+    if (k) perCompanyToday[k] = (perCompanyToday[k] ?? 0) + 1;
+  }
+  let remaining = cap - (todayApps ?? []).length;
   if (remaining <= 0) return { cap_reached: 1 };
   if (!u.resume_parsed?.experience && !u.resume_path) return { no_resume: 1 };
   const email = u.job_email;
@@ -285,60 +325,52 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
   const lastName = u.last_name || rest.join(" ");
   if (!email || !firstName || !lastName) return { missing_contact: 1 };
 
-  // Queued by the user (chat or Jobs page) first, then the agent's best verified matches.
-  const { data: queued } = await sb
-    .from("applications")
-    .select("id,job_id,status,attempts")
-    .eq("user_id", u.id)
-    .eq("status", "queued")
-    .order("created_at")
-    .limit(remaining * 2);
+  // Candidates: everything the user queued + the agent's best verified matches.
+  const { data: queued } = await sb.from("applications").select("id,job_id").eq("user_id", u.id).eq("status", "queued").order("created_at").limit(400);
   const { data: existing } = await sb.from("applications").select("job_id").eq("user_id", u.id);
   const taken = new Set((existing ?? []).map((a) => a.job_id));
   const minFit = s.min_fit_score ?? 65;
   const { data: best } = await sb
     .from("jobs")
-    .select("id,title,company_name,url,fit_score,posting_id,dismissed, job_postings!inner(ats,apply_url,url,verification_status,description)")
+    .select(JOB_COLS)
     .eq("user_id", u.id)
     .eq("dismissed", false)
     .gte("fit_score", minFit)
     .eq("job_postings.verification_status", "verified")
     .in("job_postings.ats", ["greenhouse", "lever", "ashby"])
     .order("fit_score", { ascending: false })
-    .limit(60);
+    .limit(200);
 
-  type JobRow = { id: string; title: string; company_name: string; url: string; posting_id: string; job_postings: { ats: string; apply_url: string; url: string; verification_status: string; description: string } };
-  const queue: { appId?: string; job: JobRow }[] = [];
-  if (queued?.length) {
-    const { data: qJobs } = await sb
-      .from("jobs")
-      .select("id,title,company_name,url,posting_id, job_postings!inner(ats,apply_url,url,verification_status,description)")
-      .in("id", queued.map((q) => q.job_id));
-    for (const q of queued) {
-      const j = (qJobs ?? []).find((x) => x.id === q.job_id) as unknown as JobRow | undefined;
-      if (j) queue.push({ appId: q.id, job: j });
-    }
+  type Item = { appId?: string; job: JobRow; company: string; fit: number; postedAt: string | null; userRequested: boolean };
+  const items: Item[] = [];
+  const appByJob = new Map((queued ?? []).map((q) => [q.job_id as string, q.id as string]));
+  for (const part of chunk([...appByJob.keys()], 100)) {
+    const { data: qJobs } = await sb.from("jobs").select(JOB_COLS).in("id", part);
+    for (const j of (qJobs ?? []) as unknown as JobRow[])
+      items.push({ appId: appByJob.get(j.id), job: j, company: j.company_name, fit: j.fit_score ?? 50, postedAt: j.job_postings.posted_at, userRequested: true });
   }
-  const companiesApplied = new Set<string>();
-  for (const j of (best ?? []) as unknown as JobRow[]) if (!taken.has(j.id)) queue.push({ job: j });
+  for (const j of (best ?? []) as unknown as JobRow[])
+    if (!taken.has(j.id)) items.push({ job: j, company: j.company_name, fit: j.fit_score ?? 50, postedAt: j.job_postings.posted_at, userRequested: false });
 
-  // Pacing data: cooldowns, companies applied to recently, and today's per-site volume (all users).
+  // Freshest + best-fitting first; at most COMPANY_CAP per company per day.
+  const { picked, skippedForCompanyCap } = planQueue(items, { appliedToday: perCompanyToday, perCompany: COMPANY_CAP });
+  for (const x of skippedForCompanyCap) {
+    bump("company_daily_cap");
+    if (x.appId && !dryRun)
+      await sb.from("applications").update({ error: `Waiting: ${COMPANY_CAP} applications to ${x.company} already planned today — goes on a later day` }).eq("id", x.appId);
+  }
+
+  // Pacing data: cooldowns and today's per-site volume (all users).
   const cooldowns = await activeCooldowns(sb);
-  const { data: recentApps } = await sb
-    .from("applications")
-    .select("jobs(company_name)")
-    .eq("user_id", u.id)
-    .in("status", ["submitted", "received", "under_review", "interview", "offer", "rejected"])
-    .gte("submitted_at", new Date(Date.now() - COMPANY_GAP_DAYS * 86400_000).toISOString());
-  for (const a of (recentApps ?? []) as unknown as { jobs: { company_name: string } | null }[])
-    if (a.jobs?.company_name) companiesApplied.add(a.jobs.company_name.toLowerCase());
-  const { data: todayAll } = await sb.from("applications").select("apply_url").eq("status", "submitted").gte("submitted_at", `${today()}T00:00:00Z`);
+  const { data: todayAll } = await sb.from("applications").select("apply_url").eq("status", "submitted").gte("submitted_at", startOfDay);
   const hostCount: Record<string, number> = {};
   for (const a of todayAll ?? []) {
     const h = hostOf(a.apply_url ?? "");
     hostCount[h] = (hostCount[h] ?? 0) + 1;
   }
   let submittedThisRun = 0;
+  let memory: AppAnswers = { ...(u.answer_memory ?? {}) };
+  let memoryChanged = false;
 
   const dir = mkdtempSync(join(tmpdir(), "9to5-"));
   let original: string | null = null;
@@ -363,38 +395,56 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
     graduation_date: u.graduation_date,
     work_authorized_us: u.work_authorized_us,
     sponsorship_needed: u.sponsorship_needed,
+    relocation: u.relocation,
     resume_text: u.resume_parsed ? resumeToText(u.resume_parsed) : "",
+    answers: u.application_answers ?? {},
+    memory,
+  };
+  const save = async (row: Record<string, unknown>) => {
+    if (dryRun) return; // dry runs never change the user's applications
+    const { error } = await sb.from("applications").upsert({ ...row, status_updated_at: new Date().toISOString() }, { onConflict: "user_id,job_id" });
+    if (error) log(`application save error: ${error.message}`);
   };
 
-  for (const { appId, job } of queue) {
-    if (remaining <= 0) break;
-    const company = job.company_name.toLowerCase();
-    if (!appId && companiesApplied.has(company)) continue; // one auto-application per company per run
+  const attemptLimit = Number(env("APPLY_LIMIT", "0")) || Infinity; // for testing: try at most N forms
+  let attempts = 0;
+  for (const { appId, job } of picked) {
+    if (remaining <= 0 || attempts >= attemptLimit) break;
+    if (timeLeft() < 4 * 60_000) {
+      log("run time budget used; leaving the rest of the queue for the next run");
+      result.time_budget = 1;
+      break;
+    }
+    const company = companyKey(job.company_name);
+    if ((perCompanyToday[company] ?? 0) >= COMPANY_CAP) {
+      bump("company_daily_cap");
+      continue;
+    }
     const p = job.job_postings;
-    const auto = canAutoSubmit({ ats: p.ats, verification_status: p.verification_status, apply_url: p.apply_url, url: p.url });
-    const base = { user_id: u.id, job_id: job.id, posting_id: job.posting_id, apply_url: p.apply_url || p.url, ats: p.ats, fit_score: undefined as number | undefined };
     const applyUrl = p.apply_url || p.url;
+    const auto = canAutoSubmit({ ats: p.ats, verification_status: p.verification_status, apply_url: p.apply_url, url: p.url });
+    const base = { user_id: u.id, job_id: job.id, posting_id: job.posting_id, apply_url: applyUrl, ats: p.ats, requested_by: appId ? "user" : "agent" };
     if (!auto) {
       const needsAccount = ACCOUNT_SITES.test(applyUrl);
-      if (needsAccount) await ensurePortalLogin(sb, u.id, email, job.company_name, applyUrl);
+      if (needsAccount && !dryRun) await ensurePortalLogin(sb, u.id, email, job.company_name, applyUrl);
       const why = needsAccount
-        ? "This site needs an account. Your login for it is ready under Portal logins — create the account, then apply."
-        : "Not an auto-submit site or not fully verified — apply yourself";
-      await sb.from("applications").upsert({ ...base, status: "needs_user", error: why }, { onConflict: "user_id,job_id" });
-      result.needs_user = (result.needs_user ?? 0) + 1;
+        ? "This site needs an account. The email and password to use are on this card and under Portal logins — create the account, then apply."
+        : "The agent can only submit verified Greenhouse, Lever and Ashby jobs — open this one and apply yourself";
+      await save({ ...base, status: "needs_user", error: why });
+      bump("needs_user");
       continue;
     }
     const key = siteKey(applyUrl);
     const host = hostOf(applyUrl);
     if (cooldowns.has(key) || cooldowns.has(host)) {
-      result.cooling_down = (result.cooling_down ?? 0) + 1;
-      continue; // retried after the cooldown ends
-    }
-    if ((hostCount[host] ?? 0) >= ATS_DAILY_CAP) {
-      result.site_daily_cap = (result.site_daily_cap ?? 0) + 1;
+      bump("cooling_down");
+      if (appId && !dryRun) await sb.from("applications").update({ error: `Waiting: ${host} asked us to slow down — retrying after the cooldown` }).eq("id", appId);
       continue;
     }
-    const dryRun = env("APPLY_DRY_RUN") === "true";
+    if ((hostCount[host] ?? 0) >= ATS_DAILY_CAP) {
+      bump("site_daily_cap");
+      continue;
+    }
     if (submittedThisRun > 0 && !dryRun) {
       // Human pace between submissions instead of bursts.
       await sleep((PACE_MIN_S + Math.random() * Math.max(0, PACE_MAX_S - PACE_MIN_S)) * 1000);
@@ -417,49 +467,62 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
     }
     if (!resumePath) return { no_resume: 1 };
 
-    const r = await applyToJob(browser, sb, {
-      url: p.apply_url || p.url,
-      ats: p.ats,
-      applicant,
-      resumePath,
-      jobTitle: job.title,
-      company: job.company_name,
-      userId: u.id,
-      dryRun,
-    });
-    log(`apply ${u.id.slice(0, 8)} → ${job.company_name} / ${job.title}: ${r.status} (${r.detail})`);
-    const status = r.status === "closed" ? "closed" : r.status;
-    await sb.from("applications").upsert(
-      {
-        ...base,
-        status,
-        error: r.status === "submitted" ? null : r.detail,
-        answers: r.answers ?? {},
-        submitted_at: r.status === "submitted" ? new Date().toISOString() : null,
-        requested_by: appId ? "user" : "agent",
-        resume_focus: focus,
-        status_updated_at: new Date().toISOString(),
-      },
-      { onConflict: "user_id,job_id" }
-    );
-    // Back off from sites that push back, instead of retrying through them.
-    if (/captcha/i.test(r.detail)) await coolDown(sb, key, 24, "CAPTCHA shown");
-    else if (/\b(429|403)\b|too many|rate limit|blocked|access denied/i.test(r.detail)) {
-      await coolDown(sb, key, 24, r.detail.slice(0, 120));
-      await coolDown(sb, host, 6, "rate limited");
+    attempts++;
+    applicant.portal = await portalLogin(sb, u.id, applyUrl);
+    applicant.memory = memory;
+    const t0 = Date.now();
+    const r = await applyToJob(browser, sb, { url: applyUrl, ats: p.ats, applicant, resumePath, jobTitle: job.title, company: job.company_name, userId: u.id, dryRun });
+    log(`apply ${u.id.slice(0, 8)} → ${job.company_name} / ${job.title}: ${r.status} in ${Math.round((Date.now() - t0) / 1000)}s, ${r.aiCalls ?? 0} AI call(s) (${r.detail})`);
+    if (dryRun && r.answers) log("  answers:", JSON.stringify(r.answers).slice(0, 1500));
+    if (r.aiCalls) result.ai_calls = (result.ai_calls ?? 0) + r.aiCalls;
+    if (r.learned?.length) {
+      memory = rememberAnswers(memory, r.learned.map((x) => ({ ...x, company: job.company_name })));
+      memoryChanged = true;
     }
-    result[status] = (result[status] ?? 0) + 1;
+    // A timeout or crash on a queued job goes back in the queue (up to 3 tries) instead of being lost.
+    let status: string = r.status;
+    if (r.status === "failed" && appId && !dryRun) {
+      const { data: row } = await sb.from("applications").select("attempts").eq("id", appId).maybeSingle();
+      const attempts = (row?.attempts ?? 0) + 1;
+      await sb.from("applications").update({ attempts }).eq("id", appId);
+      if (attempts < 3) status = "queued";
+    }
+    await save({
+      ...base,
+      status,
+      error: r.status === "submitted" ? null : r.detail,
+      answers: r.answers ?? {},
+      submitted_at: r.status === "submitted" ? new Date().toISOString() : null,
+      resume_focus: focus,
+    });
+    if (r.usedPortalLogin && !dryRun)
+      await sb.from("application_accounts").update({ account_created: true, notes: `Used on the ${job.title} application` }).eq("user_id", u.id).eq("portal_host", host);
+    // Back off from sites that push back, instead of retrying through them.
+    if (!dryRun) {
+      if (/captcha/i.test(r.detail)) await coolDown(sb, key, 24, "CAPTCHA shown");
+      else if (/\b(429|403)\b|too many|rate limit|blocked|access denied/i.test(r.detail)) {
+        await coolDown(sb, key, 24, r.detail.slice(0, 120));
+        await coolDown(sb, host, 6, "rate limited");
+      }
+    }
+    bump(r.status);
     if (r.status === "submitted") {
       remaining--;
       submittedThisRun++;
       hostCount[host] = (hostCount[host] ?? 0) + 1;
-      const { data: appRow } = await sb.from("applications").select("id").eq("user_id", u.id).eq("job_id", job.id).maybeSingle();
-      if (appRow)
-        await sb.from("application_events").insert({ user_id: u.id, application_id: appRow.id, kind: "submitted", source: "agent", detail: focus ? `Resume led with ${focus}` : null });
-      companiesApplied.add(company);
-      await bumpUsage(sb, "applications_submitted", 1);
-      await bumpUsage(sb, "applications_submitted", 1, u.id);
+      perCompanyToday[company] = (perCompanyToday[company] ?? 0) + 1;
+      if (!dryRun) {
+        const { data: appRow } = await sb.from("applications").select("id").eq("user_id", u.id).eq("job_id", job.id).maybeSingle();
+        if (appRow)
+          await sb.from("application_events").insert({ user_id: u.id, application_id: appRow.id, kind: "submitted", source: "agent", detail: focus ? `Resume led with ${focus}` : null });
+        await bumpUsage(sb, "applications_submitted", 1);
+        await bumpUsage(sb, "applications_submitted", 1, u.id);
+      }
     }
+  }
+  if (memoryChanged && !dryRun) {
+    const { error } = await sb.from("profiles").update({ answer_memory: memory }).eq("id", u.id);
+    if (error) log(`couldn't save remembered answers: ${error.message}`);
   }
   return result;
 }
@@ -472,6 +535,13 @@ async function main() {
     log(`Skipping run: ${limits.githubMinutes.reason}`);
     return;
   }
+
+  // Runs killed by a timeout stay "running" forever; close them so the app doesn't show them as live.
+  await sb
+    .from("agent_runs")
+    .update({ status: "failed", ended_at: new Date().toISOString(), summary: { error: "Run was cut off (timeout); the next run picks up where it stopped" } })
+    .eq("status", "running")
+    .lt("started_at", new Date(Date.now() - 90 * 60_000).toISOString());
 
   const fresh = env("DISCOVER", "true") === "false" ? [] : await discover(sb);
 

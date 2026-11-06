@@ -1,13 +1,13 @@
 import { requireUser } from "@/lib/v2/session";
 import { saveProfile } from "../actions";
-import { Card, PageHeader } from "@/components/ui";
+import { PageHeader, Section, inputCls } from "@/components/ui";
+import { CommonQuestions } from "./common-questions";
 import { ResumeUpload } from "./resume-upload";
 import { SubmitButton } from "@/components/submit-button";
 
 export const dynamic = "force-dynamic";
 
-const input =
-  "mt-1 w-full rounded-lg border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-sm outline-none focus:border-[var(--accent)]";
+const input = inputCls;
 
 function Field({ label, name, value, placeholder, type = "text" }: { label: string; name: string; value?: string | number | null; placeholder?: string; type?: string }) {
   return (
@@ -39,26 +39,25 @@ export default async function ProfilePage() {
   const parsed = (p?.resume_parsed ?? {}) as { experience?: unknown[]; projects?: unknown[] };
 
   return (
-    <div className="max-w-3xl">
-      <PageHeader title="Resume & profile" description="The agent reads your resume to find matching jobs and fill applications truthfully." />
+    <div className="max-w-4xl">
+      <PageHeader eyebrow="You" title="Resume & profile" description="The agent reads your resume to find matching jobs, and uses these answers to fill applications truthfully." />
 
-      <Card className="mb-6">
-        <h2 className="mb-1 font-semibold">1. Your resume</h2>
-        <p className="mb-4 text-sm text-[var(--muted)]">
-          Upload a PDF. AI reads it once (free tier) and fills the fields below. For each application the agent reorders your real
-          experience so the most relevant parts come first — it never adds anything that isn’t on your resume.
-        </p>
+      <Section
+        className="mb-6"
+        icon="1"
+        title="Your resume"
+        description="Upload a PDF. AI reads it once (free tier) and fills the fields below. For each application the agent reorders your real experience so the most relevant parts come first — it never adds anything that isn’t on your resume."
+      >
         <ResumeUpload hasResume={Boolean(p?.resume_path)} hasParsed={Boolean(p?.resume_parsed && Object.keys(p.resume_parsed).length)} updatedAt={p?.resume_updated_at ?? null} />
         {p?.resume_path && (
           <p className="mt-3 text-xs text-[var(--muted)]">
             Found {parsed.experience?.length ?? 0} jobs and {parsed.projects?.length ?? 0} projects.
           </p>
         )}
-      </Card>
+      </Section>
 
       <form action={saveProfile} className="space-y-6">
-        <Card>
-          <h2 className="mb-4 font-semibold">2. Contact details (used on applications)</h2>
+        <Section icon="2" title="Contact details" description="Used on every application.">
           <div className="grid gap-4 sm:grid-cols-2">
             <Field label="First name" name="first_name" value={p?.first_name} />
             <Field label="Last name" name="last_name" value={p?.last_name} />
@@ -72,19 +71,22 @@ export default async function ProfilePage() {
             <Field label="School" name="school" value={p?.school} />
             <Field label="Graduation (e.g. May 2027)" name="graduation_date" value={p?.graduation_date} />
           </div>
-        </Card>
+        </Section>
 
-        <Card>
-          <h2 className="mb-1 font-semibold">3. Work eligibility</h2>
-          <p className="mb-4 text-sm text-[var(--muted)]">Applications always ask these. Until you answer, the agent sends those jobs to you instead of guessing.</p>
+        <Section icon="3" title="Work eligibility" description="Applications always ask these. Until you answer, the agent sends those jobs to you instead of guessing.">
           <div className="grid gap-4 sm:grid-cols-2">
             <YesNo label="Authorized to work in the US?" name="work_authorized_us" value={p?.work_authorized_us ?? null} />
             <YesNo label="Will you need visa sponsorship?" name="sponsorship_needed" value={p?.sponsorship_needed ?? null} />
           </div>
-        </Card>
+        </Section>
 
-        <Card>
-          <h2 className="mb-4 font-semibold">4. What jobs to look for</h2>
+        <div id="common-questions" className="scroll-mt-6">
+          <Section icon="4" title="Common application questions" description="Answer once — the agent fills these on every form without spending AI calls.">
+            <CommonQuestions answers={(p?.application_answers ?? {}) as Record<string, string>} />
+          </Section>
+        </div>
+
+        <Section icon="5" title="What jobs to look for">
           <div className="space-y-4">
             <div className="text-sm">
               Levels
@@ -131,9 +133,12 @@ export default async function ProfilePage() {
             </div>
             <Field label="Never apply to these companies" name="excluded_companies" value={(p?.excluded_companies ?? []).join(", ")} />
           </div>
-        </Card>
+        </Section>
 
-        <SubmitButton>Save profile</SubmitButton>
+        <div className="sticky bottom-4 z-10 flex items-center justify-between gap-3 rounded-2xl border border-[var(--border)] bg-[var(--card)]/90 p-3 shadow-[var(--shadow)] backdrop-blur">
+          <p className="text-sm text-[var(--muted)]">Changes apply on the next agent run.</p>
+          <SubmitButton>Save profile</SubmitButton>
+        </div>
       </form>
     </div>
   );

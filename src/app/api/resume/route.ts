@@ -57,8 +57,10 @@ export async function POST(req: Request) {
   const { data: current } = await supabase.from("profiles").select("*").eq("id", user.id).maybeSingle();
   const keep = <T,>(existing: T | null | undefined, incoming: T | null | undefined) =>
     existing != null && (!(typeof existing === "string") || existing.trim()) && (!Array.isArray(existing) || existing.length) ? existing : incoming ?? null;
-  const [first, ...rest] = (parsed.name ?? "").trim().split(/s+/);
+  const [first, ...rest] = (parsed.name ?? "").trim().split(/\s+/);
   const edu = parsed.education?.[0];
+  // "Atlanta, GA" / "Atlanta, Georgia, USA" → city + state.
+  const [city, state] = (parsed.location ?? "").split(",").map((x) => x.trim()).filter(Boolean);
 
   const { error } = await supabase.from("profiles").upsert(
     {
@@ -75,6 +77,8 @@ export async function POST(req: Request) {
       linkedin_url: keep(current?.linkedin_url, parsed.links?.linkedin),
       github_url: keep(current?.github_url, parsed.links?.github),
       website_url: keep(current?.website_url, parsed.links?.website),
+      city: keep(current?.city, city || null),
+      state: keep(current?.state, state || null),
       school: keep(current?.school, edu?.school),
       graduation_date: keep(current?.graduation_date, edu?.graduation),
       skills: [...new Set([...(current?.skills ?? []), ...(parsed.skills ?? [])])],

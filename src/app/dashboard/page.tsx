@@ -1,6 +1,9 @@
 import Link from "next/link";
 import { requireUser, serviceClient } from "@/lib/v2/session";
 import { Badge, Button, Card, PageHeader, StatCard } from "@/components/ui";
+import { dispatchConfigured, nextScheduledRun } from "@/lib/v2/dispatch";
+import { RunNowButton } from "@/components/run-now";
+import { Icon } from "@/components/sidebar";
 
 export const dynamic = "force-dynamic";
 
@@ -46,8 +49,9 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
   const last = runs?.[0];
 
   return (
-    <div className="max-w-5xl">
+    <div>
       <PageHeader
+        eyebrow="Dashboard"
         title={`Welcome${p?.first_name ? `, ${p.first_name}` : ""}`}
         description="Your agent finds STEM jobs that fit your resume, checks the employer is real, and applies for you."
         action={<Button href="/chat">Chat with agent</Button>}
@@ -77,10 +81,10 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
       )}
 
       <div className="mb-6 grid grid-cols-2 gap-4 md:grid-cols-4">
-        <StatCard label="Matched jobs" value={matched ?? 0} sub={`${verified ?? 0} verified employers`} />
-        <StatCard label="Submitted" value={by.submitted ?? 0} variant="success" />
-        <StatCard label="Needs you" value={by.needs_user ?? 0} variant={(by.needs_user ?? 0) > 0 ? "warning" : "default"} sub="CAPTCHA or unusual questions" />
-        <StatCard label="Queued" value={by.queued ?? 0} sub="Next run" />
+        <StatCard label="Matched jobs" value={matched ?? 0} sub={`${verified ?? 0} verified employers`} icon={<Icon name="jobs" />} />
+        <StatCard label="Submitted" value={by.submitted ?? 0} variant="success" icon={<Icon name="applications" />} />
+        <StatCard label="Needs you" value={by.needs_user ?? 0} variant={(by.needs_user ?? 0) > 0 ? "warning" : "default"} sub="CAPTCHA or unusual questions" icon={<Icon name="profile" />} />
+        <StatCard label="Queued" value={by.queued ?? 0} sub={`Next run ${nextScheduledRun().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", timeZoneName: "short" })}`} icon={<Icon name="status" />} />
       </div>
 
       <div className="grid gap-4 md:grid-cols-2">
@@ -90,9 +94,13 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
             <Badge variant={s?.paused ? "danger" : "success"}>{s?.paused ? "Paused" : "Running every 3 hours"}</Badge>
             <Badge variant={s?.auto_submit_enabled ? "success" : "default"}>Auto-submit {s?.auto_submit_enabled ? `on (max ${s?.daily_apply_cap}/day)` : "off"}</Badge>
           </div>
-          <Link href="/settings" className="mt-3 inline-block text-sm text-[var(--accent)] hover:underline">
-            Change settings
-          </Link>
+          <p className="mt-3 text-sm text-[var(--muted)]">Applies to the freshest postings first, max 5 per company per day.</p>
+          <div className="mt-4 flex flex-wrap items-start gap-3">
+            {dispatchConfigured() && <RunNowButton />}
+            <Link href="/settings" className="py-1.5 text-sm text-[var(--accent)] hover:underline">
+              Change settings
+            </Link>
+          </div>
         </Card>
         <Card>
           <h2 className="mb-2 font-semibold">Recent runs</h2>

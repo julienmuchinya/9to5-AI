@@ -4,6 +4,8 @@ import { apiUser, serviceClient } from "@/lib/v2/session";
 import { geminiGenerate, FreeTierLimitError, type GeminiContent, type GeminiTool } from "@/lib/v2/gemini";
 import { freeTierSnapshot } from "@/lib/v2/freeTier";
 import { logEvent } from "@/lib/v2/log";
+import { dispatchAgentRun } from "@/lib/v2/dispatch";
+import { ago, freshness, MAX_DAILY_APPLY_CAP, priorityScore } from "@/lib/v2/priority";
 
 export const maxDuration = 60;
 
@@ -15,7 +17,7 @@ const TOOLS: GeminiTool[] = [
   },
   {
     name: "search_jobs",
-    description: "Search the user's matched jobs. Returns id, title, company, fit score, verification, location, pay.",
+    description: "Search the user's matched jobs, freshest and best-fitting first. Returns id, title, company, fit score, when posted, verification, location, pay.",
     parameters: {
       type: "object",
       properties: {
@@ -31,7 +33,7 @@ const TOOLS: GeminiTool[] = [
   {
     name: "queue_applications",
     description:
-      "Queue applications for the agent to submit on its next run. Pass job_ids from search_jobs, or a query to queue every matching verified job. Max 25 at once.",
+      "Queue applications for the agent to submit on its next run (freshest postings go first, max 5 per company per day). Pass job_ids from search_jobs, or a query to queue every matching verified job. Max 50 at once.",
     parameters: {
       type: "object",
       properties: {
@@ -70,7 +72,7 @@ const TOOLS: GeminiTool[] = [
       properties: {
         auto_submit_enabled: { type: "boolean" },
         paused: { type: "boolean" },
-        daily_apply_cap: { type: "integer", description: "0-25 applications per day" },
+        daily_apply_cap: { type: "integer", description: "0-100 applications per day (the free AI quota is the real limit)" },
         min_fit_score: { type: "integer", description: "40-95" },
       },
     },
@@ -97,6 +99,8 @@ How to behave:
 - When asked about their resume, skills or preferences, call get_profile first.
 - When asked about jobs or applications, call search_jobs or get_status. If there are 0 matched jobs, explain the agent searches every 3 hours, and offer run_agent_now.
 - Only verified jobs on Greenhouse, Lever or Ashby can be auto-submitted; other jobs go to "Needs you" for the user to finish.
+- The agent applies to the freshest postings first (last 24h, then 2-3 days, then this week) and sends at most 5 applications per company per day.
+- Answers to common application questions (visa, EEO, start date, salary…) come from Resume & profile → Common questions; suggest filling those when applications land in "Needs you".
 - If the user asks to apply broadly ("apply to all backend jobs"), search first, then queue the verified matches and say how many.
 - Never invent facts about the user, their experience or a job. Keep replies short and concrete (counts, company names). Use plain text, short lists are fine.`;
 
@@ -140,14 +144,14 @@ async function runTool(name: string, args: Args, sb: SupabaseClient, userId: str
     }
     case "search_jobs":
     case "queue_applications": {
-      const limit = Math.max(1, Math.min(25, Number(args.limit ?? (name === "search_jobs" ? 10 : 10))));
+      const limit = Math.max(1, Math.min(name === "search_jobs" ? 25 : 50, Number(args.limit ?? (name === "search_jobs" ? 10 : 20))));
       let q = sb
         .from("jobs")
-        .select("id,title,company_name,fit_score,posting_id,url, job_postings!inner(level,locations,is_remote,ats,verification_status,salary_max)")
+        .select("id,title,company_name,fit_score,posting_id,url, job_postings!inner(level,locations,is_remote,ats,verification_status,salary_max,posted_at)")
         .eq("user_id", userId)
         .eq("dismissed", false)
         .order("fit_score", { ascending: false })
-        .limit(limit);
+        .limit(Math.min(300, limit * 4));
       if (Array.isArray(args.job_ids) && args.job_ids.length) q = q.in("id", args.job_ids as string[]);
       if (args.query) {
         const t = clean(String(args.query));
@@ -159,8 +163,11 @@ async function runTool(name: string, args: Args, sb: SupabaseClient, userId: str
       if (args.auto_submit_only) q = q.in("job_postings.ats", ["greenhouse", "lever", "ashby"]);
       const { data, error } = await q;
       if (error) return { error: error.message };
-      type Row = { id: string; title: string; company_name: string; fit_score: number; posting_id: string; url: string; job_postings: { level: string; locations: string[]; is_remote: boolean; ats: string; verification_status: string; salary_max: number | null } };
-      const rows = (data ?? []) as unknown as Row[];
+      type Row = { id: string; title: string; company_name: string; fit_score: number; posting_id: string; url: string; job_postings: { level: string; locations: string[]; is_remote: boolean; ats: string; verification_status: string; salary_max: number | null; posted_at: string | null } };
+      // Freshest + best-fitting first: new postings get many more replies.
+      const rows = ((data ?? []) as unknown as Row[])
+        .sort((a, b) => priorityScore(b.fit_score, b.job_postings.posted_at) - priorityScore(a.fit_score, a.job_postings.posted_at))
+        .slice(0, limit);
       if (name === "search_jobs")
         return {
           jobs: rows.map((r) => ({
@@ -168,6 +175,8 @@ async function runTool(name: string, args: Args, sb: SupabaseClient, userId: str
             title: r.title,
             company: r.company_name,
             fit: r.fit_score,
+            posted: ago(r.job_postings.posted_at) ?? "unknown",
+            freshness: freshness(r.job_postings.posted_at).label,
             level: r.job_postings.level,
             location: r.job_postings.is_remote ? "Remote" : r.job_postings.locations.slice(0, 2).join("; "),
             pay_up_to: r.job_postings.salary_max,
@@ -206,22 +215,13 @@ async function runTool(name: string, args: Args, sb: SupabaseClient, userId: str
       const patch: Record<string, unknown> = { updated_at: new Date().toISOString(), emergency_stop: false, mock_mode: false };
       if (args.auto_submit_enabled != null) patch.auto_submit_enabled = Boolean(args.auto_submit_enabled);
       if (args.paused != null) patch.paused = Boolean(args.paused);
-      if (args.daily_apply_cap != null) patch.daily_apply_cap = Math.max(0, Math.min(25, Number(args.daily_apply_cap)));
+      if (args.daily_apply_cap != null) patch.daily_apply_cap = Math.max(0, Math.min(MAX_DAILY_APPLY_CAP, Number(args.daily_apply_cap)));
       if (args.min_fit_score != null) patch.min_fit_score = Math.max(40, Math.min(95, Number(args.min_fit_score)));
       const { error } = await sb.from("autopilot_settings").upsert({ user_id: userId, ...patch }, { onConflict: "user_id" });
       return error ? { error: error.message } : { updated: patch };
     }
     case "run_agent_now": {
-      const token = process.env.GH_DISPATCH_TOKEN;
-      const repo = process.env.GH_REPO ?? "julienmuchinya/9to5-AI";
-      if (!token) return { started: false, note: "Instant runs aren't set up (GH_DISPATCH_TOKEN missing). The agent runs automatically every 3 hours." };
-      const res = await fetch(`https://api.github.com/repos/${repo}/actions/workflows/daily-agent.yml/dispatches`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json" },
-        body: JSON.stringify({ ref: "main", inputs: { discover: true, apply: true, apply_dry_run: false, only_user: userId } }),
-      });
-      if (res.ok) return { started: true, note: "Run started; new matches show up in about 10 minutes." };
-      return { started: false, error: `GitHub refused (${res.status}): ${(await res.text()).slice(0, 150)}` };
+      return dispatchAgentRun(userId);
     }
   }
   if (name === "get_profile") {

@@ -2,6 +2,8 @@
 
 import { revalidatePath } from "next/cache";
 import { requireUser } from "@/lib/v2/session";
+import { APP_QUESTIONS } from "@/lib/v2/app-questions";
+import { MAX_DAILY_APPLY_CAP } from "@/lib/v2/priority";
 
 const list = (v: FormDataEntryValue | null) =>
   String(v ?? "")
@@ -18,9 +20,15 @@ export async function saveProfile(form: FormData) {
   const { supabase, user } = await requireUser();
   const first = text(form.get("first_name"));
   const last = text(form.get("last_name"));
+  const answers: Record<string, string> = {};
+  for (const q of APP_QUESTIONS) {
+    const v = text(form.get(`aq_${q.key}`));
+    if (v) answers[q.key] = v.slice(0, 300);
+  }
   const { error } = await supabase
     .from("profiles")
     .upsert({
+      application_answers: answers,
       id: user.id,
       first_name: first,
       last_name: last,
@@ -62,7 +70,7 @@ export async function saveAutopilot(form: FormData) {
       paused: form.get("paused") === "on",
       emergency_stop: false,
       mock_mode: false,
-      daily_apply_cap: Math.max(0, Math.min(25, Number(form.get("daily_apply_cap") || 5))),
+      daily_apply_cap: Math.max(0, Math.min(MAX_DAILY_APPLY_CAP, Number(form.get("daily_apply_cap") || 5))),
       min_fit_score: Math.max(40, Math.min(95, Number(form.get("min_fit_score") || 65))),
       updated_at: new Date().toISOString(),
     }, { onConflict: "user_id" });
@@ -83,6 +91,22 @@ export async function queueJob(jobId: string) {
     );
   if (error) throw new Error(error.message);
   revalidatePath("/jobs");
+  revalidatePath("/applications");
+}
+
+/** "Run now" button: starts an agent run for this user only. */
+export async function runAgentNow(): Promise<{ started: boolean; note?: string; error?: string }> {
+  const { user } = await requireUser();
+  const { dispatchAgentRun } = await import("@/lib/v2/dispatch");
+  const r = await dispatchAgentRun(user.id);
+  revalidatePath("/applications");
+  return r;
+}
+
+/** Put a "Needs you" or failed application back in the queue (e.g. after answering its question on the profile). */
+export async function retryApplication(appId: string) {
+  const { supabase, user } = await requireUser();
+  await supabase.from("applications").update({ status: "queued", error: null, attempts: 0 }).eq("id", appId).eq("user_id", user.id);
   revalidatePath("/applications");
 }
 

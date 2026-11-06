@@ -1,12 +1,12 @@
 import { requireUser } from "@/lib/v2/session";
-import { Badge, Card, EmptyState, PageHeader } from "@/components/ui";
+import { Badge, Card, EmptyState, PageHeader, inputCls } from "@/components/ui";
 import { SubmitButton } from "@/components/submit-button";
 import { deletePortalAccount, markPortalCreated, savePortalAccount } from "../vault-actions";
 import { RevealPassword } from "./reveal";
 
 export const dynamic = "force-dynamic";
 
-const input = "mt-1 w-full rounded-lg border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-sm";
+const input = inputCls;
 
 export default async function PortalAccountsPage() {
   const { supabase, user } = await requireUser();
