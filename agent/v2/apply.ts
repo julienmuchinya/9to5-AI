@@ -233,7 +233,7 @@ export async function collectFields(page: Page): Promise<Field[]> {
       if (/^(start|end|from|to|graduation)?\s*(date|month|year)?\s*[*✱]?$/i.test(label) && label.length < 25) {
         // Which section is this in? ("Education", "Work experience"…)
         let sec = "";
-        for (let a: Element | null = el.parentElement; a && !sec && a.tagName !== "FORM" && a.tagName !== "BODY"; a = a.parentElement) {
+        for (let a: Element | null = el.parentElement; a && !sec && a.tagName !== "BODY"; a = a.parentElement) {
           // The closest heading-like text above the field inside this ancestor (not the form's first heading).
           const heads = Array.from(
             a.querySelectorAll("h1, h2, h3, h4, h5, legend, [class*=section-title], [class*=sectionTitle], [class*=SectionHeader], [class*=heading], label")
