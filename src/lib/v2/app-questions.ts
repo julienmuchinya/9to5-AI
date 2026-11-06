@@ -152,7 +152,7 @@ export const APP_QUESTIONS: AppQuestion[] = [
     label: "Were you referred by an employee? (default answer)",
     group: "Background",
     options: ["No", "Yes"],
-    match: /(referred by|employee referral|were you referred|know anyone (who works|at))/,
+    match: /(referred by|employee referral|were you referred|know anyone (who works|at)|know (anyone|someone).{0,60}(employ|work(s|ed)? (at|for|here)))/,
   },
   { key: "pronouns", label: "Pronouns (optional)", group: "Background", placeholder: "e.g. he/him", match: /pronoun/ },
   { key: "address", label: "Street address (only if a form requires it)", group: "Background", placeholder: "123 Main St", match: /(street address|address line 1|mailing address|^address\b)/, not: /e-?mail/ },
@@ -301,3 +301,59 @@ export function rememberAnswers(memory: AppAnswers, learned: { label: string; an
   if (keys.length > max) for (const k of keys.slice(0, keys.length - max)) delete out[k];
   return out;
 }
+
+// ── Questions the agent couldn't answer → asked to the user, then reused ──
+/** A required form question with no known answer, shown on Applications → Needs you. */
+export interface PendingQuestion {
+  key: string;
+  label: string;
+  kind: string;
+  options: string[];
+  required: boolean;
+}
+/** The user's answers to such questions: memoryKey → { q: question as asked, a: answer }. */
+export type CustomAnswers = Record<string, { q: string; a: string; at?: string }>;
+
+const STOP = new Set(
+  "a an the of to in on at for and or is are am be been do does did you your yours we our us this that these those it its with as by from will would can could please any if have has had what which who how when where there here about required select one all apply".split(" ")
+);
+/** The words that carry a question's meaning. */
+export const questionWords = (label: string) => new Set(squash(label).split(" ").filter((w) => (w.length > 1 || /\d/.test(w)) && !STOP.has(w)));
+
+/** 0–1 overlap between two questions' meaningful words. */
+export function questionSimilarity(a: string, b: string): number {
+  const x = questionWords(a);
+  const y = questionWords(b);
+  if (!x.size || !y.size) return 0;
+  let both = 0;
+  for (const w of x) if (y.has(w)) both++;
+  return both / (x.size + y.size - both);
+}
+
+/**
+ * Answer for `label` from a store of earlier answers: the same question, or a very similar one
+ * ("Do you have 3+ years of Python?" ≈ "Do you have 3+ years of experience with Python?").
+ * With options, the answer must map onto one of them.
+ */
+export function findSimilarAnswer(label: string, options: string[], store: Record<string, string>, min = 0.75): string | null {
+  const fit = (v: string) => (options.length ? pickOption(v, options) : v);
+  const exact = store[memoryKey(label)];
+  if (exact) {
+    const v = fit(exact);
+    if (v) return v;
+  }
+  if (questionWords(label).size < 2) return null;
+  let best: { v: string; s: number } | null = null;
+  for (const [k, ans] of Object.entries(store)) {
+    const s = questionSimilarity(label, k);
+    if (s >= min && (!best || s > best.s)) {
+      const v = fit(ans);
+      if (v) best = { v, s };
+    }
+  }
+  return best?.v ?? null;
+}
+
+/** CustomAnswers → plain memoryKey → answer map. */
+export const customStore = (c: CustomAnswers | null | undefined): Record<string, string> =>
+  Object.fromEntries(Object.entries(c ?? {}).map(([k, v]) => [k, v?.a ?? ""]).filter(([, a]) => a));

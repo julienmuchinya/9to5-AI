@@ -1,7 +1,7 @@
 import type { Browser, Page } from "playwright";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { geminiJson, FreeTierLimitError } from "../../src/lib/v2/gemini";
-import { answerFromProfile, memoryKey, pickOption, type AppAnswers } from "../../src/lib/v2/app-questions";
+import { answerFromProfile, findSimilarAnswer, memoryKey, pickOption, type AppAnswers, type PendingQuestion } from "../../src/lib/v2/app-questions";
 
 export interface Applicant {
   first_name: string;
@@ -23,6 +23,8 @@ export interface Applicant {
   answers?: AppAnswers;
   /** Answers the AI gave before to the same (non job-specific) question. */
   memory?: AppAnswers;
+  /** The user's own answers to questions the agent asked them before (memoryKey → answer). */
+  custom?: AppAnswers;
   /** Login for this company's portal, used if the form asks to create an account. */
   portal?: { email: string; password: string } | null;
 }
@@ -37,6 +39,8 @@ export interface ApplyResult {
   /** True when the form had a password box and the portal login was used. */
   usedPortalLogin?: boolean;
   aiCalls?: number;
+  /** Required questions with no answer — shown to the user to answer once. */
+  pending?: PendingQuestion[];
 }
 
 export interface Field {
@@ -47,6 +51,7 @@ export interface Field {
   options: string[];
 }
 
+const STAND_OUT = /(why (do you|are you|this|our|us)|cover letter|anything else|additional (information|comments)|tell us|what (excites|interests)|interest(ed)? in)/i;
 const SUCCESS = /thank you for (applying|your (application|interest))|application (has been |was )?(received|submitted)|we('|’)ve received your application|successfully submitted/i;
 const CLOSED = /no longer (accepting|available|open)|job (is )?(closed|not found)|position has been filled|page (you('|’)re looking for )?(could not be|not) found/i;
 
@@ -165,8 +170,12 @@ export function knownValue(f: Field, a: Applicant): string | null {
   if (/relocat/.test(l) && !a.answers?.willing_to_relocate && a.relocation != null) return yesNo(f, a.relocation);
   const saved = answerFromProfile(f.label, f.options, a.answers ?? {});
   if (saved) return saved;
-  const remembered = a.memory?.[memoryKey(f.label)];
-  if (remembered) return f.options.length ? pickOption(remembered, f.options) : remembered;
+  const opts = f.kind === "checkbox" ? ["Yes", "No"] : f.options;
+  // The user's own answer to this (or a very similar) question beats anything the AI said before.
+  const mine = findSimilarAnswer(f.label, opts, a.custom ?? {});
+  if (mine) return mine;
+  const remembered = findSimilarAnswer(f.label, opts, a.memory ?? {}, 0.85);
+  if (remembered) return remembered;
   return null;
 }
 
@@ -212,14 +221,36 @@ async function fill(page: Page, f: Field, value: string, resumePath: string) {
   }
 }
 
+/** Custom dropdowns (React-Select etc.) only list their choices once opened — open each, read, close. */
+async function readComboboxOptions(page: Page, fields: Field[]) {
+  for (const f of fields.filter((x) => x.kind === "combobox" && !x.options.length).slice(0, 25)) {
+    const sel = `[data-9to5="${f.id}"]`;
+    try {
+      await page.click(sel, { timeout: 2000 });
+      await page.waitForTimeout(350);
+      // Only this dropdown's own list (aria-controls), not e.g. the phone field's hidden country list.
+      const list = await page.getAttribute(sel, "aria-controls").catch(() => null);
+      const scope = list ? `[id="${list}"] ` : "";
+      const opts = await page
+        .locator(`${scope}[role=option], ${scope}[class*='select__option']`)
+        .evaluateAll((els) => els.filter((e) => (e as HTMLElement).offsetParent !== null).map((e) => (e.textContent ?? "").replace(/\s+/g, " ").trim()).filter(Boolean));
+      f.options = [...new Set(opts)].slice(0, 60);
+      await page.keyboard.press("Escape");
+      await page.waitForTimeout(150);
+    } catch {
+      // leave it as free text
+    }
+  }
+}
+
 /** Hard limit for one application, so a slow or broken site can't hold up the whole run. */
-const APPLY_TIMEOUT_MS = Number(process.env.APPLY_TIMEOUT_S ?? "180") * 1000;
+const APPLY_TIMEOUT_MS = Number(process.env.APPLY_TIMEOUT_S ?? "240") * 1000;
 
 /** Fill and (unless dryRun) submit one application. */
 export async function applyToJob(
   browser: Browser,
   db: SupabaseClient,
-  opts: { url: string; ats: string; applicant: Applicant; resumePath: string; jobTitle: string; company: string; userId: string; dryRun?: boolean }
+  opts: { url: string; ats: string; applicant: Applicant; resumePath: string; jobTitle: string; company: string; userId: string; dryRun?: boolean; jobDescription?: string; emailCode?: (since: Date) => Promise<string | null> }
 ): Promise<ApplyResult> {
   const context = await browser.newContext({
     userAgent:
@@ -248,7 +279,7 @@ export async function applyToJob(
 async function fillAndSubmit(
   context: import("playwright").BrowserContext,
   db: SupabaseClient,
-  opts: { url: string; ats: string; applicant: Applicant; resumePath: string; jobTitle: string; company: string; userId: string; dryRun?: boolean }
+  opts: { url: string; ats: string; applicant: Applicant; resumePath: string; jobTitle: string; company: string; userId: string; dryRun?: boolean; jobDescription?: string; emailCode?: (since: Date) => Promise<string | null> }
 ): Promise<ApplyResult> {
   const page = await context.newPage();
   // Default is 30s per action; a missing field would otherwise stall the run for minutes.
@@ -269,6 +300,7 @@ async function fillAndSubmit(
     }
 
     const fields = await collectFields(page);
+    await readComboboxOptions(page, fields);
     if (!fields.some((f) => f.kind === "file") && !fields.some((f) => /e-?mail/i.test(f.label)))
       return { status: "needs_user", detail: "Couldn't find the application form" };
 
@@ -281,9 +313,12 @@ async function fillAndSubmit(
     }
     const usedPortalLogin = fields.some((f) => /password/i.test(f.label) && answers[f.id]);
 
-    // Only pay for AI when a REQUIRED question is still blank; optional ones stay empty.
+    // AI only when a REQUIRED question is still blank. Optional free-text questions that help an
+    // application stand out ("Why us?", "Anything else?", cover letter) ride along in the same call.
     const learned: { label: string; answer: string }[] = [];
-    const needAi = unknown.filter((f) => f.required);
+    const required = unknown.filter((f) => f.required && f.kind !== "file");
+    const standOut = unknown.filter((f) => !f.required && (f.kind === "textarea" || STAND_OUT.test(f.label)) && f.kind !== "file" && !/password/i.test(f.label));
+    const needAi = required.length ? [...required, ...standOut.slice(0, 3)] : [];
     if (needAi.length) {
       const facts = {
         name: `${opts.applicant.first_name} ${opts.applicant.last_name}`,
@@ -294,20 +329,23 @@ async function fillAndSubmit(
         needs_visa_sponsorship: opts.applicant.sponsorship_needed,
         saved_answers: opts.applicant.answers ?? {},
         resume: opts.applicant.resume_text.slice(0, 6000),
+        job_description: (opts.jobDescription ?? "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").slice(0, 3500),
       };
       try {
         aiCalls++;
         const ai = await geminiJson<Record<string, string | null>>(
           db,
           `You fill job application questions for ${facts.name}, applying to "${opts.jobTitle}" at ${opts.company}.
+GOAL: answers that make a recruiter put this applicant in the top pile — specific, confident, matched to the job description.
 RULES:
-- Use ONLY the facts below (saved_answers are the applicant's own answers to common questions). Never invent experience, numbers, dates, or skills.
-- If a question can't be answered truthfully from the facts, return null for it.
+- Use ONLY the facts below (saved_answers are the applicant's own answers to common questions). Never invent experience, numbers, dates, employers or skills.
+- Skill/experience screening questions ("Do you have experience with X?", "Years of Y?"): answer from the resume; if the resume clearly shows it, answer in the applicant's favour. If it doesn't, return null so the applicant answers it themselves.
+- If a question can't be answered truthfully from the facts, return null for it. Personal facts (dates, salary, location preferences, relationships to employees) are null unless in the facts.
 - Voluntary demographic/EEO questions: use saved_answers if present, otherwise pick the "decline to self-identify"/"prefer not to say" option.
 - Work authorization and sponsorship must match the facts exactly; if they are null, return null.
 - For select/radio questions, return one of the listed options exactly.
 - Checkbox: return "yes" only for required acknowledgements/consents to apply or privacy policies.
-- Short free-text ("why this company", "cover letter") may be 2-4 honest sentences based on the resume.
+- Free-text ("why this company", "anything else", "cover letter"): 3-5 sentences in first person. Name the role and company, connect 2-3 concrete resume achievements/skills to what the job description asks for, end with enthusiasm. No clichés, no placeholders.
 FACTS: ${JSON.stringify(facts)}
 QUESTIONS: ${JSON.stringify(needAi.map((f) => ({ id: f.id, question: f.label, type: f.kind, options: f.options, required: f.required })))}
 Return JSON: {"<id>": "<answer or null>"}`,
@@ -328,8 +366,23 @@ Return JSON: {"<id>": "<answer or null>"}`,
     }
 
     const missing = fields.filter((f) => f.required && !answers[f.id]);
-    if (missing.length)
-      return { status: "needs_user", detail: `Needs your answer: ${missing.map((m) => m.label).slice(0, 5).join(" | ")} — add it under Profile → Common questions`, answers: labelled(fields, answers), learned, aiCalls };
+    if (missing.length) {
+      const pending: PendingQuestion[] = missing.map((m) => ({
+        key: memoryKey(m.label || m.id),
+        label: m.label || "(unlabelled question)",
+        kind: m.kind,
+        options: m.kind === "checkbox" ? ["Yes", "No"] : m.options.slice(0, 60),
+        required: true,
+      }));
+      return {
+        status: "needs_user",
+        detail: `Waiting on your answer to ${pending.length} question${pending.length === 1 ? "" : "s"} — answer once on this page and the agent reapplies`,
+        answers: labelled(fields, answers),
+        learned,
+        aiCalls,
+        pending,
+      };
+    }
 
     for (const f of fields) {
       const v = answers[f.id];
@@ -343,8 +396,16 @@ Return JSON: {"<id>": "<answer or null>"}`,
 
     const submit = page.locator("button[type=submit], input[type=submit], button:has-text('Submit application'), button:has-text('Submit')").last();
     if ((await submit.count()) === 0) return { status: "needs_user", detail: "Couldn't find the Submit button", answers: labelled(fields, answers), learned, usedPortalLogin, aiCalls };
+    const submittedAt = new Date();
     await submit.click();
     await page.waitForTimeout(6000);
+
+    // Some sites (Greenhouse especially) email a security code after Submit and wait for it.
+    const code = await enterEmailCode(page, opts.emailCode, submittedAt);
+    if (code === "no_inbox")
+      return { status: "needs_user", detail: "The site emailed you a security code. Connect your Gmail on the Autopilot page so the agent can enter it next time — or finish this one yourself.", answers: labelled(fields, answers), learned, usedPortalLogin, aiCalls };
+    if (code === "not_found")
+      return { status: "needs_user", detail: "The site emailed a security code but it didn't arrive in time — open the application and enter it yourself.", answers: labelled(fields, answers), learned, usedPortalLogin, aiCalls };
 
     const after = (await page.textContent("body").catch(() => "")) ?? "";
     if (SUCCESS.test(after) || /confirmation|thank/i.test(page.url())) return { status: "submitted", detail: "Application submitted", answers: labelled(fields, answers), learned, usedPortalLogin, aiCalls };
@@ -354,6 +415,28 @@ Return JSON: {"<id>": "<answer or null>"}`,
   } catch (e) {
     return { status: "failed", detail: (e as Error).message.slice(0, 300), aiCalls };
   }
+}
+
+const CODE_BOXES = "input[id^='security-input'], input[autocomplete='one-time-code'], input[name*='security_code' i], input[name*='verification' i], input[aria-label*='code' i], input[placeholder*='code' i]";
+const ASKS_CODE = /(security|verification|confirmation|one[- ]time) code|code (was |we('|’)ve |has been )?(sent|emailed)|enter the (\d+[- ]character )?code|check your email for a code/i;
+
+/** If the page now asks for an emailed code, fetch it from the inbox and submit it. */
+async function enterEmailCode(page: Page, emailCode: ((since: Date) => Promise<string | null>) | undefined, since: Date): Promise<"none" | "entered" | "no_inbox" | "not_found"> {
+  const body = (await page.textContent("body").catch(() => "")) ?? "";
+  if (!ASKS_CODE.test(body) || SUCCESS.test(body)) return "none";
+  const boxes = page.locator(CODE_BOXES);
+  const n = await boxes.count();
+  if (!n) return "none";
+  if (!emailCode) return "no_inbox";
+  const code = await emailCode(since).catch(() => null);
+  if (!code) return "not_found";
+  if (n > 1 && n >= code.length) for (let i = 0; i < code.length; i++) await boxes.nth(i).fill(code[i]);
+  else await boxes.first().fill(code);
+  await page.waitForTimeout(500);
+  const again = page.locator("button[type=submit], input[type=submit], button:has-text('Submit'), button:has-text('Verify')").last();
+  if (await again.count()) await again.click().catch(() => {});
+  await page.waitForTimeout(6000);
+  return "entered";
 }
 
 /** Answers keyed by the question text (what the user sees), not internal field ids. */

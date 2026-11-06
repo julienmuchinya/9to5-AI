@@ -24,10 +24,11 @@ import { bumpUsage, freeTierSnapshot, checkGemini, today } from "../../src/lib/v
 import { renderResumePdf, tailorResume, resumeToText, type ParsedResume } from "../../src/lib/v2/resume";
 import { applyToJob, type Applicant } from "./apply";
 import { scanInbox } from "./inbox";
+import { waitForVerification } from "./mailcode";
 import { resumeFocus } from "../../src/lib/v2/tracking";
 import { decryptSecret, encryptSecret, generatePortalPassword } from "../../src/lib/v2/vault";
 import { COMPANY_DAILY_CAP, companyKey, planQueue } from "../../src/lib/v2/priority";
-import { rememberAnswers, type AppAnswers } from "../../src/lib/v2/app-questions";
+import { customStore, rememberAnswers, type AppAnswers, type CustomAnswers } from "../../src/lib/v2/app-questions";
 
 const startedAt = Date.now();
 const env = (k: string, d = "") => process.env[k] ?? d;
@@ -220,6 +221,11 @@ interface UserRow {
   updated_at: string | null;
   application_answers?: AppAnswers | null;
   answer_memory?: AppAnswers | null;
+  custom_answers?: CustomAnswers | null;
+  inbox_email?: string | null;
+  inbox_host?: string | null;
+  inbox_password_enc?: string | null;
+  inbox_error?: string | null;
 }
 interface Settings {
   user_id: string;
@@ -326,7 +332,14 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
   if (!email || !firstName || !lastName) return { missing_contact: 1 };
 
   // Candidates: everything the user queued + the agent's best verified matches.
-  const { data: queued } = await sb.from("applications").select("id,job_id").eq("user_id", u.id).eq("status", "queued").order("created_at").limit(400);
+  // Queued jobs, plus earlier attempts that crashed (up to 3 tries) — otherwise a bad run loses them for good.
+  const { data: queued } = await sb
+    .from("applications")
+    .select("id,job_id")
+    .eq("user_id", u.id)
+    .or("status.eq.queued,and(status.eq.failed,or(attempts.is.null,attempts.lt.3))")
+    .order("created_at")
+    .limit(400);
   const { data: existing } = await sb.from("applications").select("job_id").eq("user_id", u.id);
   const taken = new Set((existing ?? []).map((a) => a.job_id));
   const minFit = s.min_fit_score ?? 65;
@@ -399,7 +412,18 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
     resume_text: u.resume_parsed ? resumeToText(u.resume_parsed) : "",
     answers: u.application_answers ?? {},
     memory,
+    custom: customStore(u.custom_answers),
   };
+  // Gmail (app password) for codes that sites email during an application.
+  let emailCode: ((since: Date) => Promise<string | null>) | undefined;
+  if (u.inbox_email && u.inbox_password_enc && !u.inbox_error) {
+    try {
+      const creds = { email: u.inbox_email, host: u.inbox_host || "imap.gmail.com", password: decryptSecret(u.inbox_password_enc) };
+      emailCode = (since) => waitForVerification(creds, { since, match: /code|verif|security|greenhouse|lever|ashby/i, want: "code", timeoutMs: 75_000 });
+    } catch {
+      emailCode = undefined;
+    }
+  }
   const save = async (row: Record<string, unknown>) => {
     if (dryRun) return; // dry runs never change the user's applications
     const { error } = await sb.from("applications").upsert({ ...row, status_updated_at: new Date().toISOString() }, { onConflict: "user_id,job_id" });
@@ -471,9 +495,10 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
     applicant.portal = await portalLogin(sb, u.id, applyUrl);
     applicant.memory = memory;
     const t0 = Date.now();
-    const r = await applyToJob(browser, sb, { url: applyUrl, ats: p.ats, applicant, resumePath, jobTitle: job.title, company: job.company_name, userId: u.id, dryRun });
+    const r = await applyToJob(browser, sb, { url: applyUrl, ats: p.ats, applicant, resumePath, jobTitle: job.title, company: job.company_name, userId: u.id, dryRun, jobDescription: p.description, emailCode });
     log(`apply ${u.id.slice(0, 8)} → ${job.company_name} / ${job.title}: ${r.status} in ${Math.round((Date.now() - t0) / 1000)}s, ${r.aiCalls ?? 0} AI call(s) (${r.detail})`);
     if (dryRun && r.answers) log("  answers:", JSON.stringify(r.answers).slice(0, 1500));
+    if (dryRun && r.pending?.length) log("  waiting on user:", JSON.stringify(r.pending).slice(0, 1500));
     if (r.aiCalls) result.ai_calls = (result.ai_calls ?? 0) + r.aiCalls;
     if (r.learned?.length) {
       memory = rememberAnswers(memory, r.learned.map((x) => ({ ...x, company: job.company_name })));
@@ -492,6 +517,7 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
       status,
       error: r.status === "submitted" ? null : r.detail,
       answers: r.answers ?? {},
+      pending_questions: r.status === "needs_user" && r.pending?.length ? r.pending : null,
       submitted_at: r.status === "submitted" ? new Date().toISOString() : null,
       resume_focus: focus,
     });

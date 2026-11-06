@@ -1,5 +1,6 @@
 import { requireUser } from "@/lib/v2/session";
-import { saveProfile } from "../actions";
+import { saveProfile, updateCustomAnswers } from "../actions";
+import type { CustomAnswers } from "@/lib/v2/app-questions";
 import { PageHeader, Section, inputCls } from "@/components/ui";
 import { CommonQuestions } from "./common-questions";
 import { ResumeUpload } from "./resume-upload";
@@ -140,6 +141,30 @@ export default async function ProfilePage() {
           <SubmitButton>Save profile</SubmitButton>
         </div>
       </form>
+
+      {Object.keys((p?.custom_answers ?? {}) as CustomAnswers).length > 0 && (
+        <form action={updateCustomAnswers} className="mt-6" id="other-answers">
+          <Section icon="6" title="Your answers to other questions" description="Questions you answered for the agent on the Applications page. It reuses them on the same or similar questions. Clear a box to delete that answer.">
+            <div className="space-y-3">
+              {Object.entries((p?.custom_answers ?? {}) as CustomAnswers)
+                .sort((a, b) => (b[1].at ?? "").localeCompare(a[1].at ?? ""))
+                .map(([key, v]) => (
+                  <label key={key} className="block text-sm">
+                    {v.q}
+                    {v.a.length > 80 ? (
+                      <textarea className={input} name={`ca_${key}`} rows={3} defaultValue={v.a} />
+                    ) : (
+                      <input className={input} name={`ca_${key}`} defaultValue={v.a} />
+                    )}
+                  </label>
+                ))}
+            </div>
+            <div className="mt-4">
+              <SubmitButton variant="secondary">Save these answers</SubmitButton>
+            </div>
+          </Section>
+        </form>
+      )}
     </div>
   );
 }

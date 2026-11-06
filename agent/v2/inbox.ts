@@ -5,6 +5,7 @@
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { decryptSecret } from "../../src/lib/v2/vault";
+import { inboxErrorMessage } from "./mailcode";
 import { classifyEmail, emailMentionsCompany, nextStatus } from "../../src/lib/v2/tracking";
 
 type InboxUser = { id: string; inbox_email: string | null; inbox_host: string | null; inbox_password_enc: string | null; inbox_last_scan_at: string | null };
@@ -84,8 +85,7 @@ export async function scanInbox(sb: SupabaseClient, u: InboxUser, log: (m: strin
     await client.logout();
     await sb.from("profiles").update({ inbox_last_scan_at: new Date().toISOString(), inbox_error: null }).eq("id", u.id);
   } catch (e) {
-    const m = (e as Error).message ?? String(e);
-    const friendly = /auth|credentials|invalid|login/i.test(m) ? "Inbox sign-in failed — check the email and app password on the Autopilot page." : m.slice(0, 200);
+    const friendly = inboxErrorMessage(e);
     await sb.from("profiles").update({ inbox_error: friendly }).eq("id", u.id);
     log(`inbox ${u.id.slice(0, 8)} error: ${friendly}`);
     try {

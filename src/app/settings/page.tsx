@@ -7,10 +7,11 @@ export const dynamic = "force-dynamic";
 
 const input = "mt-1.5 w-32 rounded-xl border border-[var(--border)] bg-[var(--background-2)] px-3 py-2 text-sm outline-none focus:border-[var(--accent)]";
 
-export default async function SettingsPage() {
+export default async function SettingsPage({ searchParams }: { searchParams: Promise<{ inbox?: string }> }) {
   const { supabase, user } = await requireUser();
+  const { inbox: inboxMsg } = await searchParams;
   const { data: s } = await supabase.from("autopilot_settings").select("*").eq("user_id", user.id).single();
-  const { data: p } = await supabase.from("profiles").select("resume_path,work_authorized_us,sponsorship_needed,phone,first_name,last_name,inbox_email,inbox_last_scan_at,inbox_error").eq("id", user.id).single();
+  const { data: p } = await supabase.from("profiles").select("resume_path,work_authorized_us,sponsorship_needed,phone,first_name,last_name,job_email,inbox_email,inbox_last_scan_at,inbox_error").eq("id", user.id).single();
   const missing = [
     !p?.resume_path && "upload your resume",
     (!p?.first_name || !p?.last_name) && "add your first and last name",
@@ -67,25 +68,41 @@ export default async function SettingsPage() {
         <SubmitButton>Save autopilot settings</SubmitButton>
       </form>
 
-      <Card className="mt-8">
-        <h2 className="mb-1 font-semibold">Track replies from your inbox (free)</h2>
+      <Card className="mt-8 scroll-mt-6" >
+        <span id="inbox" />
+        <h2 className="mb-1 font-semibold">Connect your Gmail (free)</h2>
         <p className="mb-4 text-sm text-[var(--muted)]">
           Every run, the agent reads recent emails (read-only) and moves applications to “Under consideration”, “Interview”, “Offer” or
-          “Rejected”. It never sends, deletes or marks mail as read. Uses a Gmail <b>app password</b>, not your real password.
+          “Rejected”. While applying it also reads the <b>verification codes and links</b> sites email you, so it can finish those applications.
+          It never sends, deletes or marks mail as read. Uses a Gmail <b>app password</b>, not your real password.
         </p>
-        {p?.inbox_email ? (
+        {inboxMsg && (
+          <p className={`mb-3 rounded-lg p-2 text-sm ${inboxMsg === "ok" ? "bg-emerald-900/30 text-emerald-300" : "bg-red-900/30 text-red-300"}`}>
+            {inboxMsg === "ok" ? "Connected — Gmail accepted the app password." : inboxMsg}
+          </p>
+        )}
+        {p?.inbox_email && p?.job_email && p.inbox_email.toLowerCase() !== p.job_email.toLowerCase() && (
+          <p className="mb-3 rounded-lg bg-amber-900/30 p-2 text-sm text-amber-200">
+            Applications use <b>{p.job_email}</b> but the connected inbox is <b>{p.inbox_email}</b> — verification codes go to {p.job_email}, so connect that one.
+          </p>
+        )}
+        {p?.inbox_email && !p.inbox_error ? (
           <div className="space-y-2 text-sm">
             <p>
               Connected: <b>{p.inbox_email}</b>
               {p.inbox_last_scan_at ? ` · last checked ${new Date(p.inbox_last_scan_at).toLocaleString()}` : " · not checked yet (next agent run)"}
             </p>
-            {p.inbox_error && <p className="rounded-lg bg-red-900/30 p-2 text-red-300">{p.inbox_error}</p>}
             <form action={disconnectInbox}>
               <button className="rounded-lg bg-[var(--border)] px-3 py-1.5 text-sm">Disconnect inbox</button>
             </form>
           </div>
         ) : (
           <form action={saveInbox} className="space-y-3">
+            {p?.inbox_email && p.inbox_error && (
+              <p className="rounded-lg bg-red-900/30 p-2 text-sm text-red-300">
+                {p.inbox_email} isn’t working: {p.inbox_error} Paste a new app password below.
+              </p>
+            )}
             <ol className="list-decimal space-y-1 pl-5 text-sm text-[var(--muted)]">
               <li>Turn on 2-Step Verification for your Google account (myaccount.google.com → Security).</li>
               <li>
@@ -96,11 +113,11 @@ export default async function SettingsPage() {
             <div className="grid gap-3 sm:grid-cols-2">
               <label className="block text-sm">
                 Gmail address
-                <input className={`${input} w-full`} type="email" name="inbox_email" defaultValue={user.email ?? ""} required />
+                <input className={`${input} w-full`} type="email" name="inbox_email" defaultValue={p?.inbox_email ?? p?.job_email ?? user.email ?? ""} required />
               </label>
               <label className="block text-sm">
                 App password
-                <input className={`${input} w-full`} type="password" name="inbox_password" autoComplete="off" required />
+                <input className={`${input} w-full`} type="password" name="inbox_password" autoComplete="off" placeholder="abcd efgh ijkl mnop" required />
               </label>
             </div>
             <input type="hidden" name="inbox_host" value="imap.gmail.com" />

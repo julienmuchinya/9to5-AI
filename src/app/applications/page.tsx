@@ -1,6 +1,8 @@
 import Link from "next/link";
 import { requireUser } from "@/lib/v2/session";
-import { Badge, Card, EmptyState, PageHeader, StatCard, TabLink, buttonCls } from "@/components/ui";
+import { Badge, Card, EmptyState, Notice, PageHeader, StatCard, TabLink, buttonCls } from "@/components/ui";
+import { customStore, findSimilarAnswer, questionSimilarity, type CustomAnswers, type PendingQuestion } from "@/lib/v2/app-questions";
+import { PendingQuestions, type AskedQuestion } from "./pending-questions";
 import { STAGE_LABEL, roleFamily } from "@/lib/v2/tracking";
 import { ago } from "@/lib/v2/priority";
 import { dispatchConfigured, nextScheduledRun } from "@/lib/v2/dispatch";
@@ -43,19 +45,20 @@ const hostOf = (u: string | null | undefined) => {
 const readable = (answers: Record<string, string> | null) =>
   Object.entries(answers ?? {}).filter(([q, v]) => v && v !== "__RESUME__" && !/^f\d+(_\d+)?$/.test(q));
 
-export default async function ApplicationsPage({ searchParams }: { searchParams: Promise<{ tab?: string }> }) {
+export default async function ApplicationsPage({ searchParams }: { searchParams: Promise<{ tab?: string; msg?: string }> }) {
   const { supabase, user } = await requireUser();
-  const { tab = "active" } = await searchParams;
-  const [{ data }, { data: evs }, { data: logins }, { data: lastRun }] = await Promise.all([
+  const { tab = "active", msg } = await searchParams;
+  const [{ data }, { data: evs }, { data: logins }, { data: lastRun }, { data: prof }] = await Promise.all([
     supabase
       .from("applications")
-      .select("id,status,error,apply_url,answers,submitted_at,created_at,requested_by,resume_focus,status_updated_at,attempts,jobs(title,company_name,url,job_postings(posted_at))")
+      .select("id,status,error,apply_url,answers,submitted_at,created_at,requested_by,resume_focus,status_updated_at,attempts,pending_questions,jobs(title,company_name,url,job_postings(posted_at))")
       .eq("user_id", user.id)
       .order("created_at", { ascending: false })
       .limit(400),
     supabase.from("application_events").select("application_id,kind,source,detail,created_at").eq("user_id", user.id).order("created_at", { ascending: false }).limit(1000),
     supabase.from("application_accounts").select("id,portal_host,email_used,account_created").eq("user_id", user.id),
     supabase.from("agent_runs").select("started_at,ended_at,status,summary").eq("user_id", user.id).order("started_at", { ascending: false }).limit(1).maybeSingle(),
+    supabase.from("profiles").select("custom_answers").eq("id", user.id).maybeSingle(),
   ]);
   type Row = {
     id: string;
@@ -68,6 +71,7 @@ export default async function ApplicationsPage({ searchParams }: { searchParams:
     requested_by: string;
     resume_focus: string | null;
     attempts: number | null;
+    pending_questions: PendingQuestion[] | null;
     jobs: { title: string; company_name: string; url: string; job_postings: { posted_at: string | null } | null } | null;
   };
   const rows = (data ?? []) as unknown as Row[];
@@ -98,6 +102,23 @@ export default async function ApplicationsPage({ searchParams }: { searchParams:
   const next = nextScheduledRun();
   const running = lastRun?.status === "running";
 
+  // Questions the agent couldn't answer, merged across applications (same or near-identical wording),
+  // minus any the user has already answered since.
+  const mine = customStore(prof?.custom_answers as CustomAnswers | null);
+  const asked = new Map<string, AskedQuestion>();
+  for (const r of rows) {
+    if (r.status !== "needs_user") continue;
+    for (const q of r.pending_questions ?? []) {
+      if (findSimilarAnswer(q.label, q.options ?? [], mine)) continue;
+      const company = r.jobs?.company_name ?? "a company";
+      const same = asked.get(q.key) ?? [...asked.values()].find((x) => questionSimilarity(x.label, q.label) >= 0.75);
+      if (same) {
+        if (!same.companies.includes(company)) same.companies.push(company);
+      } else asked.set(q.key, { ...q, options: q.options ?? [], companies: [company] });
+    }
+  }
+  const questions = [...asked.values()].sort((a, b) => b.companies.length - a.companies.length);
+
   const filtered = rows.filter((r) => {
     if (tab === "needs") return r.status === "needs_user";
     if (tab === "queued") return r.status === "queued";
@@ -123,6 +144,27 @@ export default async function ApplicationsPage({ searchParams }: { searchParams:
         <StatCard label="Interviews" value={count(["interview", "offer"])} variant="success" />
         <StatCard label="Rejected" value={count(["rejected"])} variant="danger" />
       </div>
+
+      {msg && (
+        <div className="mb-4">
+          <Notice tone={/couldn't/i.test(msg) ? "danger" : "success"}>{msg}</Notice>
+        </div>
+      )}
+
+      {tab === "needs" ? (
+        <PendingQuestions questions={questions} />
+      ) : (
+        questions.length > 0 && (
+          <div className="mb-6">
+            <Notice tone="warning">
+              {questions.length} question{questions.length === 1 ? " is" : "s are"} holding up applications.{" "}
+              <Link href="/applications?tab=needs#questions" className="font-medium underline">
+                Answer {questions.length === 1 ? "it" : "them"} once →
+              </Link>
+            </Notice>
+          </div>
+        )
+      )}
 
       {queuedCount > 0 && (
         <Card className="mb-6 border-[var(--accent)]/30 bg-gradient-to-r from-[var(--accent-soft)] to-transparent">
@@ -246,7 +288,22 @@ export default async function ApplicationsPage({ searchParams }: { searchParams:
                 </div>
               </div>
 
-              {r.status === "needs_user" && /Needs your answer/.test(r.error ?? "") && (
+              {r.status === "needs_user" && (r.pending_questions?.length ?? 0) > 0 && (
+                <p className="mt-2 text-xs text-[var(--muted)]">
+                  Waiting on: {(r.pending_questions ?? []).filter((q) => !findSimilarAnswer(q.label, q.options ?? [], mine)).map((q) => q.label).slice(0, 4).join(" · ")}
+                  {tab !== "needs" ? (
+                    <>
+                      {" "}
+                      —{" "}
+                      <Link href="/applications?tab=needs#questions" className="text-[var(--accent)] hover:underline">
+                        answer above
+                      </Link>
+                    </>
+                  ) : null}
+                </p>
+              )}
+
+              {r.status === "needs_user" && !r.pending_questions?.length && /Needs your answer/.test(r.error ?? "") && (
                 <p className="mt-2 text-xs text-[var(--muted)]">
                   Tip: answer it once under{" "}
                   <Link href="/profile#common-questions" className="text-[var(--accent)] hover:underline">

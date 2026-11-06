@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { freshness, planQueue, priorityScore, companyKey, ago } from "./priority";
-import { answerFromProfile, isJobSpecific, memoryKey, pickOption, questionFor, rememberAnswers } from "./app-questions";
+import { answerFromProfile, customStore, findSimilarAnswer, isJobSpecific, memoryKey, pickOption, questionFor, rememberAnswers } from "./app-questions";
 import { nextScheduledRun } from "./dispatch";
 import { knownValue, type Applicant, type Field } from "../../../agent/v2/apply";
 
@@ -126,5 +126,30 @@ describe("schedule", () => {
     expect(nextScheduledRun(new Date("2026-11-06T00:03:00Z")).toISOString()).toBe("2026-11-06T00:17:00.000Z");
     expect(nextScheduledRun(new Date("2026-11-06T00:20:00Z")).toISOString()).toBe("2026-11-06T03:17:00.000Z");
     expect(nextScheduledRun(new Date("2026-11-06T22:00:00Z")).toISOString()).toBe("2026-11-07T00:17:00.000Z");
+  });
+});
+
+describe("questions asked to the user", () => {
+  const store = {
+    [memoryKey("Do you have 3+ years of experience with Python?")]: "Yes",
+    [memoryKey("Are you willing to work from our New York office 3 days a week?")]: "Yes",
+    [memoryKey("Are you authorized to work in the United Kingdom?")]: "No",
+  };
+  it("reuses an answer for the same or a reworded question", () => {
+    expect(findSimilarAnswer("Do you have 3+ years of experience with Python?", ["Yes", "No"], store)).toBe("Yes");
+    expect(findSimilarAnswer("Do you have 3+ years experience in Python?*", ["Yes, I do", "No"], store)).toBe("Yes, I do");
+  });
+  it("does not reuse answers for questions that differ in what matters", () => {
+    expect(findSimilarAnswer("Do you have 5+ years of experience with Python?", ["Yes", "No"], store)).toBeNull();
+    expect(findSimilarAnswer("Are you authorized to work in Canada?", ["Yes", "No"], store)).toBeNull();
+    expect(findSimilarAnswer("Do you have 3+ years of experience with Java?", ["Yes", "No"], store)).toBeNull();
+  });
+  it("the form filler uses the user's own answers", () => {
+    const a: Applicant = { first_name: "A", last_name: "B", email: "a@b.c", resume_text: "", custom: store };
+    const f: Field = { id: "f1", label: "Do you have 3+ years of experience with Python? *", kind: "select", required: true, options: ["Yes", "No"] };
+    expect(knownValue(f, a)).toBe("Yes");
+  });
+  it("customStore flattens saved answers", () => {
+    expect(customStore({ k: { q: "Q?", a: "A" }, e: { q: "E?", a: "" } })).toEqual({ k: "A" });
   });
 });
