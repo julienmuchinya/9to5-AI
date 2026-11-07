@@ -123,3 +123,23 @@ describe('application URLs and degrees', () => {
     expect(commonSenseAnswer('Degree', ['Select One', 'High School Diploma or Equivalent', 'Bachelor of Science with Honors', 'Bachelor of Science', 'Master of Science'], 'combobox')).toBe('Bachelor of Science');
   });
 });
+
+describe('statement-style yes/no options', () => {
+  const opts = ['I am authorized to work in the United States for any employer', 'I am authorized to work in the United States for my present employer only', 'I require sponsorship to work in the United States', 'I am not authorized to work in the United States', 'My status to work in the United States is unknown'];
+  it('authorization picks the unqualified statement', () => {
+    expect(knownValue(f('Are you legally authorized to work in the United States?', 'combobox', opts), me)).toBe('I am authorized to work in the United States for any employer');
+  });
+  it('sponsorship No picks the negative statement', () => {
+    const o = ['Yes, I will require sponsorship', 'No, I will not require sponsorship'];
+    expect(knownValue(f('Will you require visa sponsorship now or in the future?', 'select', o), me)).toBe('No, I will not require sponsorship');
+    expect(knownValue(f('Will you require visa sponsorship now or in the future?', 'select', ['I will require sponsorship', 'I do not require sponsorship']), me)).toBe('I do not require sponsorship');
+  });
+});
+
+describe('school field', () => {
+  const a: Applicant = { ...me, school: 'Example State University' };
+  it('only where a school is asked for', () => {
+    expect(knownValue(f('School', 'combobox'), a)).toBe('Example State University');
+    expect(knownValue(f('Have you ever worked at The American College of Obstetricians and Gynecologists or any of its affiliates?', 'combobox', ['Yes', 'No']), a)).not.toBe('Example State University');
+  });
+});

@@ -306,9 +306,20 @@ export async function collectFields(page: Page): Promise<Field[]> {
   });
 }
 
-const yesNo = (f: Field, yes: boolean): string => {
+/**
+ * Yes/No answer mapped onto the form's options. Some forms use statements instead of Yes/No
+ * ("I am authorized to work in the United States for any employer" / "…for my present employer only" /
+ * "I require sponsorship…"): pick the unqualified positive statement for Yes, the negative one for No.
+ */
+export const yesNo = (f: Field, yes: boolean): string => {
   if (!f.options.length) return yes ? "Yes" : "No";
-  return pickOption(yes ? "Yes" : "No", f.options) ?? (yes ? "Yes" : "No");
+  const direct = pickOption(yes ? "Yes" : "No", f.options);
+  if (direct) return direct;
+  const opts = f.options.filter((o) => !/^(select|choose)/i.test(o));
+  const qualified = /\b(only|unknown|unsure|not sure|depends|prefer not|decline)\b/i;
+  const negative = /\b(not|no|unable|cannot|can.?t|don.?t|do not|won.?t|will not)\b/i;
+  if (yes) return opts.find((o) => !negative.test(o) && !qualified.test(o) && !/\brequire/i.test(o)) ?? opts.find((o) => !negative.test(o)) ?? "Yes";
+  return opts.find((o) => negative.test(o) && !qualified.test(o)) ?? "No";
 };
 
 /** Answers we know without asking the AI (free). */
@@ -350,7 +361,15 @@ export function knownValue(f: Field, a: Applicant): string | null {
     if (c) return f.options.length ? (pickOption(c, f.options) ?? f.options.find((o) => /^(united states|usa|us)\b/i.test(o)) ?? null) : c;
   }
   if (/zip|postal/.test(l) && a.answers?.zip) return a.answers.zip;
-  if (/(school|university|college|institution)/.test(l) && !/high school/.test(l) && (f.kind === "text" || f.kind === "combobox") && a.school) return a.school;
+  // The school name only where a school is asked for — not "Have you ever worked at The American College of…?".
+  if (
+    /(school|university|college|institution)/.test(l) &&
+    !/high school/.test(l) &&
+    !/\b(worked|employed|work for|affiliat|have you|are you|were you|do you|did you|relative|refer)\b|\?/.test(l) &&
+    (f.kind === "text" || f.kind === "combobox") &&
+    a.school
+  )
+    return a.school;
   if (/graduat/.test(l) && /date|year|when|expected/.test(l) && f.kind === "text" && a.graduation_date) return a.graduation_date;
   // Sponsorship before authorization: "authorized … without sponsorship" questions mention both.
   // Only real questions about NEEDING sponsorship — not notices like "sponsorship is not available, select Yes to confirm".

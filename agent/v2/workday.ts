@@ -359,7 +359,11 @@ async function workdayAuth(page: Page, opts: ApplyOpts): Promise<AuthResult> {
   }
   const r = await signIn();
   if (r === "ok") return { ok: true, created: false };
-  return { ok: false, result: { status: "needs_user", detail: `Couldn't sign in to Workday (${host}): ${(await errorsOnPage(page)) || "unknown sign-in screen"}. Use the login under Portal logins, then click Retry.` } };
+  // Sign-in failed without saying why (seen on T-Mobile, Ciena, Northrop): usually an unverified account or a
+  // password that didn't stick. Try the verification email, then a password reset, before asking the user.
+  if (r !== "bad_password" && (await confirmByEmail(new Date(Date.now() - 3 * 86400_000))) && (await signIn()) === "ok") return { ok: true, created: false };
+  if ((await resetPassword()) && (await signIn()) === "ok") return { ok: true, created: false };
+  return { ok: false, result: { status: "needs_user", detail: `Couldn't sign in to Workday (${host}): ${(await errorsOnPage(page)) || "the sign-in didn't go through and the reset email didn't arrive"}. Use the login under Portal logins, then click Retry.` } };
 }
 
 /** From the job posting to the application flow (Apply → Apply Manually). */
