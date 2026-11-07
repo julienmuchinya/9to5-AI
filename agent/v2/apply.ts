@@ -618,7 +618,8 @@ export async function answerFields(
     const required = unknown.filter((f) => f.required && f.kind !== "file" && !f.filled);
     const standOut = unknown.filter((f) => !f.required && (f.kind === "textarea" || STAND_OUT.test(f.label)) && f.kind !== "file" && !/password/i.test(f.label));
     const optionalChoices = unknown.filter((f) => !f.required && !f.filled && f.options.length > 0 && f.kind !== "checkbox" && !/(pronoun|preferred name|middle name|suffix|prefix)/i.test(f.label));
-    const needAi = required.length || optionalChoices.length ? [...required, ...optionalChoices.slice(0, 10), ...standOut.slice(0, 3)] : [];
+    // Only a REQUIRED unanswered question pays for an AI call (free quota: 250/day); optional ones ride along.
+    const needAi = required.length ? [...required, ...optionalChoices.slice(0, 10), ...standOut.slice(0, 3)] : [];
     if (needAi.length) {
       const facts = {
         name: `${opts.applicant.first_name} ${opts.applicant.last_name}`,
