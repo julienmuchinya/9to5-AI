@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { timeFmt } from "@/lib/tz";
 import { requireUser, serviceClient } from "@/lib/v2/session";
 import { Badge, Card, EmptyState, Notice, PageHeader, StatButton, buttonCls } from "@/components/ui";
 import { customStore, findSimilarAnswer, questionSimilarity, type CustomAnswers, type PendingQuestion } from "@/lib/v2/app-questions";
@@ -70,6 +71,7 @@ type Row = {
 
 export default async function ApplicationsPage({ searchParams }: { searchParams: Promise<{ tab?: string; msg?: string; sort?: string; page?: string; why?: string }> }) {
   const { supabase, user } = await requireUser();
+  const t = await timeFmt();
   const sp = await searchParams;
   const sort = sp.sort ?? "newest";
   const page = Math.max(1, Number(sp.page) || 1);
@@ -171,7 +173,7 @@ export default async function ApplicationsPage({ searchParams }: { searchParams:
         action={
           <div className="flex flex-wrap items-center gap-3">
             <AiStatus data={ai} compact />
-            {dispatchConfigured() && <RunNowButton running={running} />}
+            {dispatchConfigured() && <RunNowButton running={running} details />}
           </div>
         }
       />
@@ -232,7 +234,7 @@ export default async function ApplicationsPage({ searchParams }: { searchParams:
           <p className="text-sm">
             {running
               ? `The agent is applying right now (started ${ago(lastRun?.started_at)}).`
-              : `${c.queued} waiting — next scheduled run ${next.toLocaleString("en-US", { hour: "numeric", minute: "2-digit", weekday: "short", timeZoneName: "short" })}.`}{" "}
+              : `${c.queued} waiting — next scheduled run ~${t.time(next, true)} (GitHub may start it late).`}{" "}
             <span className="text-[var(--muted)]">Freshest postings go first, max 5 per company per day.{lastRun && !running ? ` Last run ${ago(lastRun.started_at)} (${lastRun.status}).` : ""}</span>
           </p>
         </Card>
@@ -298,7 +300,7 @@ export default async function ApplicationsPage({ searchParams }: { searchParams:
               </div>
 
               <p className="mt-2 text-[11px] text-[var(--muted)]">
-                {r.submitted_at ? `Applied ${new Date(r.submitted_at).toLocaleDateString()}` : `Added ${new Date(r.created_at).toLocaleDateString()}`}
+                {r.submitted_at ? `Applied ${t.dateTime(r.submitted_at)}` : `Added ${t.date(r.created_at)}`}
                 {posted ? ` · posted ${posted}` : ""}
                 {r.requested_by === "user" ? " · by you" : ""}
               </p>
@@ -354,7 +356,7 @@ export default async function ApplicationsPage({ searchParams }: { searchParams:
                   <ol className="mt-1.5 space-y-1 border-l border-[var(--border)] pl-2.5">
                     {timeline.map((e, i) => (
                       <li key={i}>
-                        <span className="text-[var(--muted)]">{new Date(e.created_at).toLocaleDateString()}</span> · {STAGE_LABEL[e.kind] ?? e.kind}
+                        <span className="text-[var(--muted)]">{t.date(e.created_at)}</span> · {STAGE_LABEL[e.kind] ?? e.kind}
                         <span className="text-[var(--muted)]"> ({e.source === "email" ? "inbox" : e.source === "agent" ? "agent" : "you"})</span>
                         {e.detail ? ` — ${e.detail}` : ""}
                       </li>

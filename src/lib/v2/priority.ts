@@ -22,12 +22,14 @@ export function freshness(postedAt: string | null | undefined, now = Date.now())
   const t = postedAt ? Date.parse(postedAt) : NaN;
   if (!Number.isFinite(t)) return { key: "unknown", label: "Date unknown", bonus: 5 };
   const h = Math.max(0, (now - t) / HOUR);
-  if (h <= 24) return { key: "today", label: "Posted in the last 24h", bonus: 35 };
-  if (h <= 48) return { key: "2d", label: "Posted 2 days ago", bonus: 25 };
-  if (h <= 72) return { key: "3d", label: "Posted 3 days ago", bonus: 17 };
-  if (h <= 7 * 24) return { key: "week", label: "Posted this week", bonus: 9 };
-  if (h <= 14 * 24) return { key: "2weeks", label: "Posted 2 weeks ago", bonus: 3 };
-  return { key: "older", label: "Posted over 2 weeks ago", bonus: -10 };
+  // Replies drop fast after the first days, so freshness outweighs a few points of fit.
+  if (h <= 12) return { key: "today", label: "Posted in the last 12h", bonus: 55 };
+  if (h <= 24) return { key: "today", label: "Posted in the last 24h", bonus: 45 };
+  if (h <= 48) return { key: "2d", label: "Posted 2 days ago", bonus: 32 };
+  if (h <= 72) return { key: "3d", label: "Posted 3 days ago", bonus: 22 };
+  if (h <= 7 * 24) return { key: "week", label: "Posted this week", bonus: 10 };
+  if (h <= 14 * 24) return { key: "2weeks", label: "Posted 2 weeks ago", bonus: 0 };
+  return { key: "older", label: "Posted over 2 weeks ago", bonus: -25 };
 }
 
 /** Short "3h ago" / "2d ago" text. */
@@ -46,6 +48,21 @@ export function priorityScore(fit: number, postedAt: string | null | undefined, 
   return Math.round(fit + freshness(postedAt, now).bonus);
 }
 
+/** Postings older than this are skipped by the agent (not worth the time or AI). Override with MAX_POSTING_AGE_DAYS. */
+export const MAX_POSTING_AGE_DAYS = Number(process.env.MAX_POSTING_AGE_DAYS ?? 21);
+
+/** Days since posting, or null when unknown. */
+export function ageDays(postedAt: string | null | undefined, now = Date.now()): number | null {
+  const t = postedAt ? Date.parse(postedAt) : NaN;
+  return Number.isFinite(t) ? Math.max(0, (now - t) / (24 * HOUR)) : null;
+}
+
+/** Too old to bother with? Unknown dates are kept (they get a small score instead). */
+export function tooOld(postedAt: string | null | undefined, maxDays = MAX_POSTING_AGE_DAYS, now = Date.now()): boolean {
+  const d = ageDays(postedAt, now);
+  return d != null && d > maxDays;
+}
+
 export const companyKey = (name: string | null | undefined) =>
   (name ?? "")
     .toLowerCase()
@@ -60,6 +77,8 @@ export interface Candidate {
   postedAt?: string | null;
   /** Asked for by the user (chat / Apply button) — goes before agent picks of equal priority. */
   userRequested?: boolean;
+  /** Learned route bonus (how often this site/ATS goes through), see learning.ts. */
+  routeBonus?: number;
 }
 
 /**
@@ -74,7 +93,7 @@ export function planQueue<T extends Candidate>(
   const now = opts.now ?? Date.now();
   const used: Record<string, number> = { ...(opts.appliedToday ?? {}) };
   const sorted = items
-    .map((x, i) => ({ x, i, s: priorityScore(x.fit, x.postedAt, now) + (x.userRequested ? 15 : 0) }))
+    .map((x, i) => ({ x, i, s: priorityScore(x.fit, x.postedAt, now) + (x.userRequested ? 15 : 0) + (x.routeBonus ?? 0) }))
     .sort((a, b) => b.s - a.s || a.i - b.i)
     .map((o) => o.x);
   const picked: T[] = [];

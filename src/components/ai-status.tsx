@@ -55,9 +55,9 @@ export function AiStatus({ data, compact = false }: { data: AiStatusData; compac
         <span className={`h-2.5 w-2.5 rounded-full ${m.dot} ${data.mode !== "out" ? "animate-pulse" : ""}`} />
         <span className={`font-medium ${m.cls}`}>{m.text}</span>
       </div>
-      <Row name="Gemini (today)" used={data.gemini.used} stopAt={data.gemini.stopAt} limit={data.gemini.limit} note={`Resets in ${data.gemini.resetsInH} h (midnight Pacific). Reads resume PDFs, chat.`} />
+      <Row name="Gemini (today)" used={data.gemini.used} stopAt={data.gemini.stopAt} limit={data.gemini.limit} note={`${data.gemini.used >= data.gemini.stopAt ? "At its limit — " : ""}resets in ${data.gemini.resetsInH} h (midnight Pacific). Reads resume PDFs, chat.`} />
       {groq ? (
-        <Row name="Groq (today)" used={groq.used} stopAt={groq.stopAt} limit={groq.limit} note="Main AI for application questions. Requests refill gradually through the day." />
+        <Row name="Groq (today)" used={groq.used} stopAt={groq.stopAt} limit={groq.limit} note={groq.used >= groq.stopAt ? "At its limit — requests come back gradually (about one every 90 s per model)." : "Main AI for application questions. Used requests come back gradually through the day."} />
       ) : (
         <p className="text-xs text-[var(--muted)]">No backup AI set up (add GROQ_API_KEY).</p>
       )}
@@ -69,7 +69,11 @@ export function AiStatus({ data, compact = false }: { data: AiStatusData; compac
           used={data.minutes.usedToday}
           stopAt={Math.max(1, data.minutes.dayAllowance)}
           limit={Math.max(1, data.minutes.dayAllowance)}
-          note={`Minutes: ${data.minutes.usedMonth}/${data.minutes.stopAt} this month, spread evenly over the days left. Run now always works.`}
+          note={
+            data.minutes.usedToday >= data.minutes.dayAllowance
+              ? `Today's share is used — scheduled runs resume in ${data.minutes.resetsInH} h. Run now still works. (${data.minutes.usedMonth}/${data.minutes.stopAt} this month)`
+              : `${data.minutes.usedMonth}/${data.minutes.stopAt} minutes this month, spread over the days left; new share in ${data.minutes.resetsInH} h. Run now always works.`
+          }
         />
       )}
     </div>

@@ -8,7 +8,7 @@ export interface AiStatusData {
   mode: "gemini" | "backup" | "out";
   gemini: { used: number; stopAt: number; limit: number; resetsInH: number };
   backups: FallbackStatus[];
-  minutes: { usedMonth: number; limit: number; stopAt: number; usedToday: number; dayAllowance: number; unlimited: boolean };
+  minutes: { usedMonth: number; limit: number; stopAt: number; usedToday: number; dayAllowance: number; unlimited: boolean; resetsInH: number };
 }
 
 /** Hours until midnight Pacific (when Gemini's free quota resets). */
@@ -42,6 +42,8 @@ export async function aiStatus(db: SupabaseClient): Promise<AiStatusData> {
       usedToday,
       dayAllowance: plan.dayAllowance,
       unlimited: snap.githubMinutes.unlimited,
+      // Today's share starts over at midnight UTC.
+      resetsInH: Math.round(((Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), new Date().getUTCDate() + 1) - Date.now()) / 3600_000) * 10) / 10,
     },
   };
 }

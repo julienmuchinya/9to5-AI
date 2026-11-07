@@ -23,6 +23,11 @@ on:
         type: string
         default: ""
 
+# The agent may start one follow-up run itself when it ran out of time with jobs still waiting.
+permissions:
+  contents: read
+  actions: write
+
 concurrency:
   group: 9to5-agent
   cancel-in-progress: false
@@ -63,6 +68,7 @@ jobs:
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           GEMINI_MODEL: gemini-3.5-flash
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPO_PUBLIC: ${{ github.event.repository.private == false }}
           DISCOVER: ${{ github.event.inputs.discover || 'true' }}
           APPLY: ${{ github.event.inputs.apply || 'true' }}

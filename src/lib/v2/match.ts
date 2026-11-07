@@ -89,23 +89,42 @@ export function matchPosting(profile: MatchProfile, p: MatchPosting): MatchResul
   const skillScore = skills.length ? Math.min(1, matched.length / Math.min(8, skills.length)) : 0.3;
   if (matched.length) reasons.push(`Matches your skills: ${matched.slice(0, 6).join(", ")}`);
 
+  // Whole words only: "ai" must not match "maintainer", "ml" must not match "html".
+  const titleWords = new Set(title.split(" "));
+  const inTitle = (w: string) => titleWords.has(w) || (w.length >= 5 && title.includes(w));
   let roleScore = 0;
   for (const role of profile.target_roles ?? []) {
     const words = norm(role).split(" ").filter((w) => w.length > 1 && !STOP.has(w));
     if (!words.length) continue;
-    const hit = words.filter((w) => title.includes(w)).length / words.length;
+    const hit = words.filter(inTitle).length / words.length;
     roleScore = Math.max(roleScore, hit);
   }
   if (roleScore >= 0.5) reasons.push("Title matches your target roles");
 
+  // Seniority in the title vs the levels you want.
+  const wantsEarly = [...levels].some((l) => l === "internship" || l === "new_grad" || l === "entry");
+  const wantsSenior = levels.has("senior") || levels.has("mid");
+  const seniorTitle = /\b(senior|sr|staff|principal|lead|manager|director|head|architect|vp)\b/.test(title);
+  const earlyTitle = /\b(intern|internship|co op|coop|new grad|graduate|entry|junior|jr|associate|early career|university|apprentice|i)\b/.test(title);
+  let titleAdj = 0;
+  if (seniorTitle && wantsEarly && !wantsSenior) {
+    titleAdj -= 25;
+    reasons.push("Title looks senior");
+  } else if (earlyTitle && wantsEarly) titleAdj += 8;
+  // Engineering roles only: sales, recruiting, support-desk and similar titles rank far down.
+  if (/\b(sales|account executive|recruit\w*|marketing|customer success|technician|nurse|counsel|attorney|accountant|teacher|driver)\b/.test(title)) {
+    titleAdj -= 30;
+    reasons.push("Not an engineering title");
+  }
+
   const include = (profile.keywords_include ?? []).filter((k) => hasTerm(text, k));
   if (include.length) reasons.push(`Has your keywords: ${include.join(", ")}`);
 
-  let score = 20 + 40 * skillScore + 30 * roleScore + Math.min(10, include.length * 5);
+  let score = 20 + 40 * skillScore + 30 * roleScore + Math.min(10, include.length * 5) + titleAdj;
   if (paysEnough) {
     score += 5;
     reasons.push(`Pays up to $${Math.round((salaryTop ?? 0) / 1000)}k`);
   }
   if (gaOk || remoteOk) score += 5;
-  return { eligible: true, score: Math.round(Math.min(100, score)), reasons };
+  return { eligible: true, score: Math.round(Math.max(0, Math.min(100, score))), reasons };
 }

@@ -1,4 +1,5 @@
 import { requireUser } from "@/lib/v2/session";
+import { timeFmt } from "@/lib/tz";
 import { buttonCls, Card, PageHeader } from "@/components/ui";
 import { SubmitButton } from "@/components/submit-button";
 import { disconnectInbox, saveAutopilot, saveInbox } from "../actions";
@@ -10,6 +11,7 @@ const input = "mt-1.5 w-32 rounded-xl border border-[var(--border)] bg-[var(--ba
 
 export default async function SettingsPage({ searchParams }: { searchParams: Promise<{ inbox?: string }> }) {
   const { supabase, user } = await requireUser();
+  const t = await timeFmt();
   const { inbox: inboxMsg } = await searchParams;
   const google = googleOAuthConfigured();
   const { data: s } = await supabase.from("autopilot_settings").select("*").eq("user_id", user.id).single();
@@ -92,7 +94,7 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
           <div className="space-y-2 text-sm">
             <p>
               Connected{p.inbox_host === GMAIL_OAUTH_HOST ? " with Google" : " with an app password"}: <b>{p.inbox_email}</b>
-              {p.inbox_last_scan_at ? ` · last checked ${new Date(p.inbox_last_scan_at).toLocaleString()}` : " · first check on the next agent run"}
+              {p.inbox_last_scan_at ? ` · last checked ${t.dateTime(p.inbox_last_scan_at)}` : " · first check on the next agent run"}
             </p>
             <form action={disconnectInbox}>
               <button className={buttonCls("secondary", "sm")}>Disconnect inbox</button>

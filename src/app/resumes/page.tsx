@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { timeFmt } from "@/lib/tz";
 import { requireUser } from "@/lib/v2/session";
 import { Badge, Card, EmptyState, Notice, PageHeader, buttonCls } from "@/components/ui";
 import { loadLibrary } from "@/lib/v2/resume-library";
@@ -12,6 +13,7 @@ const pct = (x: number) => `${Math.round(100 * x)}%`;
 
 export default async function ResumesPage() {
   const { supabase, user } = await requireUser();
+  const t = await timeFmt();
   const { data: p } = await supabase.from("profiles").select("resume_path,resume_parsed,resume_updated_at").eq("id", user.id).maybeSingle();
   const [lib, rows] = await Promise.all([loadLibrary(supabase, user.id, p ?? {}), statusRows(supabase, user.id)]);
   const mainLabel = lib.resumes.find((r) => r.id === "main")?.label ?? "Main resume";
@@ -63,7 +65,7 @@ export default async function ResumesPage() {
                   </div>
                   <p className="mt-0.5 text-xs text-[var(--muted)]">
                     {parsed ? `${parsed.experience?.length ?? 0} jobs · ${parsed.projects?.length ?? 0} projects · ${parsed.skills?.length ?? 0} skills` : "Not read yet"}
-                    {r.uploaded_at ? ` · uploaded ${new Date(r.uploaded_at).toLocaleDateString()}` : ""}
+                    {r.uploaded_at ? ` · uploaded ${t.date(r.uploaded_at)}` : ""}
                   </p>
                   {parsed?.target_roles?.length ? <p className="mt-1 truncate text-xs text-[var(--muted)]">Best for: {parsed.target_roles.slice(0, 3).join(", ")}</p> : null}
                 </div>

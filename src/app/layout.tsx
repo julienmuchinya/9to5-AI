@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { APP_NAME, APP_TAGLINE } from "@/lib/constants";
 import { Sidebar } from "@/components/sidebar";
+import { TimeZoneCookie } from "@/components/tz-cookie";
 import { currentUser } from "@/lib/v2/session";
 import { Inter } from "next/font/google";
 import "./globals.css";
@@ -18,6 +19,7 @@ export default async function RootLayout({ children }: Readonly<{ children: Reac
   return (
     <html lang="en" className={inter.variable}>
       <body className="min-h-screen antialiased">
+        <TimeZoneCookie />
         {user ? (
           <div className="flex min-h-screen flex-col md:flex-row">
             <Sidebar email={user.email ?? ""} />

@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { timeFmt } from "@/lib/tz";
 import { requireUser, serviceClient } from "@/lib/v2/session";
 import { Badge, Button, Card, PageHeader, StatCard } from "@/components/ui";
 import { dispatchConfigured, nextScheduledRun } from "@/lib/v2/dispatch";
@@ -12,6 +13,7 @@ export const dynamic = "force-dynamic";
 
 export default async function DashboardPage({ searchParams }: { searchParams: Promise<{ welcome?: string }> }) {
   const { supabase, user } = await requireUser();
+  const t = await timeFmt();
   const { welcome } = await searchParams;
   const db = serviceClient();
   const [{ data: p }, { data: s }, { count: matched }, { count: verified }, apps, { data: runs }, { data: sq }, { data: lastGlobal }, { count: recentErrors }, ai] = await Promise.all([
@@ -63,7 +65,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
             <Button href="/chat" variant="secondary">
               Chat with agent
             </Button>
-            {dispatchConfigured() && <RunNowButton running={last?.status === "running"} />}
+            {dispatchConfigured() && <RunNowButton running={last?.status === "running"} details />}
           </div>
         }
       />
@@ -100,7 +102,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
           <StatCard label="Needs you" value={c.needs} variant={c.needs > 0 ? "warning" : "default"} sub="Questions, sign-ins, CAPTCHAs" icon={<Icon name="profile" />} />
         </Link>
         <Link href="/applications?tab=queued" className="block rounded-2xl transition hover:opacity-90">
-        <StatCard label="Queued" value={c.queued} sub={`Next run ${nextScheduledRun().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", timeZoneName: "short" })}`} icon={<Icon name="status" />} />
+        <StatCard label="Queued" value={c.queued} sub={`Next run ~${t.time(nextScheduledRun())}`} icon={<Icon name="status" />} />
         </Link>
       </div>
 
@@ -113,7 +115,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
           </div>
           <p className="mt-3 text-sm text-[var(--muted)]">
             Freshest postings first, max 5 per company per day. Next scheduled run{" "}
-            {nextScheduledRun().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", timeZoneName: "short" })}.
+            ~{t.time(nextScheduledRun(), true)} (GitHub may start it late).
           </p>
           <div className="mt-auto pt-4">
             <Button href="/settings" variant="secondary" size="sm">
@@ -136,13 +138,13 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
             <p className="text-sm text-[var(--muted)]">
               No runs for your account yet.{" "}
               {parsed ? "Your resume is ready, so the next run picks you up" : "Once your resume is read, the next run picks you up"}
-              {lastGlobal?.started_at ? ` (last agent run: ${new Date(lastGlobal.started_at).toLocaleString()}; runs about every 3 hours).` : "."}
+              {lastGlobal?.started_at ? ` (last agent run: ${t.dateTime(lastGlobal.started_at)}; runs about every 3 hours).` : "."}
             </p>
           ) : (
             <ul className="space-y-1 text-sm">
               {(runs ?? []).map((r, i) => (
                 <li key={i} className="flex justify-between gap-2">
-                  <span className="text-[var(--muted)]">{new Date(r.started_at).toLocaleString()}</span>
+                  <span className="text-[var(--muted)]">{t.dateTime(r.started_at)}</span>
                   <span>
                     {r.status === "completed" ? `${(r.summary as { matched?: number })?.matched ?? 0} matched` : r.status}
                   </span>

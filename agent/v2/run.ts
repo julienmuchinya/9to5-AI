@@ -24,7 +24,7 @@ import { bumpUsage, freeTierSnapshot, readUsage, SAFETY_RATIO, today } from "../
 import { aiAvailable } from "../../src/lib/v2/gemini";
 import { fallbackConfigured } from "../../src/lib/v2/fallback-ai";
 import { renderClassicResume } from "../../src/lib/v2/resume-render";
-import { aiTailorResume, boldJobKeywords, loadLibrary, pickResume, type ResumeEntry } from "../../src/lib/v2/resume-library";
+import { aiTailorResume, boldJobKeywords, loadLibrary, pickResume, resumeJobScore, type ResumeEntry } from "../../src/lib/v2/resume-library";
 import { tailorResume, resumeToText, type ParsedResume } from "../../src/lib/v2/resume";
 import { applyToJob, type Applicant } from "./apply";
 import { scanInbox } from "./inbox";
@@ -33,7 +33,8 @@ import { openMailbox } from "./mailbox";
 import { answerWaitingQuestions } from "./backfill";
 import { resumeFocus } from "../../src/lib/v2/tracking";
 import { decryptSecret, encryptSecret, generatePortalPassword } from "../../src/lib/v2/vault";
-import { COMPANY_DAILY_CAP, companyKey, MAX_DAILY_APPLY_CAP, planQueue } from "../../src/lib/v2/priority";
+import { ageDays, COMPANY_DAILY_CAP, companyKey, MAX_DAILY_APPLY_CAP, MAX_POSTING_AGE_DAYS, planQueue, tooOld } from "../../src/lib/v2/priority";
+import { familyOf, judgeRoute, learnRoutes, titleKey } from "../../src/lib/v2/learning";
 import { minutesPlan } from "../../src/lib/v2/minutes";
 import { sendRunDigest } from "./digest";
 import { customStore, memoryKey, rememberAnswers, type AppAnswers, type CustomAnswers } from "../../src/lib/v2/app-questions";
@@ -81,6 +82,10 @@ const WORKDAY_ON = env("WORKDAY", "true") !== "false";
 let RUN_BUDGET_MS = Number(env("RUN_BUDGET_MIN", "40")) * 60_000;
 /** Started with "Run now" / Run workflow (not the schedule). */
 const MANUAL = env("GITHUB_EVENT_NAME") === "workflow_dispatch";
+/** Resume already covers this share of the job's words → skip AI rewording (saves one AI call). */
+const TAILOR_SKIP_SCORE = Number(env("TAILOR_SKIP_SCORE", "0.6"));
+/** Set when a run stopped with work left (time budget), so it can hand over to a follow-up run. */
+let moreWorkLeft = false;
 const timeLeft = () => RUN_BUDGET_MS - (Date.now() - startedAt);
 
 async function activeCooldowns(sb: SupabaseClient): Promise<Map<string, string>> {
@@ -372,18 +377,28 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
     if (filled.requeued) result.requeued_from_needs_you = filled.requeued;
   }
 
-  // Candidates: everything the user queued + the agent's best verified matches.
+  // Candidates: everything queued + the agent's best fresh verified matches.
   // Queued jobs, plus earlier attempts that crashed (up to 3 tries) — otherwise a bad run loses them for good.
   const { data: queued } = await sb
     .from("applications")
-    .select("id,job_id")
+    .select("id,job_id,requested_by")
     .eq("user_id", u.id)
     .or(env("APPLY_ONLY_COMPANY") ? "status.in.(queued,failed,needs_user)" : "status.eq.queued,and(status.eq.failed,or(attempts.is.null,attempts.lt.3))")
     .order("created_at")
     .limit(400);
-  const { data: existing } = await sb.from("applications").select("job_id").eq("user_id", u.id);
-  const taken = new Set((existing ?? []).map((a) => a.job_id));
+  // Every earlier application: what's taken, and what the agent has learned about which sites go through.
+  const existing: { job_id: string; apply_url: string | null; status: string; submitted_at: string | null }[] = [];
+  for (let from = 0; from < 10000; from += 1000) {
+    const { data } = await sb.from("applications").select("job_id,apply_url,status,submitted_at").eq("user_id", u.id).range(from, from + 999);
+    existing.push(...((data ?? []) as typeof existing));
+    if (!data || data.length < 1000) break;
+  }
+  const taken = new Set(existing.map((a) => a.job_id));
+  const learned = learnRoutes(existing);
+  const famLine = [...learned.byFamily].map(([f, v]) => `${f} ${v.sent}/${v.tries}`).join(", ");
+  if (famLine) log(`  what works (sent/tried): ${famLine}`);
   const minFit = s.min_fit_score ?? 65;
+  // Wide pool (not just the 200 best fits, which crowded out new postings); freshness decides below.
   const { data: best } = await sb
     .from("jobs")
     .select(JOB_COLS)
@@ -391,20 +406,82 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
     .eq("dismissed", false)
     .gte("fit_score", minFit)
     .eq("job_postings.verification_status", "verified")
-    .in("job_postings.ats", ["greenhouse", "lever", "ashby", ...(WORKDAY_ON ? ["workday"] : [])])
-    .order("fit_score", { ascending: false })
-    .limit(200);
+    .or(`ats.in.(greenhouse,lever,ashby${WORKDAY_ON ? ",workday" : ""}),apply_url.ilike.*apply.workable.com*`, { referencedTable: "job_postings" })
+    .order("created_at", { ascending: false })
+    .limit(800);
 
-  type Item = { appId?: string; job: JobRow; company: string; fit: number; postedAt: string | null; userRequested: boolean };
+  type Item = { appId?: string; job: JobRow; company: string; fit: number; postedAt: string | null; userRequested: boolean; routeBonus: number };
   const items: Item[] = [];
-  const appByJob = new Map((queued ?? []).map((q) => [q.job_id as string, q.id as string]));
-  for (const part of chunk([...appByJob.keys()], 100)) {
+  const queuedInfo = new Map((queued ?? []).map((q) => [q.job_id as string, { id: q.id as string, byUser: q.requested_by === "user" }]));
+  const queuedJobs: JobRow[] = [];
+  for (const part of chunk([...queuedInfo.keys()], 100)) {
     const { data: qJobs } = await sb.from("jobs").select(JOB_COLS).in("id", part);
-    for (const j of (qJobs ?? []) as unknown as JobRow[])
-      items.push({ appId: appByJob.get(j.id), job: j, company: j.company_name, fit: j.fit_score ?? 50, postedAt: j.job_postings.posted_at, userRequested: true });
+    queuedJobs.push(...((qJobs ?? []) as unknown as JobRow[]));
   }
-  for (const j of (best ?? []) as unknown as JobRow[])
-    if (!taken.has(j.id)) items.push({ job: j, company: j.company_name, fit: j.fit_score ?? 50, postedAt: j.job_postings.posted_at, userRequested: false });
+
+  // Another route to the same job: when a posting's site can't be automated or keeps failing, the same
+  // company + title is often also on Greenhouse / Lever / Ashby / Workable (company boards are scanned too).
+  const needsAlt = (j: JobRow) => {
+    const url = j.job_postings.apply_url || j.job_postings.url;
+    const auto = canAutoSubmit({ ats: j.job_postings.ats, verification_status: j.job_postings.verification_status, apply_url: j.job_postings.apply_url, url: j.job_postings.url }) || (WORKDAY_ON && /myworkday(jobs|site)\.com/i.test(url));
+    return !auto || judgeRoute(learned, url).skip;
+  };
+  const altFor = new Map<string, { ats: string; apply_url: string; url: string }>();
+  const altCompanies = [...new Set(queuedJobs.filter(needsAlt).map((j) => j.company_name))].slice(0, 150);
+  for (const part of chunk(altCompanies, 50)) {
+    const { data: alts } = await sb
+      .from("job_postings")
+      .select("company_name,title,ats,apply_url,url,verification_status")
+      .in("company_name", part)
+      .eq("active", true)
+      .eq("verification_status", "verified")
+      .or("ats.in.(greenhouse,lever,ashby),apply_url.ilike.*apply.workable.com*")
+      .limit(2000);
+    for (const a of alts ?? []) {
+      const url = a.apply_url || a.url;
+      if (judgeRoute(learned, url).skip) continue;
+      altFor.set(`${companyKey(a.company_name)}|${titleKey(a.title)}`, { ats: a.ats, apply_url: a.apply_url, url: a.url });
+    }
+  }
+
+  let staleClosed = 0;
+  for (const j of queuedJobs) {
+    const info = queuedInfo.get(j.id)!;
+    // Old postings the agent queued itself: close them instead of spending a run on them.
+    if (!info.byUser && tooOld(j.job_postings.posted_at)) {
+      staleClosed++;
+      if (!dryRun) await sb.from("applications").update({ status: "closed", error: `Skipped: posted ${Math.round(ageDays(j.job_postings.posted_at) ?? 0)} days ago (older than ${MAX_POSTING_AGE_DAYS}) — fresh postings first` }).eq("id", info.id);
+      continue;
+    }
+    if (needsAlt(j)) {
+      const alt = altFor.get(`${companyKey(j.company_name)}|${titleKey(j.title)}`);
+      if (alt) {
+        log(`  ${j.company_name} / ${j.title}: using ${familyOf(alt.apply_url || alt.url)} instead of ${familyOf(j.job_postings.apply_url || j.job_postings.url)}`);
+        j.job_postings = { ...j.job_postings, ats: alt.ats, apply_url: alt.apply_url, url: alt.url, verification_status: "verified" };
+        bump("alternate_route");
+      }
+    }
+    const verdict = judgeRoute(learned, j.job_postings.apply_url || j.job_postings.url);
+    if (verdict.skip && !info.byUser) {
+      bump("route_skipped");
+      if (!dryRun) await sb.from("applications").update({ status: "needs_user", error: `The agent stopped trying this site (${verdict.reason}) — open it and apply yourself` }).eq("id", info.id);
+      continue;
+    }
+    items.push({ appId: info.id, job: j, company: j.company_name, fit: j.fit_score ?? 50, postedAt: j.job_postings.posted_at, userRequested: info.byUser, routeBonus: judgeRoute(learned, j.job_postings.apply_url || j.job_postings.url).bonus });
+  }
+  if (staleClosed) {
+    result.stale_skipped = staleClosed;
+    log(`  closed ${staleClosed} queued posting(s) older than ${MAX_POSTING_AGE_DAYS} days`);
+  }
+  for (const j of (best ?? []) as unknown as JobRow[]) {
+    if (taken.has(j.id) || tooOld(j.job_postings.posted_at)) continue;
+    const verdict = judgeRoute(learned, j.job_postings.apply_url || j.job_postings.url);
+    if (verdict.skip) {
+      bump("route_skipped");
+      continue;
+    }
+    items.push({ job: j, company: j.company_name, fit: j.fit_score ?? 50, postedAt: j.job_postings.posted_at, userRequested: false, routeBonus: verdict.bonus });
+  }
 
   // Freshest + best-fitting first; at most COMPANY_CAP per company per day.
   const { picked, skippedForCompanyCap } = planQueue(items, { appliedToday: perCompanyToday, perCompany: COMPANY_CAP });
@@ -514,6 +591,7 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
     if (timeLeft() < 4 * 60_000) {
       log("run time budget used; leaving the rest of the queue for the next run");
       result.time_budget = 1;
+      moreWorkLeft = true;
       break;
     }
     const company = companyKey(job.company_name);
@@ -568,7 +646,10 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
     const parsed = entry?.parsed ?? u.resume_parsed;
     if (parsed?.experience?.length && tailorMode !== "off") {
       let tailored = tailorResume(parsed, jobText);
-      if (tailorMode === "ai" && !aiOut) {
+      // Already a strong keyword match: the free tailoring is enough — save the AI call.
+      const strong = resumeJobScore(parsed, jobText) >= TAILOR_SKIP_SCORE;
+      if (strong) bump("tailor_skipped_strong_match");
+      if (tailorMode === "ai" && !aiOut && !strong) {
         try {
           tailored = await aiTailorResume(sb, tailored, { title: job.title, company: job.company_name, description: p.description ?? "" }, u.id);
         } catch (e) {
@@ -774,9 +855,41 @@ async function main() {
     await bumpUsage(sb, "github_actions_minutes_day", minutes).catch(() => {});
   }
   log(`done in ${Math.round((Date.now() - startedAt) / 1000)}s`);
+  await continueIfWorkLeft(sb);
 }
 
 main().catch((e) => {
   console.error("[9to5] agent failed:", e);
   process.exit(1);
 });
+
+/**
+ * GitHub's free scheduler starts only ~3 of the 8 daily runs (often hours late). When a run used its
+ * time with jobs still waiting, and today's minutes share has room, it starts the next run itself
+ * (workflow_dispatch with the run's own GITHUB_TOKEN is allowed to trigger a new run).
+ */
+async function continueIfWorkLeft(sb: SupabaseClient) {
+  const token = process.env.GITHUB_TOKEN;
+  const repo = process.env.GITHUB_REPOSITORY;
+  if (!moreWorkLeft || !token || !repo || env("APPLY_DRY_RUN") === "true" || env("CHAIN", "true") === "false") return;
+  const limits = await freeTierSnapshot(sb);
+  const plan = minutesPlan({
+    usedMonth: limits.githubMinutes.used,
+    usedToday: await readUsage(sb, "github_actions_minutes_day").catch(() => 0),
+    limit: limits.githubMinutes.limit,
+    ratio: SAFETY_RATIO,
+    maxRunMin: 40,
+    manual: false,
+    publicRepo: limits.githubMinutes.unlimited,
+  });
+  if (plan.skip || plan.budgetMin < 12) {
+    log(`work left, but today's minutes share is used — the next run picks it up (${plan.reason})`);
+    return;
+  }
+  const res = await fetch(`https://api.github.com/repos/${repo}/actions/workflows/daily-agent.yml/dispatches`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json" },
+    body: JSON.stringify({ ref: "main", inputs: { discover: false, apply: true, apply_dry_run: false, only_user: env("ONLY_USER") } }),
+  });
+  log(res.ok ? `work left: started a follow-up run (${plan.budgetMin} min of today's share left)` : `couldn't start a follow-up run: ${res.status}`);
+}

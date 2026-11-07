@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { timeFmt } from "@/lib/tz";
 import { requireUser, serviceClient } from "@/lib/v2/session";
 import { Badge, Card, PageHeader } from "@/components/ui";
 import { geminiModels } from "@/lib/v2/gemini";
@@ -36,6 +37,7 @@ const AREA_LABEL: Record<string, string> = { resume: "Resume", chat: "Chat", age
 
 export default async function StatusPage({ searchParams }: { searchParams: Promise<{ level?: string }> }) {
   const { user } = await requireUser();
+  const t = await timeFmt();
   const { level } = await searchParams;
   const db = serviceClient();
   const started = Date.now();
@@ -102,7 +104,7 @@ export default async function StatusPage({ searchParams }: { searchParams: Promi
       ? { name: "Inbox tracking", state: "warn", detail: "Not connected — application statuses won't update from email.", fix: "Optional: connect a Gmail app password on Autopilot & inbox.", href: "/settings" }
       : p.inbox_error
         ? { name: "Inbox tracking", state: "fail", detail: p.inbox_error, fix: "Create a new Gmail app password and reconnect.", href: "/settings" }
-        : { name: "Inbox tracking", state: "ok", detail: p.inbox_last_scan_at ? `Last checked ${new Date(p.inbox_last_scan_at).toLocaleString()}.` : "Connected; checked on the next agent run." },
+        : { name: "Inbox tracking", state: "ok", detail: p.inbox_last_scan_at ? `Last checked ${t.dateTime(p.inbox_last_scan_at)}.` : "Connected; checked on the next agent run." },
     process.env.GH_DISPATCH_TOKEN
       ? { name: "“Run now” from chat", state: "ok", detail: "Enabled." }
       : { name: "“Run now” from chat", state: "warn", detail: "Off — the agent only runs on its schedule.", fix: "Optional: add a GitHub token with Actions write access as GH_DISPATCH_TOKEN in Vercel." },
@@ -170,7 +172,7 @@ export default async function StatusPage({ searchParams }: { searchParams: Promi
           <ul className="divide-y divide-[var(--border)]">
             {logs.map((l, i) => (
               <li key={i} className="flex flex-wrap items-start gap-2 px-4 py-2 text-sm">
-                <span className="w-36 shrink-0 text-xs text-[var(--muted)]">{new Date(l.created_at).toLocaleString()}</span>
+                <span className="w-36 shrink-0 text-xs text-[var(--muted)]">{t.dateTime(l.created_at)}</span>
                 <Badge variant={variant(l.level)}>{AREA_LABEL[l.metadata?.area ?? ""] ?? "Agent"}</Badge>
                 <span className="min-w-0 flex-1 break-words">{l.message}</span>
               </li>
