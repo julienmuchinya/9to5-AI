@@ -151,14 +151,45 @@ export async function fallbackAvailable(db: SupabaseClient): Promise<boolean> {
 
 export class PromptTooLargeError extends Error {}
 
+export interface ChatMessage {
+  role: "system" | "user" | "assistant" | "tool";
+  content: string | null;
+  tool_calls?: { id: string; type: "function"; function: { name: string; arguments: string } }[];
+  tool_call_id?: string;
+}
+export interface ChatTool {
+  type: "function";
+  function: { name: string; description: string; parameters: Record<string, unknown> };
+}
+
 /**
  * One JSON answer from the first backup model that can take it. Throws if none can.
  * `maxTokens` caps the answer (it counts against Groq's per-minute token limit too).
  */
 export async function fallbackJson(db: SupabaseClient, prompt: string, userId?: string, opts: { maxTokens?: number } = {}): Promise<string> {
+  const msg = await fallbackChat(
+    db,
+    [
+      { role: "system", content: "Reply with one JSON object only. No prose, no code fences." },
+      { role: "user", content: prompt },
+    ],
+    { userId, maxTokens: opts.maxTokens ?? 2000, json: true }
+  );
+  return msg.content ?? "";
+}
+
+/**
+ * One chat-completions request (optionally with tools) to the first backup model that can take it,
+ * under the same per-model daily stop and per-minute token pacing. Used by chat when Gemini is out.
+ */
+export async function fallbackChat(
+  db: SupabaseClient,
+  messages: ChatMessage[],
+  opts: { userId?: string; maxTokens?: number; json?: boolean; tools?: ChatTool[] } = {}
+): Promise<ChatMessage> {
+  const userId = opts.userId;
   const maxTokens = opts.maxTokens ?? 2000;
-  const system = "Reply with one JSON object only. No prose, no code fences.";
-  const need = estimateTokens(system + prompt) + maxTokens;
+  const need = estimateTokens(JSON.stringify(messages) + (opts.tools ? JSON.stringify(opts.tools) : "")) + maxTokens;
   let detail = "no backup AI configured (set GROQ_API_KEY or OPENROUTER_API_KEY)";
   let tooLarge = false;
 
@@ -212,12 +243,10 @@ export async function fallbackJson(db: SupabaseClient, prompt: string, userId?: 
               model: m.id,
               temperature: 0.1,
               max_tokens: maxTokens,
-              response_format: { type: "json_object" },
+              ...(opts.json ? { response_format: { type: "json_object" } } : {}),
+              ...(opts.tools?.length ? { tools: opts.tools, tool_choice: "auto" } : {}),
               ...(m.extra ?? {}),
-              messages: [
-                { role: "system", content: system },
-                { role: "user", content: prompt },
-              ],
+              messages,
             }),
             signal: AbortSignal.timeout(55_000),
           });
@@ -240,13 +269,14 @@ export async function fallbackJson(db: SupabaseClient, prompt: string, userId?: 
 
         if (res.ok) {
           const data = await res.json();
-          const text: string = data?.choices?.[0]?.message?.content ?? "";
+          const message = (data?.choices?.[0]?.message ?? {}) as ChatMessage;
+          const text: string = message.content ?? "";
           const real = Number(data?.usage?.total_tokens ?? 0);
           if (real) {
             const list = window.get(k) ?? [];
             if (list.length) list[list.length - 1].tokens = real; // replace the estimate with the real count
           }
-          if (!text.trim()) {
+          if (!text.trim() && !message.tool_calls?.length) {
             detail = `${p.name}/${m.id} returned nothing`;
             break;
           }
@@ -254,7 +284,7 @@ export async function fallbackJson(db: SupabaseClient, prompt: string, userId?: 
           await bumpUsage(db, metric, 1).catch(() => {});
           if (p.name === "groq") await bumpUsage(db, metric, 1, `model:${m.id}`).catch(() => {});
           if (userId) await bumpUsage(db, metric, 1, userId).catch(() => {});
-          return text;
+          return { role: "assistant", content: text, ...(message.tool_calls?.length ? { tool_calls: message.tool_calls } : {}) };
         }
 
         const body = (await res.text()).slice(0, 200);

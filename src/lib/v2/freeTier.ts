@@ -30,6 +30,8 @@ export type Metric =
   | "jobs_discovered"
   | "applications_submitted"
   | "github_actions_minutes"
+  | "github_actions_minutes_day"
+  | "digest_sent"
   | "ai_groq_requests"
   | "ai_openrouter_requests";
 

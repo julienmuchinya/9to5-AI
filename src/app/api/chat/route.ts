@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { apiUser, serviceClient } from "@/lib/v2/session";
-import { geminiGenerate, FreeTierLimitError, type GeminiContent, type GeminiTool } from "@/lib/v2/gemini";
+import { chatGenerate, FreeTierLimitError, type GeminiContent, type GeminiTool } from "@/lib/v2/gemini";
 import { freeTierSnapshot } from "@/lib/v2/freeTier";
 import { logEvent } from "@/lib/v2/log";
 import { dispatchAgentRun } from "@/lib/v2/dispatch";
@@ -72,7 +72,7 @@ const TOOLS: GeminiTool[] = [
       properties: {
         auto_submit_enabled: { type: "boolean" },
         paused: { type: "boolean" },
-        daily_apply_cap: { type: "integer", description: "0-100 applications per day (the free AI quota is the real limit)" },
+        daily_apply_cap: { type: "integer", description: "0-300 applications per day (free AI quota and GitHub minutes are the real limits)" },
         min_fit_score: { type: "integer", description: "40-95" },
       },
     },
@@ -300,7 +300,7 @@ export async function POST(req: Request) {
   try {
     const system = await systemFor(supabase, user.id);
     for (let round = 0; round < 5; round++) {
-      const { parts, text: out } = await geminiGenerate(admin, { contents, system, tools: TOOLS, userId: user.id });
+      const { parts, text: out } = await chatGenerate(admin, { contents, system, tools: TOOLS, userId: user.id });
       const calls = parts.filter((p) => p.functionCall);
       if (!calls.length) {
         reply = out.trim();
@@ -325,7 +325,7 @@ export async function POST(req: Request) {
     if (!reply && actions.length) {
       // Still calling tools after 5 rounds — ask for a plain answer from what it found.
       contents.push({ role: "user", parts: [{ text: "Now answer me in plain words using what the tools returned. Don't call more tools." }] });
-      const { text: final } = await geminiGenerate(admin, { contents, system, userId: user.id });
+      const { text: final } = await chatGenerate(admin, { contents, system, userId: user.id });
       reply = final.trim();
     }
     if (!reply) reply = "Sorry, I couldn't work that out. Try rephrasing?";
@@ -334,7 +334,7 @@ export async function POST(req: Request) {
     await logEvent(admin, { user_id: user.id, area: "chat", level: "error", message: `Chat failed: ${msg}`, meta: { ms: Date.now() - t0 } });
     reply =
       e instanceof FreeTierLimitError
-        ? "I've paused AI chat to keep you on the free tier — today's AI quota is used up. It resets tomorrow; everything else in the app still works."
+        ? "I've paused AI chat to keep you on the free tier — today's AI quota (Gemini and the backup) is used up. Gemini resets at midnight Pacific time; everything else in the app still works."
         : /overloaded|503|network/i.test(msg)
           ? "AI is busy right now (Google's servers are overloaded). Please try again in a minute."
           : `Something went wrong talking to the AI. It's been logged on the System status page. (${msg.slice(0, 160)})`;

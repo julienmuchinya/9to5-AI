@@ -5,7 +5,9 @@
  */
 
 export const GMAIL_OAUTH_HOST = "gmail-oauth";
-export const GMAIL_SCOPES = ["openid", "email", "https://www.googleapis.com/auth/gmail.readonly"];
+export const GMAIL_SCOPES = ["openid", "email", "https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/gmail.send"];
+/** Gmail turned down a send because the connection was made before "send" was asked for. */
+export class GmailScopeError extends Error {}
 
 export const googleOAuthConfigured = () => Boolean(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET);
 
@@ -125,3 +127,37 @@ export async function gmailRaw(token: string, id: string): Promise<Buffer> {
 
 /** Gmail search date: messages after this moment (Gmail accepts epoch seconds). */
 export const gmailAfter = (d: Date) => `after:${Math.floor(d.getTime() / 1000)}`;
+
+/** Send one email (to the user themself) from the connected Gmail. Needs the gmail.send permission. */
+export async function gmailSend(token: string, msg: { to: string; subject: string; html: string; text: string }): Promise<void> {
+  const boundary = `b${Date.now().toString(36)}`;
+  const enc = (s: string) => `=?UTF-8?B?${Buffer.from(s, "utf8").toString("base64")}?=`;
+  const mime = [
+    `To: ${msg.to}`,
+    `Subject: ${enc(msg.subject)}`,
+    "MIME-Version: 1.0",
+    `Content-Type: multipart/alternative; boundary="${boundary}"`,
+    "",
+    `--${boundary}`,
+    "Content-Type: text/plain; charset=UTF-8",
+    "Content-Transfer-Encoding: base64",
+    "",
+    Buffer.from(msg.text, "utf8").toString("base64"),
+    `--${boundary}`,
+    "Content-Type: text/html; charset=UTF-8",
+    "Content-Transfer-Encoding: base64",
+    "",
+    Buffer.from(msg.html, "utf8").toString("base64"),
+    `--${boundary}--`,
+  ].join("\r\n");
+  const res = await fetch("https://gmail.googleapis.com/gmail/v1/users/me/messages/send", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ raw: Buffer.from(mime, "utf8").toString("base64url") }),
+  });
+  if (res.ok) return;
+  const body = (await res.text()).slice(0, 200);
+  if (res.status === 403 && /insufficient|scope|permission/i.test(body))
+    throw new GmailScopeError("Gmail didn't allow sending — click “Connect with Google” again on the Autopilot page and allow sending email.");
+  throw new Error(`Gmail send ${res.status}: ${body}`);
+}

@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { requireUser } from "@/lib/v2/session";
+import { requireUser, serviceClient } from "@/lib/v2/session";
 import { Badge, Card, EmptyState, Notice, PageHeader, StatButton, buttonCls } from "@/components/ui";
 import { customStore, findSimilarAnswer, questionSimilarity, type CustomAnswers, type PendingQuestion } from "@/lib/v2/app-questions";
 import { PendingQuestions, type AskedQuestion } from "./pending-questions";
@@ -8,6 +8,8 @@ import { STAGE_LABEL, roleFamily } from "@/lib/v2/tracking";
 import { ago } from "@/lib/v2/priority";
 import { dispatchConfigured, nextScheduledRun } from "@/lib/v2/dispatch";
 import { RunNowButton } from "@/components/run-now";
+import { AiStatus } from "@/components/ai-status";
+import { aiStatus } from "@/lib/v2/ai-status";
 import { RevealPassword } from "../accounts/reveal";
 import { markApplied, retryApplication, setApplicationStatus } from "../actions";
 import { PROGRESSED, SENT, countPipeline, isSent, statusRows } from "@/lib/v2/pipeline";
@@ -73,12 +75,13 @@ export default async function ApplicationsPage({ searchParams }: { searchParams:
   const page = Math.max(1, Number(sp.page) || 1);
 
   // Counts come from every application (3 small columns), so these buttons match the dashboard exactly.
-  const [all, { data: lastRun }, { data: prof }, { data: needRows }, { data: logins }] = await Promise.all([
+  const [all, { data: lastRun }, { data: prof }, { data: needRows }, { data: logins }, ai] = await Promise.all([
     statusRows(supabase, user.id),
     supabase.from("agent_runs").select("started_at,ended_at,status,summary").eq("user_id", user.id).order("started_at", { ascending: false }).limit(1).maybeSingle(),
     supabase.from("profiles").select("custom_answers").eq("id", user.id).maybeSingle(),
     supabase.from("applications").select("id,error,pending_questions,jobs(company_name)").eq("user_id", user.id).eq("status", "needs_user").limit(500),
     supabase.from("application_accounts").select("id,portal_host,email_used,account_created").eq("user_id", user.id),
+    aiStatus(serviceClient()),
   ]);
   const c = countPipeline(all);
   const tab = sp.tab && sp.tab in FILTER ? sp.tab : c.needs > 0 ? "needs" : "all";
@@ -165,7 +168,12 @@ export default async function ApplicationsPage({ searchParams }: { searchParams:
         eyebrow="Pipeline"
         title="Applications"
         description="Every application, where it stands, and what’s working. Statuses update from your inbox when it’s connected."
-        action={dispatchConfigured() ? <RunNowButton running={running} /> : undefined}
+        action={
+          <div className="flex flex-wrap items-center gap-3">
+            <AiStatus data={ai} compact />
+            {dispatchConfigured() && <RunNowButton running={running} />}
+          </div>
+        }
       />
 
       <div className="mb-5 grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-7">

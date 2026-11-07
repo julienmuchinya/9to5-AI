@@ -5,6 +5,8 @@ import { dispatchConfigured, nextScheduledRun } from "@/lib/v2/dispatch";
 import { RunNowButton } from "@/components/run-now";
 import { Icon } from "@/components/sidebar";
 import { countPipeline, statusRows } from "@/lib/v2/pipeline";
+import { aiStatus } from "@/lib/v2/ai-status";
+import { AiStatus } from "@/components/ai-status";
 
 export const dynamic = "force-dynamic";
 
@@ -12,7 +14,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
   const { supabase, user } = await requireUser();
   const { welcome } = await searchParams;
   const db = serviceClient();
-  const [{ data: p }, { data: s }, { count: matched }, { count: verified }, apps, { data: runs }, { data: sq }, { data: lastGlobal }, { count: recentErrors }] = await Promise.all([
+  const [{ data: p }, { data: s }, { count: matched }, { count: verified }, apps, { data: runs }, { data: sq }, { data: lastGlobal }, { count: recentErrors }, ai] = await Promise.all([
     supabase.from("profiles").select("first_name,resume_path,resume_parsed,phone,work_authorized_us,sponsorship_needed").eq("id", user.id).maybeSingle(),
     supabase.from("autopilot_settings").select("auto_submit_enabled,paused,daily_apply_cap").eq("user_id", user.id).maybeSingle(),
     supabase.from("jobs").select("id", { count: "exact", head: true }).eq("user_id", user.id).eq("dismissed", false),
@@ -27,6 +29,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
     db.from("security_questions").select("user_id").eq("user_id", user.id).maybeSingle(),
     db.from("agent_runs").select("started_at").order("started_at", { ascending: false }).limit(1).maybeSingle(),
     db.from("agent_logs").select("id", { count: "exact", head: true }).eq("user_id", user.id).eq("level", "error").gte("created_at", new Date(Date.now() - 86400_000).toISOString()),
+    aiStatus(db),
   ]);
   // Self-heal accounts created before the sign-up trigger existed.
   if (!p || !s) {
@@ -55,7 +58,14 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
         eyebrow="Dashboard"
         title={`Welcome${p?.first_name ? `, ${p.first_name}` : ""}`}
         description="Your agent finds STEM jobs that fit your resume, checks the employer is real, and applies for you."
-        action={<Button href="/chat">Chat with agent</Button>}
+        action={
+          <div className="flex items-center gap-3">
+            <Button href="/chat" variant="secondary">
+              Chat with agent
+            </Button>
+            {dispatchConfigured() && <RunNowButton running={last?.status === "running"} />}
+          </div>
+        }
       />
 
       {(recentErrors ?? 0) > 0 && (
@@ -94,20 +104,31 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
         </Link>
       </div>
 
-      <div className="grid gap-4 md:grid-cols-2">
-        <Card>
-          <h2 className="mb-2 font-semibold">Autopilot</h2>
+      <div className="grid gap-4 lg:grid-cols-3">
+        <Card className="flex flex-col">
+          <h2 className="mb-3 font-semibold">Autopilot</h2>
           <div className="flex flex-wrap gap-2">
-            <Badge variant={s?.paused ? "danger" : "success"}>{s?.paused ? "Paused" : "Running every 3 hours"}</Badge>
-            <Badge variant={s?.auto_submit_enabled ? "success" : "default"}>Auto-submit {s?.auto_submit_enabled ? `on (max ${s?.daily_apply_cap}/day)` : "off"}</Badge>
+            <Badge variant={s?.paused ? "danger" : "success"}>{s?.paused ? "Paused" : "Runs every 3 hours"}</Badge>
+            <Badge variant={s?.auto_submit_enabled ? "success" : "default"}>Auto-submit {s?.auto_submit_enabled ? `on · max ${s?.daily_apply_cap}/day` : "off"}</Badge>
           </div>
-          <p className="mt-3 text-sm text-[var(--muted)]">Applies to the freshest postings first, max 5 per company per day.</p>
-          <div className="mt-4 flex flex-wrap items-start gap-3">
-            {dispatchConfigured() && <RunNowButton running={last?.status === "running"} />}
-            <Link href="/settings" className="py-1.5 text-sm text-[var(--accent)] hover:underline">
-              Change settings
+          <p className="mt-3 text-sm text-[var(--muted)]">
+            Freshest postings first, max 5 per company per day. Next scheduled run{" "}
+            {nextScheduledRun().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", timeZoneName: "short" })}.
+          </p>
+          <div className="mt-auto pt-4">
+            <Button href="/settings" variant="secondary" size="sm">
+              Autopilot settings
+            </Button>
+          </div>
+        </Card>
+        <Card>
+          <div className="mb-3 flex items-center justify-between gap-2">
+            <h2 className="font-semibold">AI status</h2>
+            <Link href="/usage" className="text-xs text-[var(--accent)] hover:underline">
+              Details
             </Link>
           </div>
+          <AiStatus data={ai} />
         </Card>
         <Card>
           <h2 className="mb-2 font-semibold">Recent runs</h2>

@@ -1,5 +1,5 @@
 import { requireUser } from "@/lib/v2/session";
-import { Card, PageHeader } from "@/components/ui";
+import { buttonCls, Card, PageHeader } from "@/components/ui";
 import { SubmitButton } from "@/components/submit-button";
 import { disconnectInbox, saveAutopilot, saveInbox } from "../actions";
 import { GMAIL_OAUTH_HOST, googleOAuthConfigured } from "@/lib/v2/gmail";
@@ -48,7 +48,7 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
           <div className="grid gap-4 sm:grid-cols-2">
             <label className="block text-sm">
               Max applications per day
-              <input className={input} type="number" name="daily_apply_cap" min={0} max={100} defaultValue={s?.daily_apply_cap ?? 5} />
+              <input className={input} type="number" name="daily_apply_cap" min={0} max={300} defaultValue={s?.daily_apply_cap ?? 5} />
               <span className="mt-1 block text-xs text-[var(--muted)]">0–100 in total. Never more than 5 per company per day, freshest postings first. The free AI quota is the real limit.</span>
             </label>
             <label className="block text-sm">
@@ -95,7 +95,7 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
               {p.inbox_last_scan_at ? ` · last checked ${new Date(p.inbox_last_scan_at).toLocaleString()}` : " · first check on the next agent run"}
             </p>
             <form action={disconnectInbox}>
-              <button className="rounded-lg bg-[var(--border)] px-3 py-1.5 text-sm">Disconnect inbox</button>
+              <button className={buttonCls("secondary", "sm")}>Disconnect inbox</button>
             </form>
           </div>
         ) : (

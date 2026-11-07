@@ -96,18 +96,26 @@ export default async function ResumesPage() {
                 <p className="text-xs text-amber-300">Click “Read it again” so the agent picks up your skill groups, tagline and bold phrases — then its copy matches your design exactly.</p>
               )}
 
-              <div className="mt-auto flex flex-wrap items-center gap-2 border-t border-[var(--border)] pt-3">
-                <a href={`/api/resume?id=${r.id}`} target="_blank" rel="noopener noreferrer" className={buttonCls("secondary", "sm")}>
-                  Original ↗
-                </a>
-                {parsed && (
-                  <a href={`/api/resume?id=${r.id}&preview=1`} target="_blank" rel="noopener noreferrer" className={buttonCls("secondary", "sm")}>
-                    Agent’s version ↗
+              <div className="mt-auto space-y-3 border-t border-[var(--border)] pt-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="w-14 text-[11px] uppercase tracking-wide text-[var(--muted)]">View</span>
+                  <a href={`/api/resume?id=${r.id}`} target="_blank" rel="noopener noreferrer" className={buttonCls("secondary", "sm")}>
+                    Original ↗
                   </a>
-                )}
-                <RenameDelete id={r.id} label={r.label} canDelete={r.id !== "main"} />
+                  {parsed && (
+                    <a href={`/api/resume?id=${r.id}&preview=1`} target="_blank" rel="noopener noreferrer" className={buttonCls("secondary", "sm")}>
+                      Agent’s version ↗
+                    </a>
+                  )}
+                </div>
+                <div className="flex flex-wrap items-start gap-2">
+                  <span className="w-14 pt-1.5 text-[11px] uppercase tracking-wide text-[var(--muted)]">Manage</span>
+                  <div className="flex min-w-0 flex-1 flex-wrap items-start justify-between gap-2">
+                    <UploadResume id={r.id} cta="Replace PDF" />
+                    <RenameDelete id={r.id} label={r.label} canDelete={r.id !== "main"} />
+                  </div>
+                </div>
               </div>
-              <UploadResume id={r.id} cta="Replace PDF" />
             </Card>
           );
         })}

@@ -6,7 +6,8 @@
 
 export const COMPANY_DAILY_CAP = 5;
 /** Overall per-user daily ceiling; the real brake is the free AI quota (budget guard). */
-export const MAX_DAILY_APPLY_CAP = 100;
+/** Highest daily cap the settings allow. The practical ceiling is AI budget and GitHub minutes, not this. */
+export const MAX_DAILY_APPLY_CAP = 300;
 
 export interface FreshnessBucket {
   key: "today" | "2d" | "3d" | "week" | "2weeks" | "older" | "unknown";

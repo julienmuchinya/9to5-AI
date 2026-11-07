@@ -1,6 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { bumpUsage, checkGemini, FREE_LIMITS } from "./freeTier";
-import { fallbackAvailable, fallbackConfigured, fallbackJson } from "./fallback-ai";
+import { fallbackAvailable, fallbackChat, fallbackConfigured, fallbackJson, type ChatMessage } from "./fallback-ai";
 
 const API = "https://generativelanguage.googleapis.com/v1beta/models";
 /**
@@ -201,4 +201,68 @@ export async function aiAvailable(db: SupabaseClient): Promise<{ allowed: boolea
   if (g.allowed) return { allowed: true, gemini: true };
   if (fallbackConfigured() && (await fallbackAvailable(db))) return { allowed: true, gemini: false };
   return { allowed: false, gemini: false, reason: fallbackConfigured() ? `${g.reason}; backup AI's daily budget is used up too` : g.reason };
+}
+
+/** Gemini-format conversation → OpenAI-format messages (for the backup AI). Exported for tests. */
+export function toChatMessages(contents: GeminiContent[], system?: string): ChatMessage[] {
+  const out: ChatMessage[] = system ? [{ role: "system", content: system }] : [];
+  let lastIds: string[] = [];
+  contents.forEach((c, i) => {
+    if (c.role === "model") {
+      const calls = c.parts.filter((p) => p.functionCall);
+      lastIds = calls.map((p, k) => p.functionCall!.id || `call_${i}_${k}`);
+      const text = c.parts.filter((p) => p.text && !p.thought).map((p) => p.text).join("");
+      out.push({
+        role: "assistant",
+        content: text || null,
+        ...(calls.length
+          ? { tool_calls: calls.map((p, k) => ({ id: lastIds[k], type: "function" as const, function: { name: p.functionCall!.name, arguments: JSON.stringify(p.functionCall!.args ?? {}) } })) }
+          : {}),
+      });
+      return;
+    }
+    const responses = c.parts.filter((p) => p.functionResponse);
+    responses.forEach((p, k) => out.push({ role: "tool", tool_call_id: p.functionResponse!.id || lastIds[k] || `call_${i}_${k}`, content: JSON.stringify(p.functionResponse!.response).slice(0, 6000) }));
+    const text = c.parts.filter((p) => p.text).map((p) => p.text).join("\n\n");
+    if (text) out.push({ role: "user", content: text });
+  });
+  return out;
+}
+
+/**
+ * Chat turn with tools: Gemini first; when Gemini's quota is used up (or Google is down) and a backup
+ * is configured, the same conversation goes to Groq in OpenAI format. Returns Gemini-shaped parts.
+ */
+export async function chatGenerate(
+  db: SupabaseClient,
+  opts: { contents: GeminiContent[]; system?: string; tools?: GeminiTool[]; userId?: string }
+): Promise<{ parts: GeminiPart[]; text: string; via: "gemini" | "backup" }> {
+  try {
+    return { ...(await geminiGenerate(db, opts)), via: "gemini" };
+  } catch (e) {
+    const quotaOrOutage = e instanceof FreeTierLimitError || /overloaded|network/i.test((e as Error).message);
+    if (!quotaOrOutage || !fallbackConfigured()) throw e;
+    let msg: ChatMessage;
+    try {
+      msg = await fallbackChat(db, toChatMessages(opts.contents, opts.system), {
+        userId: opts.userId,
+        maxTokens: 1200,
+        tools: opts.tools?.map((t) => ({ type: "function" as const, function: { name: t.name, description: t.description, parameters: t.parameters } })),
+      });
+    } catch (f) {
+      throw e instanceof FreeTierLimitError ? new FreeTierLimitError(`${e.message} Backup AI also failed: ${(f as Error).message}`) : e;
+    }
+    const parts: GeminiPart[] = [];
+    if (msg.content) parts.push({ text: msg.content });
+    for (const c of msg.tool_calls ?? []) {
+      let args: Record<string, unknown> = {};
+      try {
+        args = JSON.parse(c.function.arguments || "{}");
+      } catch {
+        // leave empty
+      }
+      parts.push({ functionCall: { id: c.id, name: c.function.name, args } });
+    }
+    return { parts, text: msg.content ?? "", via: "backup" };
+  }
 }

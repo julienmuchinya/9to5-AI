@@ -4,7 +4,7 @@ export type NeedsKind = "questions" | "signin" | "manual" | "captcha" | "check" 
 export const NEEDS_LABEL: Record<NeedsKind, { label: string; hint: string }> = {
   questions: { label: "Answer questions", hint: "Answer once at the top of this page — the agent reapplies everywhere that question appears." },
   signin: { label: "Sign-in / verify email", hint: "Usually a Workday account email. The agent retries by itself; if it still fails, open the portal with the login on the card." },
-  manual: { label: "Apply yourself", hint: "Sites the agent can't submit to yet (SmartRecruiters, Workable, Oracle, Taleo…). The answers it prepared are on the card." },
+  manual: { label: "Apply yourself", hint: "Sites the agent can't submit to (SmartRecruiters blocks automated browsers with a CAPTCHA; Oracle, Taleo…). The answers it prepared are on the card." },
   captcha: { label: "CAPTCHA", hint: "The site asked for a human check. The form is filled in — open it, finish the check and press Submit." },
   check: { label: "Check it went through", hint: "The agent submitted or got stuck on a step and couldn't confirm. Open it to make sure." },
   other: { label: "Other", hint: "" },

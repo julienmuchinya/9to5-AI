@@ -20,7 +20,7 @@ import {
 } from "../../src/lib/v2/discovery/sources";
 import { verifyPosting, canAutoSubmit } from "../../src/lib/v2/verify";
 import { matchPosting, type MatchProfile } from "../../src/lib/v2/match";
-import { bumpUsage, freeTierSnapshot, today } from "../../src/lib/v2/freeTier";
+import { bumpUsage, freeTierSnapshot, readUsage, SAFETY_RATIO, today } from "../../src/lib/v2/freeTier";
 import { aiAvailable } from "../../src/lib/v2/gemini";
 import { fallbackConfigured } from "../../src/lib/v2/fallback-ai";
 import { renderClassicResume } from "../../src/lib/v2/resume-render";
@@ -33,7 +33,9 @@ import { openMailbox } from "./mailbox";
 import { answerWaitingQuestions } from "./backfill";
 import { resumeFocus } from "../../src/lib/v2/tracking";
 import { decryptSecret, encryptSecret, generatePortalPassword } from "../../src/lib/v2/vault";
-import { COMPANY_DAILY_CAP, companyKey, planQueue } from "../../src/lib/v2/priority";
+import { COMPANY_DAILY_CAP, companyKey, MAX_DAILY_APPLY_CAP, planQueue } from "../../src/lib/v2/priority";
+import { minutesPlan } from "../../src/lib/v2/minutes";
+import { sendRunDigest } from "./digest";
 import { customStore, memoryKey, rememberAnswers, type AppAnswers, type CustomAnswers } from "../../src/lib/v2/app-questions";
 
 const startedAt = Date.now();
@@ -72,11 +74,13 @@ const PACE_MIN_S = Number(env("PACE_MIN_S", "6"));
 const PACE_MAX_S = Number(env("PACE_MAX_S", "15"));
 const ATS_DAILY_CAP = Number(env("ATS_DAILY_CAP", "150")); // per ATS host, all users combined
 const COMPANY_CAP = Number(env("COMPANY_DAILY_CAP", String(COMPANY_DAILY_CAP))); // per company, per user, per day
-const MAX_DAILY_CAP = 100;
+const MAX_DAILY_CAP = MAX_DAILY_APPLY_CAP;
 /** Workday portals: sign in / create the account with the saved login, then apply (set WORKDAY=false to turn off). */
 const WORKDAY_ON = env("WORKDAY", "true") !== "false";
 // Stop starting new applications after this many minutes, so the run ends before the workflow timeout.
-const RUN_BUDGET_MS = Number(env("RUN_BUDGET_MIN", "40")) * 60_000;
+let RUN_BUDGET_MS = Number(env("RUN_BUDGET_MIN", "40")) * 60_000;
+/** Started with "Run now" / Run workflow (not the schedule). */
+const MANUAL = env("GITHUB_EVENT_NAME") === "workflow_dispatch";
 const timeLeft = () => RUN_BUDGET_MS - (Date.now() - startedAt);
 
 async function activeCooldowns(sb: SupabaseClient): Promise<Map<string, string>> {
@@ -497,6 +501,8 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
     if (error) log(`application save error: ${error.message}`);
   };
 
+  let aiOut = false;
+  let aiMisses = 0;
   const attemptLimit = Number(env("APPLY_LIMIT", "0")) || Infinity; // for testing: try at most N forms
   let attempts = 0;
   const onlyCompany = env("APPLY_ONLY_COMPANY", "").toLowerCase(); // testing: one company only
@@ -525,7 +531,9 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
       if (needsAccount && !dryRun) await ensurePortalLogin(sb, u.id, email, job.company_name, applyUrl);
       const why = needsAccount
         ? "This site needs an account. The email and password to use are on this card and under Portal logins — create the account, then apply."
-        : "The agent can only submit verified Greenhouse, Lever and Ashby jobs — open this one and apply yourself";
+        : /smartrecruiters\.com/i.test(applyUrl)
+          ? "SmartRecruiters shows a CAPTCHA to automated browsers, so the agent can't apply here — open this one and apply yourself"
+          : "The agent can submit Greenhouse, Lever, Ashby, Workday and Workable jobs — open this one and apply yourself";
       await save({ ...base, status: "needs_user", error: why });
       bump("needs_user");
       continue;
@@ -545,11 +553,12 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
       // Human pace between submissions instead of bursts.
       await sleep((PACE_MIN_S + Math.random() * Math.max(0, PACE_MAX_S - PACE_MIN_S)) * 1000);
     }
+    // Out of AI (Gemini and backup): keep going for jobs whose questions are all remembered already —
+    // those need no AI. Jobs that do need it stay queued; 3 of those in a row ends the run.
     const budget = await aiAvailable(sb);
-    if (!budget.allowed) {
-      log(`stop applying: ${budget.reason}`);
-      result.gemini_limit = 1;
-      break;
+    if (!budget.allowed && !aiOut) {
+      log(`AI is out for now (${budget.reason}) — only applying where every answer is already known`);
+      aiOut = true;
     }
 
     const jobText = `${job.title}\n${p.description ?? ""}`;
@@ -559,7 +568,7 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
     const parsed = entry?.parsed ?? u.resume_parsed;
     if (parsed?.experience?.length && tailorMode !== "off") {
       let tailored = tailorResume(parsed, jobText);
-      if (tailorMode === "ai") {
+      if (tailorMode === "ai" && !aiOut) {
         try {
           tailored = await aiTailorResume(sb, tailored, { title: job.title, company: job.company_name, description: p.description ?? "" }, u.id);
         } catch (e) {
@@ -649,10 +658,15 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
     }
     bump(r.status);
     if (/AI quota used up/i.test(r.detail)) {
-      log("stop applying: AI quota used up");
+      aiOut = true;
       result.gemini_limit = 1;
-      break;
+      if (++aiMisses >= 3) {
+        log("stop applying: AI quota used up and the next jobs need it");
+        break;
+      }
+      continue;
     }
+    aiMisses = 0;
     if (r.status === "submitted") {
       remaining--;
       submittedThisRun++;
@@ -678,10 +692,21 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
 async function main() {
   const sb = db();
   const limits = await freeTierSnapshot(sb);
-  if (!limits.githubMinutes.allowed) {
-    log(`Skipping run: ${limits.githubMinutes.reason}`);
+  const plan = minutesPlan({
+    usedMonth: limits.githubMinutes.used,
+    usedToday: await readUsage(sb, "github_actions_minutes_day").catch(() => 0),
+    limit: limits.githubMinutes.limit,
+    ratio: SAFETY_RATIO,
+    maxRunMin: RUN_BUDGET_MS / 60_000,
+    manual: MANUAL,
+    publicRepo: limits.githubMinutes.unlimited,
+  });
+  log(`${MANUAL ? "manual" : "scheduled"} run — GitHub minutes: ${plan.reason}`);
+  if (plan.skip) {
+    log("Skipping run.");
     return;
   }
+  RUN_BUDGET_MS = plan.budgetMin * 60_000;
 
   // Runs killed by a timeout stay "running" forever; close them so the app doesn't show them as live.
   await sb
@@ -729,6 +754,7 @@ async function main() {
         summary.applications = await applyForUser(sb, u, s, browser);
       }
       if (env("INBOX", "true") !== "false") summary.inbox = await scanInbox(sb, u as never, (m) => log(m));
+      if (env("APPLY_DRY_RUN") !== "true") summary.email = await sendRunDigest(sb, u as never, { manual: MANUAL, since: new Date(startedAt), log }).catch(() => "skipped");
       await sb.from("agent_runs").update({ status: "completed", ended_at: new Date().toISOString(), summary }).eq("id", run?.id);
       await sb.from("agent_logs").insert({ user_id: u.id, run_id: run?.id, level: "info", message: "Agent run completed", metadata: { area: "agent", ...summary } });
       log(`user ${u.id.slice(0, 8)}:`, JSON.stringify(summary));
@@ -745,6 +771,7 @@ async function main() {
   if (process.env.GITHUB_ACTIONS === "true") {
     const minutes = Math.ceil((Date.now() - startedAt) / 60000) + 2;
     await bumpUsage(sb, "github_actions_minutes", minutes);
+    await bumpUsage(sb, "github_actions_minutes_day", minutes).catch(() => {});
   }
   log(`done in ${Math.round((Date.now() - startedAt) / 1000)}s`);
 }

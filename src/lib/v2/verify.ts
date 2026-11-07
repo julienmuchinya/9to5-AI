@@ -99,8 +99,14 @@ export async function verifyCompanyDomain(domain?: string): Promise<boolean | un
 
 /** Only these are eligible for automatic submission. */
 export const AUTO_SUBMIT_ATS = new Set(["greenhouse", "lever", "ashby"]);
+/** Sites whose plain application form the agent fills, whatever the posting's ats label says. */
+export const AUTO_SUBMIT_HOSTS = ["apply.workable.com"];
 export function canAutoSubmit(p: { ats?: string | null; verification_status?: string | null; apply_url?: string | null; url?: string }): boolean {
-  if (!p.ats || !AUTO_SUBMIT_ATS.has(p.ats) || p.verification_status !== "verified") return false;
+  if (p.verification_status !== "verified") return false;
   const host = domainOf(p.apply_url || p.url) ?? "";
+  // Workable: a normal form with no CAPTCHA on load (checked Nov 2026). SmartRecruiters is NOT here:
+  // its form sits behind a CAPTCHA wall for automated browsers, so those stay "apply yourself".
+  if (hostMatches(host, AUTO_SUBMIT_HOSTS)) return true;
+  if (!p.ats || !AUTO_SUBMIT_ATS.has(p.ats)) return false;
   return hostMatches(host, ["greenhouse.io", "lever.co", "ashbyhq.com"]);
 }
