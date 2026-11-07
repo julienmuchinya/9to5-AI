@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { commonSenseAnswer, questionFor } from "./app-questions";
-import { SUCCESS, knownValue, type Applicant, type Field } from "../../../agent/v2/apply";
+import { SUCCESS, applyUrlFor, knownValue, type Applicant, type Field } from "../../../agent/v2/apply";
 
 const me: Applicant = {
   first_name: "Ada",
@@ -110,5 +110,16 @@ describe('fields about other things or other people', () => {
   it("the referrer's email is not mine", () => {
     expect(knownValue(f("What's their name or email address?", 'text'), a)).toBeNull();
     expect(knownValue(f('Email', 'text'), a)).toBe('me@x.com');
+  });
+});
+
+describe('application URLs and degrees', () => {
+  it('adds the form path without breaking a query string', () => {
+    expect(applyUrlFor('ashby', 'https://jobs.ashbyhq.com/rhoda-ai/9a57?embed=true')).toBe('https://jobs.ashbyhq.com/rhoda-ai/9a57/application?embed=true');
+    expect(applyUrlFor('ashby', 'https://jobs.ashbyhq.com/x/1/application')).toBe('https://jobs.ashbyhq.com/x/1/application');
+    expect(applyUrlFor('lever', 'https://jobs.lever.co/acme/abc')).toBe('https://jobs.lever.co/acme/abc/apply');
+  });
+  it('picks the plain bachelor option for degree dropdowns', () => {
+    expect(commonSenseAnswer('Degree', ['Select One', 'High School Diploma or Equivalent', 'Bachelor of Science with Honors', 'Bachelor of Science', 'Master of Science'], 'combobox')).toBe('Bachelor of Science');
   });
 });

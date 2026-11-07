@@ -393,6 +393,9 @@ export function commonSenseAnswer(label: string, options: string[], kind: string
   // "Which month(s) are you available to start?" with a checkbox list: flexible = tick every offered month.
   if (kind === "checkboxes" && /(available|availability|able) to (start|begin)|start (month|date|term)|when can you start/.test(l) && options.length && options.every((o) => /(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|spring|summer|fall|autumn|winter)/i.test(o)))
     return options.join(", ");
+  // Degree dropdowns: the applicant's bachelor's (resume), as the plain "Bachelor of Science/Arts" option.
+  if (/^degree\b|degree (type|level|earned|obtained)|highest (level of )?(education|degree)/.test(l) && options.length)
+    return pick(/^bachelor('|’)?s?( of science)?( degree)?$/i, /bachelor of science(?!.*honou?rs)/i, /bachelor/i);
   // Workday contact basics.
   if (/phone (device )?type/.test(l)) return pick(/mobile|cell/i) ?? (options.length ? null : "Mobile");
   if (/(country )?phone code|country code/.test(l)) return pick(/united states/i, /\+1\b/);

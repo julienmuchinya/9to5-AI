@@ -83,10 +83,17 @@ export const SUCCESS =
   /thank(s| you)( so much| very much)? for (applying|your (application|submission)|submitting)|application (has been |was )?(successfully )?(received|submitted|sent)|we('|’)ve (successfully )?received your application|we have (successfully )?received your application|successfully (submitted|applied)|application submitted|congratulations[^.]{0,40}(submitted|applied)|you('|’)ve (successfully )?applied|your application is (in|complete)/i;
 const CLOSED = /no longer (accepting|available|open)|job (is )?(closed|not found)|position has been filled|page (you('|’)re looking for )?(could not be|not) found/i;
 
-function applyUrlFor(ats: string, url: string): string {
-  if (ats === "lever" && !/\/apply\/?$/.test(url)) return url.replace(/\/?$/, "/apply");
-  if (ats === "ashby" && !/\/application\/?$/.test(url)) return url.replace(/\/?$/, "/application");
-  return url;
+/** The page with the form: Lever "…/apply", Ashby "…/application" — added to the PATH, keeping any ?query. */
+export function applyUrlFor(ats: string, url: string): string {
+  const suffix = ats === "lever" ? "apply" : ats === "ashby" ? "application" : null;
+  if (!suffix) return url;
+  try {
+    const u = new URL(url);
+    if (!new RegExp(`/${suffix}/?$`).test(u.pathname)) u.pathname = u.pathname.replace(/\/?$/, `/${suffix}`);
+    return u.toString();
+  } catch {
+    return url;
+  }
 }
 
 /** Tag every visible form control and describe it. */
