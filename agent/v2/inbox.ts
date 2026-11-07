@@ -5,6 +5,7 @@
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { openMailbox, type Mailbox } from "./mailbox";
+import { GmailRateLimitError } from "../../src/lib/v2/gmail";
 import { inboxErrorMessage } from "./mailcode";
 import { classifyEmail, emailMentionsCompany, nextStatus } from "../../src/lib/v2/tracking";
 
@@ -27,7 +28,9 @@ export async function scanInbox(sb: SupabaseClient, u: InboxUser, log: (m: strin
   let box: Mailbox | null = null;
   try {
     box = await openMailbox(u);
-    for (const msg of await box.list(since, 300)) {
+    // Only mail that could be about an application (Gmail search does the filtering — far fewer API calls).
+    const hint = "{application applying applied interview candidate position role offer thank opportunity update status}";
+    for (const msg of await box.list(since, 150, hint)) {
       const from = msg.from;
       const subject = msg.subject;
       // Cheap pre-filter on subject before downloading the body.
@@ -64,8 +67,13 @@ export async function scanInbox(sb: SupabaseClient, u: InboxUser, log: (m: strin
     await sb.from("profiles").update({ inbox_last_scan_at: new Date().toISOString(), inbox_error: null }).eq("id", u.id);
   } catch (e) {
     const friendly = inboxErrorMessage(e);
-    await sb.from("profiles").update({ inbox_error: friendly }).eq("id", u.id);
-    log(`inbox ${u.id.slice(0, 8)} error: ${friendly}`);
+    // A temporary Gmail rate limit must not mark the inbox as broken (that switched off security-code reading).
+    if (e instanceof GmailRateLimitError || /quota|rate ?limit|429/i.test(friendly)) {
+      log(`inbox ${u.id.slice(0, 8)}: Gmail rate limit — will scan again next run`);
+    } else {
+      await sb.from("profiles").update({ inbox_error: friendly }).eq("id", u.id);
+      log(`inbox ${u.id.slice(0, 8)} error: ${friendly}`);
+    }
   } finally {
     await box?.close().catch(() => {});
   }

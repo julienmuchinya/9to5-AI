@@ -65,11 +65,24 @@ export async function gmailAccessToken(refreshToken: string): Promise<string> {
   return t.access_token;
 }
 
+/** Gmail said "too many requests" (per-minute quota). Temporary — never a reason to disconnect. */
+export class GmailRateLimitError extends Error {}
+
 async function gmailGet<T>(token: string, path: string): Promise<T> {
-  const res = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/${path}`, { headers: { Authorization: `Bearer ${token}` } });
-  if (res.status === 401) throw new GmailAuthError("Google access expired — connect with Google again on the Autopilot page.");
-  if (!res.ok) throw new Error(`Gmail API ${res.status}: ${(await res.text()).slice(0, 200)}`);
-  return (await res.json()) as T;
+  for (let attempt = 0; ; attempt++) {
+    const res = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/${path}`, { headers: { Authorization: `Bearer ${token}` } });
+    if (res.status === 401) throw new GmailAuthError("Google access expired — connect with Google again on the Autopilot page.");
+    if (res.ok) return (await res.json()) as T;
+    const body = await res.text();
+    const limited = res.status === 429 || (res.status === 403 && /quota|rate ?limit|userRateLimitExceeded|rateLimitExceeded/i.test(body));
+    if (limited && attempt < 4) {
+      // Per-user quota is per minute: wait it out (2s, 4s, 8s, 16s).
+      await new Promise((r) => setTimeout(r, 2000 * 2 ** attempt));
+      continue;
+    }
+    if (limited) throw new GmailRateLimitError("Gmail is rate-limiting requests right now");
+    throw new Error(`Gmail API ${res.status}: ${body.slice(0, 200)}`);
+  }
 }
 
 export interface GmailHeaderInfo {

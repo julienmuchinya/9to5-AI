@@ -49,4 +49,18 @@ describe("Gmail API client", () => {
     vi.stubGlobal("fetch", vi.fn(async () => json({ raw: Buffer.from(raw).toString("base64url") })));
     expect((await gmailRaw("at", "m1")).toString()).toBe(raw);
   });
+
+  it("waits and retries when Gmail rate-limits instead of failing", async () => {
+    let calls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        calls++;
+        if (calls === 1) return new Response(JSON.stringify({ error: { message: "Quota exceeded for quota metric 'Total Query Cost'" } }), { status: 403 });
+        return json({ raw: Buffer.from("x").toString("base64url") });
+      })
+    );
+    expect((await gmailRaw("at", "m1")).toString()).toBe("x");
+    expect(calls).toBe(2);
+  }, 10_000);
 });

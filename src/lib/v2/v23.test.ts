@@ -143,3 +143,15 @@ describe('school field', () => {
     expect(knownValue(f('Have you ever worked at The American College of Obstetricians and Gynecologists or any of its affiliates?', 'combobox', ['Yes', 'No']), a)).not.toBe('Example State University');
   });
 });
+
+describe('clearance and previous employment', () => {
+  it('no clearance', () => {
+    expect(commonSenseAnswer('Please list the type of clearance held:', [], 'text')).toBe('None');
+    expect(commonSenseAnswer('What level Clearance do you possess?', ['Top Secret', 'Secret', 'None'], 'combobox')).toBe('None');
+    expect(commonSenseAnswer('Are you willing to obtain a security clearance?', ['Yes', 'No'], 'radio')).toBeNull();
+  });
+  it('never worked here before', () => {
+    expect(commonSenseAnswer('Have you previously worked for this organization? If Yes, please provide dates', [], 'text')).toBe('No');
+    expect(commonSenseAnswer('Have you previously been employed by Leidos?', ['Yes', 'No'], 'radio')).toBe('No');
+  });
+});

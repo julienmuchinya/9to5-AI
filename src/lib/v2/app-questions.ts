@@ -393,6 +393,12 @@ export function commonSenseAnswer(label: string, options: string[], kind: string
   // "Which month(s) are you available to start?" with a checkbox list: flexible = tick every offered month.
   if (kind === "checkboxes" && /(available|availability|able) to (start|begin)|start (month|date|term)|when can you start/.test(l) && options.length && options.every((o) => /(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|spring|summer|fall|autumn|winter)/i.test(o)))
     return options.join(", ");
+  // Security clearance (the applicant holds none): "None" / the no-clearance option.
+  if (/clearance/.test(l) && !/(willing|able|eligible|obtain|pass|consent)/.test(l))
+    return options.length ? pick(/^none\b|no clearance|never (held|had)|not applicable|n\/a|^no\b/i) : "None";
+  // Previously worked here: No (text boxes too, e.g. "Have you previously worked for this organization? If yes, …").
+  if (/(previously (been )?(worked|employed)|ever (been )?(worked|employed) (for|at|by)|former employee|worked for this (organization|company))/.test(l) && !/^if yes/.test(l))
+    return kind === "text" || kind === "textarea" ? "No" : no();
   // Degree dropdowns: the applicant's bachelor's (resume), as the plain "Bachelor of Science/Arts" option.
   if (/^degree\b|degree (type|level|earned|obtained)|highest (level of )?(education|degree)/.test(l) && options.length)
     return pick(/^bachelor('|’)?s?( of science)?( degree)?$/i, /bachelor of science(?!.*honou?rs)/i, /bachelor/i);

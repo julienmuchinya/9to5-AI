@@ -455,8 +455,10 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
   };
   // The user's Gmail (Connect with Google, or app password) for codes sites email during an application.
   const inbox = { inbox_email: u.inbox_email ?? null, inbox_host: u.inbox_host ?? null, inbox_password_enc: u.inbox_password_enc ?? null };
+  // Only a sign-in problem (wrong app password, Google access removed) disables Gmail; anything else is retried.
+  const inboxBroken = Boolean(u.inbox_error && /(password|expired|removed|connect with google|credentials|sign-in|imap is turned off)/i.test(u.inbox_error));
   const emailCode: ((since: Date) => Promise<string | null>) | undefined =
-    inbox.inbox_email && inbox.inbox_password_enc && !u.inbox_error
+    inbox.inbox_email && inbox.inbox_password_enc && !inboxBroken
       ? async (since) => {
           const t0 = Date.now();
           const c = await waitForVerification(() => openMailbox(inbox), { since, match: /code|verif|security|greenhouse|lever|ashby/i, want: "code", timeoutMs: 90_000, log });
@@ -466,7 +468,7 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
       : undefined;
   // Verification links sites email when an account is created (Workday).
   const emailLink: ((since: Date, match: RegExp) => Promise<string | null>) | undefined =
-    inbox.inbox_email && inbox.inbox_password_enc && !u.inbox_error
+    inbox.inbox_email && inbox.inbox_password_enc && !inboxBroken
       ? async (since, match) => {
           const t0 = Date.now();
           const l = await waitForVerification(() => openMailbox(inbox), { since, match, want: "link", timeoutMs: 120_000, log });
