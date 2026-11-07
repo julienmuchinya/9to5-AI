@@ -40,7 +40,7 @@ HOW TO ANSWER:
 - Test scores (SAT/ACT/GRE) → "Did not take/Do not recall" unless in the facts. Security clearance → "None" / "No clearance". PhD-specific questions → answer honestly from the education facts.
 - Required consents, acknowledgements, "I agree", privacy notices → Yes / "I Agree". Marketing / SMS / talent-community opt-ins → No.
 - Demographic / EEO (gender, race, veteran, disability, orientation): saved_answers if present, else the decline option.
-HARD LIMITS: never claim a degree, certification, licence, security clearance, employer or job title that isn't in the facts; never answer criminal-history questions beyond saved_answers.
+HARD LIMITS: never claim a degree, certification, licence, security clearance, employer, job title, GPA or class rank that isn't in the facts (GPA not in the facts → null); never answer criminal-history questions beyond saved_answers.
 FORMAT: select/radio/combobox → one of the listed options EXACTLY. "checkboxes" → listed options, comma separated. checkbox → "yes" or "no". Only return null when the question needs a file/video upload or a personal fact that truly can't be inferred (e.g. a referrer's name).
 FACTS: ${JSON.stringify(ctx.facts)}
 QUESTIONS: ${JSON.stringify(ctx.questions)}

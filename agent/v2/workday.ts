@@ -116,14 +116,30 @@ async function errorsOnPage(page: Page): Promise<string> {
   return errs.join(" · ").slice(0, 400);
 }
 
+/** Remove the last picked item of a Workday multi-select: Backspace in its empty search box. */
+async function removeLastPick(page: Page, inputSel: string) {
+  const input = page.locator(inputSel).first();
+  await input.click().catch(() => {});
+  await input.fill("").catch(() => {});
+  // First Backspace highlights the last pick, the second deletes it.
+  await page.keyboard.press("Backspace").catch(() => {});
+  await page.waitForTimeout(300);
+  await page.keyboard.press("Backspace").catch(() => {});
+  await page.waitForTimeout(500);
+}
+
 /**
  * Workday "prompt" fields (How Did You Hear About Us?, some locations): a search box that only takes
  * a value picked from its result list. Type, then click the first matching result (descending into
  * a category like "Job Board" if that's what comes up).
  */
-async function fillPrompt(page: Page, sel: string, value: string): Promise<boolean> {
+async function fillPrompt(page: Page, sel: string, value: string, label = ""): Promise<boolean> {
+  const isSource = /(hear|source|referr|learn about|find out about)/i.test(label);
   // The answer itself first; then neutral, honest sources if it isn't listed as such.
-  const tries = [...new Set([value, "LinkedIn", "Job Board", "Company Website", "Website", "Other"])];
+  const isMajor = /(field of study|major|discipline|area of study)/i.test(label);
+  const tries = isSource
+    ? [...new Set([value, "LinkedIn", "Job Board", "Company Website", "Website", "Other"])]
+    : [...new Set([value, ...value.split(/[,/&]| and /).map((x) => x.trim()).filter(Boolean), ...(isMajor ? ["Computer Science", "Computer Engineering", "Software Engineering", "Computer and Information Science", "Engineering"] : [])])];
   // A field that already shows a selection (saved draft): keep it only if it IS the intended answer or one of
   // the honest fallbacks; otherwise remove it (e.g. "Alumni Referral" picked for "Referral") and pick again.
   const selected = await page
@@ -141,6 +157,7 @@ async function fillPrompt(page: Page, sel: string, value: string): Promise<boole
     const remove = field.locator(`${WD("DELETE_charm")}, [data-automation-id=removeSelectedItem], button[aria-label*=remove i], [data-automation-id=selectedItem] [role=button]`).first();
     const b = await remove.boundingBox().catch(() => null);
     if (b) await page.mouse.click(b.x + b.width / 2, b.y + b.height / 2);
+    else await removeLastPick(page, sel);
     await page.waitForTimeout(600);
   }
   for (const [n, v] of tries.entries()) {
@@ -157,7 +174,7 @@ async function fillPrompt(page: Page, sel: string, value: string): Promise<boole
       const contains = pool.filter({ hasText: new RegExp(esc.split(" ")[0], "i") });
       // For the user's own answer accept only an exact / starts-with match ("Referral" must not become
       // "Alumni Referral" or "Employee Referral"); the fallback sources may match loosely.
-      const strict = n === 0 && depth === 0;
+      const strict = isSource && n === 0 && depth === 0;
       const target = (await exact.count())
         ? exact.first()
         : (await starts.count())
@@ -401,7 +418,7 @@ export function parseMonthYear(s: string | null | undefined): { mm: string; yyyy
  * Workday date boxes. Work-history "From"/"To" come from the resume's jobs (in order; "Present" ticks
  * "I currently work here"); any other date (e.g. the self-identification signature date) is today.
  */
-async function fillDates(page: Page, jobs: { start?: string | null; end?: string | null }[]) {
+async function fillDates(page: Page, jobs: { start?: string | null; end?: string | null }[], schools: { graduation?: string | null; degree?: string | null }[] = []) {
   // Each Workday date is a wrapper with a (hidden) month input and a visible "display" box on top.
   const wrappers = page.locator(WD("dateInputWrapper"));
   const n = await wrappers.count().catch(() => 0);
@@ -416,20 +433,33 @@ async function fillDates(page: Page, jobs: { start?: string | null; end?: string
         const fid = field?.getAttribute("data-automation-id") ?? "";
         const label = (field?.querySelector("label, legend")?.textContent ?? "").replace(/\s+/g, " ").trim();
         const month = el.querySelector("[data-automation-id=dateSectionMonth-input]") as HTMLInputElement | null;
+        const inEducation = Boolean(el.closest("[data-automation-id*=education i], [data-automation-id*=Education]")) || /attended|graduat|education/i.test(fid + " " + label);
         return {
           fid,
           label,
+          inEducation,
+          hasMonth: Boolean(el.querySelector("[data-automation-id=dateSectionMonth-input]")),
           hasDay: Boolean(el.querySelector("[data-automation-id=dateSectionDay-input]")),
           filled: Boolean(month?.value && !/^m+$/i.test(month.value)) || /\d{1,2}\s*\/\s*\d{4}/.test(el.textContent ?? ""),
         };
       })
-      .catch(() => ({ fid: "", label: "", hasDay: true, filled: false }));
-    const isFrom = /startDate|fromDate/i.test(info.fid) || /^(from|start)/i.test(info.label);
-    const isTo = /endDate|toDate/i.test(info.fid) || /^(to|end)\b/i.test(info.label);
-    if (isFrom) job++;
+      .catch(() => ({ fid: "", label: "", inEducation: false, hasMonth: true, hasDay: true, filled: false }));
+    const isFrom = /startDate|fromDate|firstYear/i.test(info.fid) || /^(from|start)/i.test(info.label);
+    const isTo = /endDate|toDate|lastYear/i.test(info.fid) || /^(to|end)\b/i.test(info.label);
+    if (isFrom && !info.inEducation) job++;
     if (info.filled) continue;
     let typed: string | null = null;
-    if (isFrom || isTo) {
+    if (info.inEducation && (isFrom || isTo)) {
+      // Education: "To (Actual or Expected)" = graduation; "From" ≈ 4 years earlier for a bachelor's, 2 for a master's.
+      const s0 = schools[0];
+      const grad = parseMonthYear(s0?.graduation) ?? parseMonthYear(String(new Date().getFullYear() + 1));
+      if (grad) {
+        const years = isFrom ? (/master|m\.?s\b/i.test(s0?.degree ?? "") ? 2 : 4) : 0;
+        const y = String(Number(grad.yyyy) - years);
+        const mm = isFrom ? "08" : grad.mm;
+        typed = !info.hasMonth ? y : info.hasDay ? `${mm}01${y}` : `${mm}${y}`;
+      }
+    } else if (isFrom || isTo) {
       const j = jobs[Math.max(0, job)];
       const d = parseMonthYear(isFrom ? j?.start : j?.end);
       if (!d && isTo && j && /present|current/i.test(j.end ?? "")) {
@@ -448,8 +478,8 @@ async function fillDates(page: Page, jobs: { start?: string | null; end?: string
       typed = info.hasDay ? `${mm}${String(now.getDate()).padStart(2, "0")}${now.getFullYear()}` : `${mm}${now.getFullYear()}`;
     }
     if (!typed) continue;
-    // Click the visible month display (the input itself is hidden), then type; Workday moves to the next part.
-    const display = w.locator(`${WD("dateSectionMonth-display")}, ${WD("dateSectionMonth-input")}`).first();
+    // Click the visible first part (month, or year for year-only boxes) — the input itself is hidden — then type.
+    const display = w.locator(`${WD("dateSectionMonth-display")}, ${WD("dateSectionMonth-input")}, ${WD("dateSectionYear-display")}, ${WD("dateSectionYear-input")}`).first();
     const box = await display.boundingBox().catch(() => null);
     if (box) await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
     else await w.locator(WD("dateSectionMonth-input")).focus().catch(() => {});
@@ -464,7 +494,37 @@ async function fillDates(page: Page, jobs: { start?: string | null; end?: string
 }
 
 /** Work Experience N → the N-th job on the resume: Job Title and Company, when Workday left them empty. */
-async function fillWorkHistory(page: Page, jobs: { title: string; company: string }[]) {
+async function fillWorkHistory(page: Page, jobs: { title: string; company: string }[], schools: { school?: string | null }[] = []) {
+  // Education 1 → the first school on the resume, when Workday left it empty (it's a search-and-pick field).
+  const school = schools[0]?.school;
+  if (school) {
+    const box = page.locator('[data-automation-id="formField-schoolItem"] input, [data-automation-id="formField-school"] input').first();
+    if ((await box.isVisible().catch(() => false)) && !/item selected/i.test((await box.locator("xpath=ancestor::*[starts-with(@data-automation-id,'formField')][1]").textContent().catch(() => "")) ?? "")) {
+      const id = await box.getAttribute("id").catch(() => null);
+      if (id) await fillPrompt(page, `[id="${id}"]`, school, "School");
+      else await box.fill(school).catch(() => {});
+    }
+  }
+  // Field of Study: once something is picked Workday hides the search box, so a wrong pick ("Accounting")
+  // must be removed here and the resume's major chosen instead.
+  const major = (schools[0] as { field?: string | null } | undefined)?.field;
+  const fos = page.locator('[data-automation-id="formField-fieldOfStudy"], [data-automation-id="formField-field-of-study"], [data-automation-id="formField-major"]').first();
+  if (major && (await fos.isVisible().catch(() => false))) {
+    const txt = ((await fos.textContent().catch(() => "")) ?? "").replace(/\s+/g, " ");
+    const pickedOk = /(software|computer|electrical|engineering|information|data|math|science)/i.test(txt.replace(/field of study\*?/i, ""));
+    if (/item selected/i.test(txt) && !pickedOk) {
+      const del = fos.locator('[data-automation-id="DELETE_charm"], [data-automation-id*="delete" i], [aria-label*="delete" i], [aria-label*="remove" i]').first();
+      const b = await del.boundingBox().catch(() => null);
+      if (b) await page.mouse.click(b.x + b.width / 2, b.y + b.height / 2);
+      else await removeLastPick(page, '[data-automation-id="formField-fieldOfStudy"] input');
+      await page.waitForTimeout(700);
+    }
+    const input = fos.locator("input").first();
+    if ((await input.isVisible().catch(() => false)) && !/item selected/i.test(((await fos.textContent().catch(() => "")) ?? ""))) {
+      const id = await input.getAttribute("id").catch(() => null);
+      if (id) await fillPrompt(page, `[id="${id}"]`, major, "Field of Study");
+    }
+  }
   if (!jobs.length) return;
   for (const [field, key] of [
     ["jobTitle", "title"],
@@ -551,8 +611,8 @@ export async function applyWorkday(page: Page, db: SupabaseClient, opts: ApplyOp
         await fileInput.setInputFiles(opts.resumePath).catch(() => {});
         await page.waitForTimeout(6000);
       }
-      await fillDates(page, opts.applicant.experience ?? []);
-      await fillWorkHistory(page, opts.applicant.experience ?? []);
+      await fillDates(page, opts.applicant.experience ?? [], opts.applicant.education ?? []);
+      await fillWorkHistory(page, opts.applicant.experience ?? [], opts.applicant.education ?? []);
 
       const isReview = /review/i.test(stepName) || (await page.locator("button:has-text('Submit')").first().isVisible().catch(() => false));
       if (!isReview) {
@@ -595,7 +655,7 @@ export async function applyWorkday(page: Page, db: SupabaseClient, opts: ApplyOp
             }, sel)
             .catch(() => false);
           if (isPrompt) {
-            await fillPrompt(page, sel, v);
+            await fillPrompt(page, sel, v, f.label);
             continue;
           }
           if (f.kind === "radio" || f.kind === "checkboxes") {
@@ -620,6 +680,10 @@ export async function applyWorkday(page: Page, db: SupabaseClient, opts: ApplyOp
           await fill(page, f, value, opts.resumePath).catch(() => {});
           await page.waitForTimeout(150);
         }
+        // A GPA typed on an earlier attempt (or guessed by the site) is removed when the resume has none.
+        for (const f of fields)
+          if (f.filled && f.kind === "text" && /\bgpa\b|grade point|overall result/i.test(f.label) && !opts.applicant.gpa)
+            await page.fill(`[data-9to5="${f.id}"]`, "").catch(() => {});
         Object.assign(allAnswers, labelled(fields, ans.answers));
         await page.waitForTimeout(800);
         await page.keyboard.press("Escape").catch(() => {});

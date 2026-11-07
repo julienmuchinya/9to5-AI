@@ -444,6 +444,11 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
     relocation: u.relocation,
     resume_text: u.resume_parsed ? resumeToText(u.resume_parsed) : "",
     experience: (u.resume_parsed?.experience ?? []).map((e) => ({ title: e.title, company: e.company, start: e.start, end: e.end })),
+    gpa: (u.resume_parsed?.education ?? []).find((e) => e.gpa)?.gpa ?? null,
+    // Bachelor's first: Workday's Education 1 is usually the completed / nearest degree.
+    education: [...(u.resume_parsed?.education ?? [])]
+      .sort((x, y) => (/bachelor/i.test(y.degree ?? "") ? 1 : 0) - (/bachelor/i.test(x.degree ?? "") ? 1 : 0))
+      .map((e) => ({ school: e.school, degree: e.degree, field: e.field, graduation: e.graduation })),
     answers: u.application_answers ?? {},
     memory,
     custom: customStore(u.custom_answers),

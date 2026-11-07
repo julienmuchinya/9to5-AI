@@ -23,6 +23,10 @@ export interface Applicant {
   resume_text: string;
   /** Jobs from the parsed resume (most recent first) — for work-history dates on portals like Workday. */
   experience?: { title: string; company: string; start?: string | null; end?: string | null }[];
+  /** GPA exactly as on the resume, if it lists one. */
+  gpa?: string | null;
+  /** Schools from the parsed resume (most recent first). */
+  education?: { school?: string | null; degree?: string | null; field?: string | null; graduation?: string | null }[];
   /** Saved answers to common application questions (Profile → Common questions). */
   answers?: AppAnswers;
   /** Answers the AI gave before to the same (non job-specific) question. */
@@ -346,6 +350,8 @@ export function knownValue(f: Field, a: Applicant): string | null {
   )
     return a.phone ?? null;
   if (/phone extension|\bext\b/.test(l)) return null;
+  // GPA / class rank: only from the resume — never guessed (left empty when the resume has none).
+  if (/\bgpa\b|grade point|class rank|overall result/.test(l)) return a.gpa ?? null;
   // A field that's just "City" gets the city; "Location" / "City, State" get both.
   if (/^city\b[\s*✱]*$/.test(l) && a.city) return a.city;
   const howHeard = /(hear|learn|find out|found|source|referr)/.test(l);
