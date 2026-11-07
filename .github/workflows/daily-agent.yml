@@ -55,6 +55,9 @@ jobs:
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # Free backup AI when Gemini runs out (optional): console.groq.com / openrouter.ai
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           VAULT_KEY: ${{ secrets.VAULT_KEY }}
           # "Connect with Google" inboxes: refreshes Gmail access for reply tracking and emailed codes.
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}

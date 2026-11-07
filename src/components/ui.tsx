@@ -162,3 +162,42 @@ export function Notice({ tone = "info", children }: { tone?: "info" | "warning" 
   }[tone];
   return <div className={`rounded-xl border p-3 text-sm ${c}`}>{children}</div>;
 }
+
+/** A stat that is also a filter button: the number, a label, and an active ring when selected. */
+export function StatButton({
+  href,
+  label,
+  value,
+  active = false,
+  tone = "default",
+}: {
+  href: string;
+  label: string;
+  value: number;
+  active?: boolean;
+  tone?: "default" | "success" | "warning" | "danger" | "info";
+}) {
+  const t = {
+    default: { dot: "bg-[var(--accent)]", ring: "ring-[var(--accent)]/50", bg: "bg-[var(--accent-soft)]" },
+    info: { dot: "bg-cyan-400", ring: "ring-cyan-400/50", bg: "bg-cyan-400/10" },
+    success: { dot: "bg-emerald-400", ring: "ring-emerald-400/50", bg: "bg-emerald-400/10" },
+    warning: { dot: "bg-amber-400", ring: "ring-amber-400/50", bg: "bg-amber-400/10" },
+    danger: { dot: "bg-red-400", ring: "ring-red-400/50", bg: "bg-red-400/10" },
+  }[tone];
+  return (
+    <Link
+      href={href}
+      scroll={false}
+      aria-current={active ? "page" : undefined}
+      className={`group flex items-center justify-between gap-3 rounded-xl border px-3.5 py-2.5 text-left transition active:scale-[0.98] ${
+        active ? `border-transparent ${t.bg} ring-2 ring-inset ${t.ring}` : "border-[var(--border)] bg-[var(--card)] hover:border-[var(--border-strong)] hover:bg-white/[0.04]"
+      }`}
+    >
+      <span className="flex min-w-0 items-center gap-2">
+        <span className={`h-2 w-2 shrink-0 rounded-full ${t.dot} ${value > 0 && tone === "warning" ? "animate-pulse" : ""}`} />
+        <span className={`truncate text-sm ${active ? "font-medium text-[var(--foreground)]" : "text-[var(--muted)] group-hover:text-[var(--foreground)]"}`}>{label}</span>
+      </span>
+      <span className="text-lg font-semibold tabular-nums text-[var(--foreground)]">{value}</span>
+    </Link>
+  );
+}

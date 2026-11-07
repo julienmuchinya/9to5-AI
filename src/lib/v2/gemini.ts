@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { bumpUsage, checkGemini, FREE_LIMITS } from "./freeTier";
+import { fallbackConfigured, fallbackJson } from "./fallback-ai";
 
 const API = "https://generativelanguage.googleapis.com/v1beta/models";
 /**
@@ -9,6 +10,8 @@ const API = "https://generativelanguage.googleapis.com/v1beta/models";
  */
 const MODEL_CHAIN = ["gemini-3.5-flash", "gemini-flash-latest", "gemini-3.8-flash", "gemini-3.7-flash", "gemini-flash-lite-latest", "gemini-3.5-flash-lite"];
 const deadModels = new Set<string>();
+/** Models whose free daily quota ran out in this process (429). */
+const exhausted = new Set<string>();
 let preferred: string | null = null;
 export function geminiModels(): string[] {
   const list = [preferred, process.env.GEMINI_MODEL, ...MODEL_CHAIN].filter((m): m is string => Boolean(m));
@@ -77,12 +80,11 @@ export async function geminiGenerate(
   let res: Response | null = null;
   let detail = "no response";
   let saw429 = false;
-  let tries = 0;
+  let saw5xx = false;
   const models = geminiModels();
   outer: for (let round = 0; round < 2; round++) {
     for (const model of models) {
-      if (deadModels.has(model)) continue;
-      tries++;
+      if (deadModels.has(model) || exhausted.has(model)) continue;
       try {
         res = await fetch(`${API}/${model}:generateContent`, {
           method: "POST",
@@ -92,6 +94,7 @@ export async function geminiGenerate(
         });
       } catch (e) {
         res = null;
+        saw5xx = true;
         detail = `network: ${(e as Error).message}`;
         continue;
       }
@@ -101,13 +104,24 @@ export async function geminiGenerate(
       }
       detail = `${model} → ${res.status}: ${(await res.text()).slice(0, 200)}`;
       if (res.status === 404) deadModels.add(model); // retired name — never try again in this process
-      else if (res.status === 429) saw429 = true; // quota is per model, so another may still work
-      else if (res.status < 500) break outer; // bad request — another model won't help
+      else if (res.status === 429) {
+        // Free quota is per model per day: that model is done for this process, try the next one.
+        saw429 = true;
+        exhausted.add(model);
+      } else if (res.status >= 500) saw5xx = true;
+      else break outer; // bad request — another model won't help
     }
+    // A second pass only helps when a model was busy (5xx/network), never for used-up quotas.
+    if (!saw5xx) break;
+    saw5xx = false;
     await new Promise((r) => setTimeout(r, 3000));
   }
-  await bumpUsage(db, "gemini_requests", Math.max(1, tries));
-  if (opts.userId) await bumpUsage(db, "gemini_requests", 1, opts.userId);
+  // Count only requests Google actually served. Rejected tries (404 retired / 429 quota) cost nothing
+  // on Google's side; counting them used to burn our own daily budget twice as fast (216 counted vs 112 real).
+  if (res?.ok) {
+    await bumpUsage(db, "gemini_requests", 1);
+    if (opts.userId) await bumpUsage(db, "gemini_requests", 1, opts.userId);
+  }
 
   if (!res || !res.ok) {
     if (saw429 || res?.status === 429) throw new FreeTierLimitError(`Gemini's free quota is used up for now. It resets daily. (${detail})`);
@@ -123,19 +137,59 @@ export async function geminiGenerate(
   return { parts, text };
 }
 
-/** Ask for JSON and parse it. */
+const parseJson = <T,>(text: string): T => JSON.parse(text.replace(/^```(?:json)?\s*|\s*```$/g, "").trim()) as T;
+
+/**
+ * Ask for JSON and parse it. Uses Gemini first; when Gemini's free quota is used up (or Google is down)
+ * and a backup provider is configured (GROQ_API_KEY / OPENROUTER_API_KEY), the same prompt goes there.
+ * `prefer: "fallback"` sends text-only work to the backup first, to save Gemini for PDFs and chat.
+ * PDFs (inlineData) need Gemini — the backups only read text.
+ */
 export async function geminiJson<T>(
   db: SupabaseClient,
   prompt: string,
   extraParts: GeminiPart[] = [],
-  userId?: string
+  userId?: string,
+  opts: { prefer?: "gemini" | "fallback" | "fallback-only" } = {}
 ): Promise<T> {
-  const { text } = await geminiGenerate(db, {
-    contents: [{ role: "user", parts: [...extraParts, { text: prompt }] }],
-    json: true,
-    temperature: 0.1,
-    userId,
-  });
-  const cleaned = text.replace(/^```(?:json)?\s*|\s*```$/g, "").trim();
-  return JSON.parse(cleaned) as T;
+  const textOnly = extraParts.every((p) => !p.inlineData);
+  const canFallback = textOnly && fallbackConfigured();
+  const viaFallback = async () => parseJson<T>(await fallbackJson(db, [...extraParts.map((p) => p.text ?? ""), prompt].join("\n\n"), userId));
+  if (opts.prefer === "fallback-only") {
+    if (!canFallback) throw new Error("No backup AI configured");
+    return viaFallback();
+  }
+  if (canFallback && opts.prefer === "fallback") {
+    try {
+      return await viaFallback();
+    } catch {
+      // fall through to Gemini
+    }
+  }
+  try {
+    const { text } = await geminiGenerate(db, {
+      contents: [{ role: "user", parts: [...extraParts, { text: prompt }] }],
+      json: true,
+      temperature: 0.1,
+      userId,
+    });
+    return parseJson<T>(text);
+  } catch (e) {
+    if (!canFallback || opts.prefer === "fallback") throw e;
+    const quotaOrOutage = e instanceof FreeTierLimitError || /overloaded|network|GEMINI_API_KEY/i.test((e as Error).message);
+    if (!quotaOrOutage) throw e;
+    try {
+      return await viaFallback();
+    } catch (f) {
+      throw e instanceof FreeTierLimitError ? new FreeTierLimitError(`${e.message} Backup AI also failed: ${(f as Error).message}`) : e;
+    }
+  }
+}
+
+/** Is any AI available right now (Gemini under budget, or a backup provider)? */
+export async function aiAvailable(db: SupabaseClient): Promise<{ allowed: boolean; reason?: string; gemini: boolean }> {
+  const g = await checkGemini(db);
+  if (g.allowed) return { allowed: true, gemini: true };
+  if (fallbackConfigured()) return { allowed: true, gemini: false };
+  return { allowed: false, gemini: false, reason: g.reason };
 }

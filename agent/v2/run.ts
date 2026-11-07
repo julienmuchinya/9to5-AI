@@ -20,8 +20,12 @@ import {
 } from "../../src/lib/v2/discovery/sources";
 import { verifyPosting, canAutoSubmit } from "../../src/lib/v2/verify";
 import { matchPosting, type MatchProfile } from "../../src/lib/v2/match";
-import { bumpUsage, freeTierSnapshot, checkGemini, today } from "../../src/lib/v2/freeTier";
-import { renderResumePdf, tailorResume, resumeToText, type ParsedResume } from "../../src/lib/v2/resume";
+import { bumpUsage, freeTierSnapshot, today } from "../../src/lib/v2/freeTier";
+import { aiAvailable } from "../../src/lib/v2/gemini";
+import { fallbackConfigured } from "../../src/lib/v2/fallback-ai";
+import { renderClassicResume } from "../../src/lib/v2/resume-render";
+import { aiTailorResume, boldJobKeywords, loadLibrary, pickResume, type ResumeEntry } from "../../src/lib/v2/resume-library";
+import { tailorResume, resumeToText, type ParsedResume } from "../../src/lib/v2/resume";
 import { applyToJob, type Applicant } from "./apply";
 import { scanInbox } from "./inbox";
 import { waitForVerification } from "./mailcode";
@@ -419,14 +423,25 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
   let memoryChanged = false;
 
   const dir = mkdtempSync(join(tmpdir(), "9to5-"));
-  let original: string | null = null;
-  if (u.resume_path) {
-    const { data } = await sb.storage.from("resumes").download(u.resume_path);
+  // Every resume the user keeps (Resume library); each job gets the one that fits it best.
+  const library = await loadLibrary(sb, u.id, u).catch(() => ({ resumes: [] as ResumeEntry[] }));
+  const originals = new Map<string, string | null>();
+  const originalFor = async (entry: ResumeEntry | null): Promise<string | null> => {
+    const path = entry?.path ?? u.resume_path;
+    if (!path) return null;
+    if (originals.has(path)) return originals.get(path) ?? null;
+    const { data } = await sb.storage.from("resumes").download(path);
+    let local: string | null = null;
     if (data) {
-      original = join(dir, "resume.pdf");
-      writeFileSync(original, Buffer.from(await data.arrayBuffer()));
+      local = join(dir, `original-${originals.size}.pdf`);
+      writeFileSync(local, Buffer.from(await data.arrayBuffer()));
     }
-  }
+    originals.set(path, local);
+    return local;
+  };
+  // RESUME_TAILOR: "ai" (reword bullets with the backup AI — never spends Gemini), "free" (reorder +
+  // bold the job's keywords), "off" (always upload the original PDF untouched).
+  const tailorMode = env("RESUME_TAILOR", fallbackConfigured() ? "ai" : "free");
   const applicant: Applicant = {
     first_name: firstName,
     last_name: lastName,
@@ -467,11 +482,11 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
         }
       : undefined;
   // Verification links sites email when an account is created (Workday).
-  const emailLink: ((since: Date, match: RegExp) => Promise<string | null>) | undefined =
+  const emailLink: ((since: Date, match: RegExp, host?: string) => Promise<string | null>) | undefined =
     inbox.inbox_email && inbox.inbox_password_enc && !inboxBroken
-      ? async (since, match) => {
+      ? async (since, match, host) => {
           const t0 = Date.now();
-          const l = await waitForVerification(() => openMailbox(inbox), { since, match, want: "link", timeoutMs: 120_000, log });
+          const l = await waitForVerification(() => openMailbox(inbox), { since, match, want: "link", timeoutMs: 180_000, log, host });
           log(`  verification link ${l ? "found" : "not found"} after ${Math.round((Date.now() - t0) / 1000)}s`);
           return l;
         }
@@ -530,22 +545,47 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
       // Human pace between submissions instead of bursts.
       await sleep((PACE_MIN_S + Math.random() * Math.max(0, PACE_MAX_S - PACE_MIN_S)) * 1000);
     }
-    const budget = await checkGemini(sb);
+    const budget = await aiAvailable(sb);
     if (!budget.allowed) {
       log(`stop applying: ${budget.reason}`);
       result.gemini_limit = 1;
       break;
     }
 
-    let resumePath = original;
+    const jobText = `${job.title}\n${p.description ?? ""}`;
+    const entry = pickResume(library, jobText);
+    let resumePath = await originalFor(entry);
     let focus: string | null = null;
-    if (u.resume_parsed?.experience?.length) {
-      const tailored = tailorResume(u.resume_parsed, `${job.title}\n${p.description ?? ""}`);
+    const parsed = entry?.parsed ?? u.resume_parsed;
+    if (parsed?.experience?.length && tailorMode !== "off") {
+      let tailored = tailorResume(parsed, jobText);
+      if (tailorMode === "ai") {
+        try {
+          tailored = await aiTailorResume(sb, tailored, { title: job.title, company: job.company_name, description: p.description ?? "" }, u.id);
+        } catch (e) {
+          log(`  resume tailoring skipped: ${(e as Error).message.slice(0, 120)}`);
+        }
+      }
+      tailored = boldJobKeywords(tailored, jobText);
       focus = resumeFocus(tailored.skills);
-      const pdf = await renderResumePdf(tailored);
-      resumePath = join(dir, `${(applicant.first_name + "_" + applicant.last_name).replace(/[^a-z0-9_]/gi, "")}_Resume.pdf`);
-      writeFileSync(resumePath, pdf);
+      // Same layout as the user's own resume, always one page; if it can't fit, send the original PDF.
+      const looksLikeUrl = (x?: string | null) => (x && /^https?:|\.(com|io|dev|me)\b/i.test(x) ? x : null);
+      const pdf = await renderClassicResume(tailored, {
+        name: parsed.name || `${applicant.first_name} ${applicant.last_name}`,
+        email: parsed.email || applicant.email,
+        phone: parsed.phone || applicant.phone,
+        location: parsed.location || [applicant.city, applicant.state].filter(Boolean).join(", "),
+        linkedin: u.linkedin_url || looksLikeUrl(parsed.links?.linkedin),
+        github: u.github_url || looksLikeUrl(parsed.links?.github),
+        website: u.website_url || looksLikeUrl(parsed.links?.website),
+        headline: parsed.headline ?? null,
+      }).catch(() => null);
+      if (pdf) {
+        resumePath = join(dir, `${(applicant.first_name + "_" + applicant.last_name).replace(/[^a-z0-9_]/gi, "")}_Resume.pdf`);
+        writeFileSync(resumePath, pdf);
+      }
     }
+    if (library.resumes.length > 1 && entry) focus = focus ? `${entry.label} · ${focus}` : entry.label;
     if (!resumePath) return { no_resume: 1 };
 
     attempts++;
@@ -574,16 +614,24 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
     }
     // A timeout or crash on a queued job goes back in the queue (up to 3 tries) instead of being lost.
     let status: string = r.status;
-    if (r.status === "failed" && appId && !dryRun) {
-      const { data: row } = await sb.from("applications").select("attempts").eq("id", appId).maybeSingle();
+    let detail = r.detail;
+    if (r.status === "failed" && !dryRun) {
+      const { data: row } = await sb.from("applications").select("id,attempts").eq("user_id", u.id).eq("job_id", job.id).maybeSingle();
       const attempts = (row?.attempts ?? 0) + 1;
-      await sb.from("applications").update({ attempts }).eq("id", appId);
+      if (row) await sb.from("applications").update({ attempts }).eq("id", row.id);
       if (attempts < 3) status = "queued";
+      else {
+        // Three tries didn't get through: hand it to the user instead of leaving it as a silent failure.
+        status = "needs_user";
+        detail = `${r.detail.replace(/ — will retry next run/i, "")} (tried 3 times) — open the application to finish it.`;
+      }
     }
+    // Out of AI for today is not the user's problem: keep it queued for the next run.
+    if (/AI quota used up/i.test(r.detail)) status = "queued";
     await save({
       ...base,
       status,
-      error: r.status === "submitted" ? null : r.detail,
+      error: r.status === "submitted" ? null : detail,
       answers: r.answers ?? {},
       pending_questions: r.status === "needs_user" && r.pending?.length ? r.pending : null,
       submitted_at: r.status === "submitted" ? new Date().toISOString() : null,
@@ -600,6 +648,11 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
       }
     }
     bump(r.status);
+    if (/AI quota used up/i.test(r.detail)) {
+      log("stop applying: AI quota used up");
+      result.gemini_limit = 1;
+      break;
+    }
     if (r.status === "submitted") {
       remaining--;
       submittedThisRun++;

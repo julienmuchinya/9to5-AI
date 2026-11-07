@@ -21,9 +21,13 @@ export async function middleware(request: NextRequest) {
       },
     }
   );
+  // Speed: read the session from the cookie (and refresh it when it expires) instead of a network
+  // round-trip to Supabase Auth on every click. This only decides redirects — every page and API
+  // route still verifies the user with getUser() via requireUser()/apiUser() before reading data.
   const {
-    data: { user },
-  } = await supabase.auth.getUser();
+    data: { session },
+  } = await supabase.auth.getSession();
+  const user = session?.user ?? null;
 
   const path = request.nextUrl.pathname;
   const isPublic = PUBLIC.some((p) => path === p || path.startsWith(`${p}/`));

@@ -35,10 +35,22 @@ export function extractCode(text: string): string | null {
 }
 
 /** Pulls a verify/confirm/activate link out of an email (HTML or text). */
-export function extractLink(html: string, text = ""): string | null {
+export function extractLink(html: string, text = "", host?: string): string | null {
   const hrefs = [...html.matchAll(/href=["']([^"']+)["']/gi)].map((x) => x[1].replace(/&amp;/g, "&"));
-  const urls = [...hrefs, ...(text.match(/https?:\/\/[^\s<>"')]+/g) ?? [])];
-  return urls.find((u) => /^https?:/.test(u) && /(verif|confirm|activat|validate|email-?token|registration|reset|passwordchange|change-?password|forgot)/i.test(u) && !/unsubscribe|privacy|help/i.test(u)) ?? null;
+  const urls = [...hrefs, ...(text.match(/https?:\/\/[^\s<>"')]+/g) ?? [])].filter(
+    (u) => /^https?:/.test(u) && !/unsubscribe|privacy|help|terms|logo|\.(png|jpe?g|gif)(\?|$)/i.test(u)
+  );
+  const keyword = (u: string) => /(verif|confirm|activat|validate|email-?token|registration|reset|passwordchange|change-?password|forgot)/i.test(u);
+  // With `host` (the portal, e.g. acme.wd5.myworkdayjobs.com) a link to that portal wins, and a portal link
+  // carrying a token counts even without the word "verify" (Workday's ".../activate/<token>" style).
+  const onHost = (u: string) => {
+    try {
+      return Boolean(host) && new URL(u).hostname.toLowerCase() === host!.toLowerCase();
+    } catch {
+      return false;
+    }
+  };
+  return urls.find((u) => onHost(u) && keyword(u)) ?? urls.find(keyword) ?? urls.find((u) => onHost(u) && /(token|code|key)=|\/[A-Za-z0-9_-]{24,}/.test(u)) ?? null;
 }
 
 /**
@@ -47,13 +59,13 @@ export function extractLink(html: string, text = ""): string | null {
  */
 export async function waitForVerification(
   open: () => Promise<Mailbox>,
-  opts: { since: Date; match: RegExp; want: "code" | "link"; timeoutMs?: number; log?: (m: string) => void }
+  opts: { since: Date; match: RegExp; want: "code" | "link"; timeoutMs?: number; log?: (m: string) => void; host?: string }
 ): Promise<string | null> {
   const deadline = Date.now() + (opts.timeoutMs ?? 90_000);
   const box = await open();
   const seen = new Set<string>();
   // Search by keyword so a busy inbox can't push the email out of the newest-N window.
-  const hint = opts.want === "code" ? "{code passcode verification security}" : "{verify verification activate confirm account}";
+  const hint = opts.want === "code" ? "{code passcode verification security}" : "{verify verification activate confirm account workday password reset}";
   try {
     while (Date.now() < deadline) {
       for (const m of await box.list(new Date(opts.since.getTime() - 60_000), 40, hint)) {
@@ -64,7 +76,7 @@ export async function waitForVerification(
           continue;
         }
         const { text, html } = await m.body();
-        const found = opts.want === "code" ? extractCode(`${m.subject}\n${text}`) : extractLink(html, text);
+        const found = opts.want === "code" ? extractCode(`${m.subject}\n${text}`) : extractLink(html, text, opts.host);
         if (found) return found;
         opts.log?.(`    no ${opts.want} in: ${m.from.slice(0, 50)} | ${m.subject.slice(0, 70)} (${text.length} chars)`);
       }

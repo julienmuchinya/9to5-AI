@@ -244,7 +244,7 @@ async function workdayAuth(page: Page, opts: ApplyOpts): Promise<AuthResult> {
     if (!opts.emailLink) return false;
     const resend = page.locator("button:has-text('Resend'), a:has-text('Resend')").first();
     if (await resend.isVisible().catch(() => false)) await resend.click().catch(() => {});
-    const link = await opts.emailLink(since, new RegExp(`workday|${host.split(".")[0]}|verify|confirm|activate|account`, "i")).catch((e) => {
+    const link = await opts.emailLink(since, new RegExp(`workday|${host.split(".")[0]}|verify|confirm|activate|account`, "i"), host).catch((e) => {
       console.log(`[9to5]   verification link lookup failed: ${(e as Error).message}`);
       return null;
     });
@@ -274,7 +274,7 @@ async function workdayAuth(page: Page, opts: ApplyOpts): Promise<AuthResult> {
     await settle(page, 8000);
     await trace(page, "reset requested");
     const link = await opts
-      .emailLink(since, new RegExp(`reset|password|workday|${host.split(".")[0]}`, "i"))
+      .emailLink(since, new RegExp(`reset|password|workday|${host.split(".")[0]}`, "i"), host)
       .catch(() => null);
     if (link) {
       await page.goto(link, { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
@@ -333,7 +333,10 @@ async function workdayAuth(page: Page, opts: ApplyOpts): Promise<AuthResult> {
       if ((await confirmByEmail(new Date(Date.now() - 3 * 86400_000))) && (await signIn()) === "ok") return { ok: true, created: false };
       return {
         ok: false,
-        result: { status: "needs_user", detail: `Your Workday account at ${host} isn't verified yet. Click the link in the email Workday sent to ${portal.email} (or connect Gmail so the agent does it), then Retry.` },
+        // With Gmail connected the agent looks again next run (the email is often late); after 3 tries it comes to the user.
+        result: opts.emailLink
+          ? { status: "failed", detail: `Workday account at ${host} isn't verified yet and the verification email hasn't been found in ${portal.email} — will retry next run` }
+          : { status: "needs_user", detail: `Your Workday account at ${host} isn't verified yet. Click the link in the email Workday sent to ${portal.email} (or connect Gmail on the Autopilot page so the agent does it), then Retry.` },
       };
     }
     if (r === "bad_password" && (await resetPassword()) && (await signIn()) === "ok") return { ok: true, created: false };
@@ -367,7 +370,12 @@ async function workdayAuth(page: Page, opts: ApplyOpts): Promise<AuthResult> {
     }
     if (/(verify|verification|activate|check your (email|inbox)|sent .{0,40}email)/i.test(t)) {
       if (!(await confirmByEmail(since)))
-        return { ok: false, result: { status: "needs_user", detail: `Workday (${host}) emailed you a link to verify the new account. Connect Gmail on the Autopilot page so the agent can click it — or click it yourself, then Retry.`, accountCreated: true } };
+        return {
+          ok: false,
+          result: opts.emailLink
+            ? { status: "failed", detail: `Workday (${host}) account created; its verification email hadn't arrived yet — the agent clicks it on the next run`, accountCreated: true }
+            : { status: "needs_user", detail: `Workday (${host}) emailed you a link to verify the new account. Connect Gmail on the Autopilot page so the agent can click it — or click it yourself, then Retry.`, accountCreated: true },
+        };
       const r = await signIn();
       if (r === "ok") return { ok: true, created: true };
     }
@@ -380,7 +388,11 @@ async function workdayAuth(page: Page, opts: ApplyOpts): Promise<AuthResult> {
   // password that didn't stick. Try the verification email, then a password reset, before asking the user.
   if (r !== "bad_password" && (await confirmByEmail(new Date(Date.now() - 3 * 86400_000))) && (await signIn()) === "ok") return { ok: true, created: false };
   if ((await resetPassword()) && (await signIn()) === "ok") return { ok: true, created: false };
-  return { ok: false, result: { status: "needs_user", detail: `Couldn't sign in to Workday (${host}): ${(await errorsOnPage(page)) || "the sign-in didn't go through and the reset email didn't arrive"}. Use the login under Portal logins, then click Retry.` } };
+  const why = (await errorsOnPage(page)) || "the sign-in didn't go through and the reset email didn't arrive";
+  // Emails from Workday are often minutes late: with Gmail connected, try again next run before asking the user.
+  return opts.emailLink
+    ? { ok: false, result: { status: "failed", detail: `Couldn't sign in to Workday (${host}) yet: ${why} — will retry next run` } }
+    : { ok: false, result: { status: "needs_user", detail: `Couldn't sign in to Workday (${host}): ${why}. Use the login under Portal logins, then click Retry.` } };
 }
 
 /** From the job posting to the application flow (Apply → Apply Manually). */
@@ -601,7 +613,8 @@ export async function applyWorkday(page: Page, db: SupabaseClient, opts: ApplyOp
       lastStep = stepName;
       if (sameStepTries >= 2) {
         const errs = await errorsOnPage(page);
-        return { status: "needs_user", detail: `Workday stopped at "${stepName}"${errs ? `: ${errs}` : ""} — open the application to finish it.`, answers: allAnswers, learned, aiCalls, usedPortalLogin: true, accountCreated };
+        // Often a slow page or a resume still parsing: the run loop retries it (up to 3 tries) before it goes to the user.
+        return { status: "failed", detail: `Workday stopped at "${stepName}"${errs ? `: ${errs}` : ""} — will retry next run`, answers: allAnswers, learned, aiCalls, usedPortalLogin: true, accountCreated };
       }
 
       // Resume upload (My Experience). Workday parses it and pre-fills work history.

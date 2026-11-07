@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { requireUser } from "@/lib/v2/session";
 import { saveProfile, updateCustomAnswers } from "../actions";
 import type { CustomAnswers } from "@/lib/v2/app-questions";
@@ -46,13 +47,16 @@ export default async function ProfilePage() {
       <Section
         className="mb-6"
         icon="1"
-        title="Your resume"
+        title="Main resume"
         description="Upload a PDF. AI reads it once (free tier) and fills the fields below. For each application the agent reorders your real experience so the most relevant parts come first — it never adds anything that isn’t on your resume."
       >
         <ResumeUpload hasResume={Boolean(p?.resume_path)} hasParsed={Boolean(p?.resume_parsed && Object.keys(p.resume_parsed).length)} updatedAt={p?.resume_updated_at ?? null} />
         {p?.resume_path && (
           <p className="mt-3 text-xs text-[var(--muted)]">
-            Found {parsed.experience?.length ?? 0} jobs and {parsed.projects?.length ?? 0} projects.
+            Found {parsed.experience?.length ?? 0} jobs and {parsed.projects?.length ?? 0} projects.{" "}
+            <Link href="/resumes" className="text-[var(--accent)] hover:underline">
+              Keep more resumes and see which one gets responses →
+            </Link>
           </p>
         )}
       </Section>

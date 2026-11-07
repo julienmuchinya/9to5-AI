@@ -4,6 +4,7 @@ import { Badge, Button, Card, PageHeader, StatCard } from "@/components/ui";
 import { dispatchConfigured, nextScheduledRun } from "@/lib/v2/dispatch";
 import { RunNowButton } from "@/components/run-now";
 import { Icon } from "@/components/sidebar";
+import { countPipeline, statusRows } from "@/lib/v2/pipeline";
 
 export const dynamic = "force-dynamic";
 
@@ -11,7 +12,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
   const { supabase, user } = await requireUser();
   const { welcome } = await searchParams;
   const db = serviceClient();
-  const [{ data: p }, { data: s }, { count: matched }, { count: verified }, { data: apps }, { data: runs }, { data: sq }, { data: lastGlobal }, { count: recentErrors }] = await Promise.all([
+  const [{ data: p }, { data: s }, { count: matched }, { count: verified }, apps, { data: runs }, { data: sq }, { data: lastGlobal }, { count: recentErrors }] = await Promise.all([
     supabase.from("profiles").select("first_name,resume_path,resume_parsed,phone,work_authorized_us,sponsorship_needed").eq("id", user.id).maybeSingle(),
     supabase.from("autopilot_settings").select("auto_submit_enabled,paused,daily_apply_cap").eq("user_id", user.id).maybeSingle(),
     supabase.from("jobs").select("id", { count: "exact", head: true }).eq("user_id", user.id).eq("dismissed", false),
@@ -21,7 +22,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
       .eq("user_id", user.id)
       .eq("dismissed", false)
       .eq("job_postings.verification_status", "verified"),
-    supabase.from("applications").select("status").eq("user_id", user.id),
+    statusRows(supabase, user.id),
     supabase.from("agent_runs").select("started_at,status,summary").eq("user_id", user.id).order("started_at", { ascending: false }).limit(5),
     db.from("security_questions").select("user_id").eq("user_id", user.id).maybeSingle(),
     db.from("agent_runs").select("started_at").order("started_at", { ascending: false }).limit(1).maybeSingle(),
@@ -35,8 +36,8 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
     ]);
   }
   const parsed = Boolean(p?.resume_parsed && Object.keys(p.resume_parsed as object).length);
-  const by: Record<string, number> = {};
-  for (const a of apps ?? []) by[a.status] = (by[a.status] ?? 0) + 1;
+  // Same counting as the Applications page (one shared definition).
+  const c = countPipeline(apps);
 
   const hasQ = Boolean(sq);
   const steps = [
@@ -82,9 +83,15 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
 
       <div className="mb-6 grid grid-cols-2 gap-4 md:grid-cols-4">
         <StatCard label="Matched jobs" value={matched ?? 0} sub={`${verified ?? 0} verified employers`} icon={<Icon name="jobs" />} />
-        <StatCard label="Submitted" value={by.submitted ?? 0} variant="success" icon={<Icon name="applications" />} />
-        <StatCard label="Needs you" value={by.needs_user ?? 0} variant={(by.needs_user ?? 0) > 0 ? "warning" : "default"} sub="CAPTCHA or unusual questions" icon={<Icon name="profile" />} />
-        <StatCard label="Queued" value={by.queued ?? 0} sub={`Next run ${nextScheduledRun().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", timeZoneName: "short" })}`} icon={<Icon name="status" />} />
+        <Link href="/applications?tab=sent" className="block rounded-2xl transition hover:opacity-90">
+          <StatCard label="Sent" value={c.sent} variant="success" sub={`${c.inReview} in review · ${c.interviews} interviews`} icon={<Icon name="applications" />} />
+        </Link>
+        <Link href="/applications?tab=needs" className="block rounded-2xl transition hover:opacity-90">
+          <StatCard label="Needs you" value={c.needs} variant={c.needs > 0 ? "warning" : "default"} sub="Questions, sign-ins, CAPTCHAs" icon={<Icon name="profile" />} />
+        </Link>
+        <Link href="/applications?tab=queued" className="block rounded-2xl transition hover:opacity-90">
+        <StatCard label="Queued" value={c.queued} sub={`Next run ${nextScheduledRun().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", timeZoneName: "short" })}`} icon={<Icon name="status" />} />
+        </Link>
       </div>
 
       <div className="grid gap-4 md:grid-cols-2">
@@ -96,7 +103,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
           </div>
           <p className="mt-3 text-sm text-[var(--muted)]">Applies to the freshest postings first, max 5 per company per day.</p>
           <div className="mt-4 flex flex-wrap items-start gap-3">
-            {dispatchConfigured() && <RunNowButton />}
+            {dispatchConfigured() && <RunNowButton running={last?.status === "running"} />}
             <Link href="/settings" className="py-1.5 text-sm text-[var(--accent)] hover:underline">
               Change settings
             </Link>

@@ -50,7 +50,8 @@ export interface ApplyOpts {
   /** Reads a one-time code a site emailed during the application. */
   emailCode?: (since: Date) => Promise<string | null>;
   /** Reads a "verify your account" link a site emailed (Workday account creation). */
-  emailLink?: (since: Date, match: RegExp) => Promise<string | null>;
+  /** `host`: the portal the link should point at (e.g. acme.wd5.myworkdayjobs.com). */
+  emailLink?: (since: Date, match: RegExp, host?: string) => Promise<string | null>;
   /** True when this portal account was already created on an earlier run. */
   accountExists?: boolean;
 }
