@@ -100,3 +100,15 @@ describe('more real-form fixes', () => {
     expect(knownValue(f('What is your expected compensation?', 'text'), a)).toBe('90000');
   });
 });
+
+describe('fields about other things or other people', () => {
+  const a: Applicant = { ...me, email: 'me@x.com', github_url: 'https://github.com/me' };
+  it('a question mentioning "website" is not the website field', () => {
+    expect(knownValue(f("Have You Been Previously Employed By KLA? (If you're a current KLA employee, please do NOT use this application process. Apply on our internal website.)", 'radio', ['Yes', 'No']), a)).not.toBe('https://github.com/me');
+    expect(knownValue(f('Portfolio URL', 'text'), a)).toBe('https://github.com/me');
+  });
+  it("the referrer's email is not mine", () => {
+    expect(knownValue(f("What's their name or email address?", 'text'), a)).toBeNull();
+    expect(knownValue(f('Email', 'text'), a)).toBe('me@x.com');
+  });
+});

@@ -79,7 +79,7 @@ export interface Field {
 const STAND_OUT = /(why (do you|are you|this|our|us)|cover letter|anything else|additional (information|comments)|tell us|what (excites|interests)|interest(ed)? in)/i;
 /** Confirmation wording across ATSs ("Thank you for applying", Ashby "Thanks so much for applying", Lever "Thanks for applying!"…). */
 export const SUCCESS =
-  /thank(s| you)( so much| very much)? for (applying|your (application|interest|submission)|submitting)|application (has been |was )?(successfully )?(received|submitted|sent)|we('|’)ve (successfully )?received your application|we have (successfully )?received your application|successfully (submitted|applied)|application submitted|congratulations[^.]{0,40}(submitted|applied)|you('|’)ve (successfully )?applied|your application is (in|complete)/i;
+  /thank(s| you)( so much| very much)? for (applying|your (application|submission)|submitting)|application (has been |was )?(successfully )?(received|submitted|sent)|we('|’)ve (successfully )?received your application|we have (successfully )?received your application|successfully (submitted|applied)|application submitted|congratulations[^.]{0,40}(submitted|applied)|you('|’)ve (successfully )?applied|your application is (in|complete)/i;
 const CLOSED = /no longer (accepting|available|open)|job (is )?(closed|not found)|position has been filled|page (you('|’)re looking for )?(could not be|not) found/i;
 
 function applyUrlFor(ats: string, url: string): string {
@@ -312,7 +312,9 @@ export function knownValue(f: Field, a: Applicant): string | null {
   if (/last name|family name|surname/.test(l)) return a.last_name;
   if (/^(full )?name\b|your name|legal name/.test(l) && !/company|school|reference|employer/.test(l)) return `${a.first_name} ${a.last_name}`;
   // The email address goes only into a text box that asks for it — not into consent dropdowns that mention email.
-  if (/e-?mail/.test(l) && f.kind === "text" && l.length < 80) return a.portal?.email && /account|login|user/.test(l) ? a.portal.email : a.email;
+  // …and never into a question about someone else ("What's their name or email address?" = the referrer).
+  const aboutSomeoneElse = /\b(their|referr\w*|who referred|reference|recruiter|manager|supervisor|emergency)\b/.test(l);
+  if (/e-?mail/.test(l) && f.kind === "text" && l.length < 80 && !aboutSomeoneElse) return a.portal?.email && /account|login|user/.test(l) ? a.portal.email : a.email;
   // \b so "phonetic" or "mobile apps" don't count as a phone field.
   // Not "Phone Device Type", "Country Phone Code" or "Phone Extension" — those aren't the number.
   if (
@@ -330,7 +332,8 @@ export function knownValue(f: Field, a: Applicant): string | null {
   const howHeard = /(hear|learn|find out|found|source|referr)/.test(l);
   if (/linkedin/.test(l) && !howHeard && f.kind !== "select" && f.kind !== "radio") return a.linkedin_url ?? null;
   if (/github/.test(l) && !howHeard) return a.github_url ?? null;
-  if (/website|portfolio|personal (site|url)/.test(l)) return a.website_url ?? a.github_url ?? null;
+  // A link only goes into a short text field that asks for one — not a question that merely mentions "website".
+  if (/website|portfolio|personal (site|url)/.test(l) && f.kind === "text" && l.length < 60 && !/\?/.test(l)) return a.website_url ?? a.github_url ?? null;
   if ((/^(current )?(location|city)\b|where are you (located|based)/.test(l) || /city.{0,10}state/.test(l)) && f.kind !== "radio" && f.kind !== "checkbox")
     return [a.city, a.state].filter(Boolean).join(", ") || null;
   if (/^state\b|state of residence|province/.test(l) && f.kind !== "radio" && a.state) return f.options.length ? pickOption(a.state, f.options) : a.state;
@@ -534,7 +537,7 @@ export async function readComboboxOptions(page: Page, fields: Field[]) {
 async function saveDebug(context: import("playwright").BrowserContext, company: string, r: ApplyResult) {
   const dir = process.env.APPLY_DEBUG_DIR;
   // Successes need no evidence; everything else gets a screenshot to diagnose from.
-  if (!dir || r.status === "submitted" || r.status === "closed") return;
+  if (!dir || ((r.status === "submitted" || r.status === "closed") && !process.env.APPLY_DEBUG_ALL)) return;
   try {
     const { mkdirSync, writeFileSync } = await import("fs");
     mkdirSync(dir, { recursive: true });

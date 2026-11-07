@@ -15,6 +15,14 @@ const WD = (id: string) => `[data-automation-id="${id}"]`;
 const AUTH_FORM = [WD("createAccountSubmitButton"), WD("signInSubmitButton"), WD("signInContent")].join(", ");
 const NEXT = [WD("pageFooterNextButton"), WD("bottom-navigation-next-button"), "button:has-text('Save and Continue')", "button:has-text('Next')"].join(", ");
 const ERRORS = [WD("errorMessage"), WD("errorBanner"), "[role=alert]"].join(", ");
+/** "Sign in with email" on portals that lead with social logins (never use Google/LinkedIn/Apple sign-in). */
+const EMAIL_SIGN_IN = [WD("SignInWithEmailButton"), WD("signInWithEmailButton"), "button:has-text('Sign in with email')", "a:has-text('Sign in with email')"].join(", ");
+async function chooseEmailSignIn(page: Page) {
+  if (!(await visible(page, EMAIL_SIGN_IN))) return;
+  await mouseClick(page, EMAIL_SIGN_IN);
+  await page.locator(`${WD("email")}, ${AUTH_FORM}`).first().waitFor({ state: "visible", timeout: 8000 }).catch(() => {});
+  await page.waitForTimeout(600);
+}
 
 /** Debug trace of the Workday flow (only with APPLY_DEBUG_DIR). */
 async function trace(page: Page, what: string) {
@@ -190,9 +198,11 @@ async function workdayAuth(page: Page, opts: ApplyOpts): Promise<AuthResult> {
   const host = new URL(page.url()).host;
 
   const signIn = async (): Promise<"ok" | "bad_password" | "unverified" | "unknown"> => {
+    await chooseEmailSignIn(page);
     if (!(await visible(page, WD("signInSubmitButton"))) && (await visible(page, WD("signInLink")))) {
       await clickWd(page, "signInLink");
       await page.waitForTimeout(1500);
+      await chooseEmailSignIn(page);
       await trace(page, "after Sign In link");
     }
     await fillVisible(page, WD("email"), portal.email);
@@ -232,11 +242,13 @@ async function workdayAuth(page: Page, opts: ApplyOpts): Promise<AuthResult> {
 
   // Workday renders the sign-in form (or the first step, if already signed in) a few seconds after load.
   await page
-    .locator(`${AUTH_FORM}, ${NEXT}, ${WD("signInLink")}, ${WD("createAccountLink")}`)
+    .locator(`${AUTH_FORM}, ${NEXT}, ${WD("signInLink")}, ${WD("createAccountLink")}, ${EMAIL_SIGN_IN}`)
     .first()
     .waitFor({ state: "visible", timeout: 15000 })
     .catch(() => {});
   await page.waitForTimeout(800);
+  // Some portals first offer "Sign in with Google / LinkedIn / Apple — OR — Sign in with email": always email.
+  await chooseEmailSignIn(page);
   await trace(page, "auth start");
   const onAuth = (await visible(page, AUTH_FORM)) || ((await visible(page, WD("signInLink"))) && !(await visible(page, NEXT)));
   if (!onAuth) {
@@ -439,6 +451,7 @@ export async function applyWorkday(page: Page, db: SupabaseClient, opts: ApplyOp
     let lastStep = "";
     let sameStepTries = 0;
     let reloads = 0;
+    let submittedClick = false;
     for (let step = 0; step < 14; step++) {
       await page.waitForTimeout(2500);
       let body = await text(page);
@@ -450,7 +463,11 @@ export async function applyWorkday(page: Page, db: SupabaseClient, opts: ApplyOp
         sameStepTries = 0;
         body = await text(page);
       }
-      if (SUCCESS.test(body) || /application (was )?submitted|you('|’)ve applied/i.test(body))
+      // Before our own Submit click, only an explicit "already applied" notice counts — welcome text such as
+      // "Thank you for your interest in …" on the first step is not a confirmation (Highmark false positive).
+      if (/you('|’)ve already applied|already applied (for|to) this (job|position)|you have already applied/i.test(body))
+        return { status: "submitted", detail: "Already applied to this job on Workday", answers: allAnswers, learned, aiCalls, usedPortalLogin: true, accountCreated };
+      if (step > 0 && submittedClick && SUCCESS.test(body))
         return { status: "submitted", detail: "Application submitted on Workday", answers: allAnswers, learned, aiCalls, usedPortalLogin: true, accountCreated };
       if (await captchaVisible(page)) return { status: "needs_user", detail: "Workday shows a CAPTCHA — please finish this one yourself", answers: allAnswers, learned, aiCalls, usedPortalLogin: true, accountCreated };
 
@@ -585,6 +602,7 @@ export async function applyWorkday(page: Page, db: SupabaseClient, opts: ApplyOp
 
       // Review → Submit.
       if (opts.dryRun) return { status: "needs_user", detail: "Dry run: Workday application filled up to Review, not submitted", answers: allAnswers, learned, aiCalls, usedPortalLogin: true, accountCreated };
+      submittedClick = true;
       if (!(await mouseClick(page, `${WD("pageFooterNextButton")}, button:has-text('Submit')`))) return { status: "needs_user", detail: "Couldn't find Workday's Submit button", answers: allAnswers, learned, aiCalls, usedPortalLogin: true, accountCreated };
       await page.waitForTimeout(6000);
       const after = await text(page);
