@@ -101,7 +101,9 @@ export async function gmailSearch(token: string, q: string, max = 100): Promise<
       token,
       `messages?${new URLSearchParams({ q, maxResults: String(Math.min(100, max - out.length)), ...(pageToken ? { pageToken } : {}) })}`
     );
-    for (const m of list.messages ?? []) {
+    for (const [i, m] of (list.messages ?? []).entries()) {
+      // Gentle pacing: Gmail's per-user quota is per minute; bursts of metadata reads trip it.
+      if (i > 0 && process.env.NODE_ENV !== "test" && !process.env.VITEST) await new Promise((r) => setTimeout(r, 150));
       const meta = await gmailGet<{ id: string; internalDate?: string; payload?: { headers?: { name: string; value: string }[] } }>(
         token,
         `messages/${m.id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date`
