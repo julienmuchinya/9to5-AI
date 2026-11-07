@@ -22,6 +22,9 @@ describe("verification emails", () => {
     const html = `<a href="https://x.com/unsubscribe?u=1">Unsubscribe</a><a href="https://acme.wd5.myworkdayjobs.com/verify?token=abc&amp;x=1">Verify account</a>`;
     expect(extractLink(html)).toBe("https://acme.wd5.myworkdayjobs.com/verify?token=abc&x=1");
   });
+  it("finds password-reset links", () => {
+    expect(extractLink('<a href="https://acme.wd5.myworkdayjobs.com/en-US/External/passwordReset?token=abc">Reset password</a>')).toContain("passwordReset");
+  });
   it("explains a rejected Gmail password", () => {
     expect(inboxErrorMessage({ message: "Command failed", responseText: "Invalid credentials (Failure)", authenticationFailed: true })).toMatch(/16-letter Gmail app password/);
   });

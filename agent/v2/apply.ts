@@ -2,6 +2,7 @@ import type { Browser, Page } from "playwright";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { geminiJson, FreeTierLimitError } from "../../src/lib/v2/gemini";
 import { applyWorkday } from "./workday";
+import { answerPrompt, salaryFacts } from "./answer-ai";
 import { answerFromProfile, commonSenseAnswer, findSimilarAnswer, memoryKey, pickOption, questionFor, type AppAnswers, type PendingQuestion } from "../../src/lib/v2/app-questions";
 
 export interface Applicant {
@@ -361,10 +362,17 @@ export function knownValue(f: Field, a: Applicant): string | null {
   }
   if (/relocat/.test(l) && !a.answers?.willing_to_relocate && a.relocation != null) return yesNo(f, a.relocation);
   if (/commut/.test(l)) return null;
-  const saved = answerFromProfile(f.label, f.options, a.answers ?? {});
-  if (saved) return saved;
-  // Same common question, different wording ("expected compensation" ≈ "Desired Pay" the user answered).
   const key = questionFor(f.label)?.key;
+  const saved = answerFromProfile(f.label, f.options, a.answers ?? {});
+  // "Referral" as the saved source means "use the best option": a referral choice makes forms ask for the
+  // referrer's name, so pick LinkedIn / a job board instead (applicant's instruction).
+  if (saved && !(key === "how_heard" && /referr/i.test(saved))) return saved;
+  // Pay as a plain number (numeric-only fields reject "Negotiable"): the user's figure, else 90,000.
+  if (key === "desired_salary" && (f.kind === "text" || f.kind === "textarea")) {
+    const pay = salaryFacts(a.answers ?? {}, a.custom ?? {});
+    return /hour|hourly|per hour/i.test(l) && !/salary or hourly|annual/i.test(l) ? String(pay.hourly_rate_usd) : String(pay.annual_salary_usd);
+  }
+  // Same common question, different wording ("expected compensation" ≈ "Desired Pay" the user answered).
   if (key && a.custom) {
     for (const [q, ans] of Object.entries(a.custom)) {
       if (ans && questionFor(q)?.key === key) {
@@ -577,7 +585,8 @@ export async function answerFields(
     const learned: { label: string; answer: string }[] = [];
     const required = unknown.filter((f) => f.required && f.kind !== "file" && !f.filled);
     const standOut = unknown.filter((f) => !f.required && (f.kind === "textarea" || STAND_OUT.test(f.label)) && f.kind !== "file" && !/password/i.test(f.label));
-    const needAi = required.length ? [...required, ...standOut.slice(0, 3)] : [];
+    const optionalChoices = unknown.filter((f) => !f.required && !f.filled && f.options.length > 0 && f.kind !== "checkbox" && !/(pronoun|preferred name|middle name|suffix|prefix)/i.test(f.label));
+    const needAi = required.length || optionalChoices.length ? [...required, ...optionalChoices.slice(0, 10), ...standOut.slice(0, 3)] : [];
     if (needAi.length) {
       const facts = {
         name: `${opts.applicant.first_name} ${opts.applicant.last_name}`,
@@ -586,7 +595,9 @@ export async function answerFields(
         graduation: opts.applicant.graduation_date,
         authorized_to_work_in_us: opts.applicant.work_authorized_us,
         needs_visa_sponsorship: opts.applicant.sponsorship_needed,
-        willing_to_relocate: opts.applicant.relocation,
+        willing_to_relocate: opts.applicant.relocation ?? true,
+        preferences: salaryFacts(opts.applicant.answers ?? {}, opts.applicant.custom ?? {}),
+        jobs: (opts.applicant.experience ?? []).map((e) => `${e.title} @ ${e.company} (${e.start ?? "?"} – ${e.end ?? "?"})`),
         saved_answers: opts.applicant.answers ?? {},
         resume: opts.applicant.resume_text.slice(0, 6000),
         job_description: (opts.jobDescription ?? "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").slice(0, 3500),
@@ -595,24 +606,13 @@ export async function answerFields(
         aiCalls++;
         const ai = await geminiJson<Record<string, string | null>>(
           db,
-          `You fill job application questions for ${facts.name}, applying to "${opts.jobTitle}" at ${opts.company}.
-GOAL: answers that make a recruiter put this applicant in the top pile — specific, confident, matched to the job description.
-RULES:
-- Use ONLY the facts below (saved_answers are the applicant's own answers to common questions). Never invent experience, numbers, dates, employers or skills.
-- Skill/experience screening questions ("Do you have experience with X?", "Years of Y?"): answer from the resume; if the resume clearly shows it, answer in the applicant's favour. If it doesn't, return null so the applicant answers it themselves.
-- Use common sense like a careful human applicant: never claim a referral, a relationship to employees, past employment there, a certification or a clearance that isn't in the facts. "How did you hear about us" → LinkedIn or the company website. Required consents/acknowledgements → yes.
-- If a question can't be answered truthfully from the facts, return null for it. Personal facts (dates, salary, location preferences, relationships to employees) are null unless in the facts.
-- Voluntary demographic/EEO questions: use saved_answers if present, otherwise pick the "decline to self-identify"/"prefer not to say" option.
-- Work authorization and sponsorship must match the facts exactly; if they are null, return null.
-- For select/radio questions, return one of the listed options exactly. For "checkboxes" (pick any), return the fitting options exactly, comma separated.
-- Checkbox: return "yes" only for required acknowledgements/consents to apply or privacy policies.
-- Free-text questions about experience, projects, tools, skills or motivation (textarea/text): ALWAYS answer (never null) in first person from the resume — pick the most relevant real project/experience; if the resume has nothing specific, answer honestly with the closest relevant experience and eagerness to learn.
-- Education / work-history dates ("Education — Start Date (year)"): take them from the resume (graduation = end date). For (month)/(year) parts return just that part as listed in the options.
-- Commute questions ("able to commute to <place>?"): Yes only if the applicant's location is in the same metro area as the job; otherwise No. Relocation questions follow willing_to_relocate.
-- Free-text ("why this company", "anything else", "cover letter"): 3-5 sentences in first person. Name the role and company, connect 2-3 concrete resume achievements/skills to what the job description asks for, end with enthusiasm. No clichés, no placeholders.
-FACTS: ${JSON.stringify(facts)}
-QUESTIONS: ${JSON.stringify(needAi.map((f) => ({ id: f.id, question: f.label, type: f.kind, options: f.options, required: f.required })))}
-Return JSON: {"<id>": "<answer or null>"}`,
+          answerPrompt({
+            name: facts.name,
+            jobTitle: opts.jobTitle,
+            company: opts.company,
+            facts,
+            questions: needAi.map((f) => ({ id: f.id, question: f.label, type: f.kind, options: f.options, required: f.required })),
+          }),
           [],
           opts.userId
         );

@@ -26,6 +26,7 @@ import { applyToJob, type Applicant } from "./apply";
 import { scanInbox } from "./inbox";
 import { waitForVerification } from "./mailcode";
 import { openMailbox } from "./mailbox";
+import { answerWaitingQuestions } from "./backfill";
 import { resumeFocus } from "../../src/lib/v2/tracking";
 import { decryptSecret, encryptSecret, generatePortalPassword } from "../../src/lib/v2/vault";
 import { COMPANY_DAILY_CAP, companyKey, planQueue } from "../../src/lib/v2/priority";
@@ -333,6 +334,35 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
   const firstName = u.first_name || first;
   const lastName = u.last_name || rest.join(" ");
   if (!email || !firstName || !lastName) return { missing_contact: 1 };
+
+  // Answer everything the "Needs you" pile is waiting on (one AI call per ~30 distinct questions) and requeue it.
+  if (env("ANSWER_WAITING", "true") !== "false") {
+    const filled = await answerWaitingQuestions(
+      sb,
+      u.id,
+      {
+        name: `${firstName} ${lastName}`,
+        facts: {
+          location: [u.city, u.state].filter(Boolean).join(", "),
+          school: u.school,
+          graduation: u.graduation_date,
+          authorized_to_work_in_us: u.work_authorized_us,
+          needs_visa_sponsorship: u.sponsorship_needed,
+          willing_to_relocate: u.relocation ?? true,
+          jobs: (u.resume_parsed?.experience ?? []).map((e) => `${e.title} @ ${e.company} (${e.start ?? "?"} – ${e.end ?? "?"})`),
+          resume: u.resume_parsed ? resumeToText(u.resume_parsed).slice(0, 5000) : "",
+        },
+        memory: u.answer_memory ?? {},
+        custom: customStore(u.custom_answers),
+        answers: u.application_answers ?? {},
+      },
+      (m) => log(m),
+      dryRun
+    );
+    u.answer_memory = filled.memory;
+    if (filled.aiCalls) result.ai_calls = (result.ai_calls ?? 0) + filled.aiCalls;
+    if (filled.requeued) result.requeued_from_needs_you = filled.requeued;
+  }
 
   // Candidates: everything the user queued + the agent's best verified matches.
   // Queued jobs, plus earlier attempts that crashed (up to 3 tries) — otherwise a bad run loses them for good.

@@ -38,7 +38,7 @@ export function extractCode(text: string): string | null {
 export function extractLink(html: string, text = ""): string | null {
   const hrefs = [...html.matchAll(/href=["']([^"']+)["']/gi)].map((x) => x[1].replace(/&amp;/g, "&"));
   const urls = [...hrefs, ...(text.match(/https?:\/\/[^\s<>"')]+/g) ?? [])];
-  return urls.find((u) => /^https?:/.test(u) && /(verif|confirm|activat|validate|email-?token|registration)/i.test(u) && !/unsubscribe|privacy|help/i.test(u)) ?? null;
+  return urls.find((u) => /^https?:/.test(u) && /(verif|confirm|activat|validate|email-?token|registration|reset|passwordchange|change-?password|forgot)/i.test(u) && !/unsubscribe|privacy|help/i.test(u)) ?? null;
 }
 
 /**

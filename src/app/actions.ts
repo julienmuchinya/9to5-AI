@@ -257,3 +257,32 @@ export async function disconnectInbox() {
   await supabase.from("profiles").update({ inbox_email: null, inbox_host: null, inbox_password_enc: null, inbox_error: null, inbox_last_scan_at: null }).eq("id", user.id);
   revalidatePath("/settings");
 }
+
+const BULK_ACTIONS = ["retry", "applied", "rejected", "withdrawn", "delete"] as const;
+
+/** Applications page: one action on many selected applications. */
+export async function bulkApplications(form: FormData) {
+  const { supabase, user } = await requireUser();
+  const ids = [...new Set(form.getAll("ids").map(String).filter((x) => /^[0-9a-f-]{36}$/i.test(x)))].slice(0, 500);
+  const action = String(form.get("action") ?? "") as (typeof BULK_ACTIONS)[number];
+  const back = String(form.get("back") ?? "/applications");
+  const done = (m: string) => redirect(`${back.startsWith("/applications") ? back.split("#")[0] : "/applications"}${back.includes("?") ? "&" : "?"}msg=${encodeURIComponent(m)}`);
+  if (!ids.length) done("Select at least one application first.");
+  if (!BULK_ACTIONS.includes(action)) done("Pick an action.");
+  const now = new Date().toISOString();
+  const scope = () => supabase.from("applications");
+  if (action === "retry") {
+    await scope().update({ status: "queued", error: null, attempts: 0, pending_questions: null, status_updated_at: now }).in("id", ids).eq("user_id", user.id);
+  } else if (action === "applied") {
+    await scope().update({ status: "submitted", submitted_at: now, status_updated_at: now, error: null, pending_questions: null }).in("id", ids).eq("user_id", user.id);
+    await supabase.from("application_events").insert(ids.map((id) => ({ user_id: user.id, application_id: id, kind: "submitted", source: "user", detail: "Marked as applied" })));
+  } else if (action === "rejected" || action === "withdrawn") {
+    await scope().update({ status: action, status_updated_at: now, pending_questions: null }).in("id", ids).eq("user_id", user.id);
+    await supabase.from("application_events").insert(ids.map((id) => ({ user_id: user.id, application_id: id, kind: action, source: "user", detail: "Updated from the Applications page" })));
+  } else if (action === "delete") {
+    await scope().delete().in("id", ids).eq("user_id", user.id);
+  }
+  revalidatePath("/applications");
+  const label = { retry: "back in the queue", applied: "marked as applied", rejected: "marked rejected", withdrawn: "withdrawn", delete: "deleted" }[action];
+  done(`${ids.length} application${ids.length === 1 ? "" : "s"} ${label}.`);
+}

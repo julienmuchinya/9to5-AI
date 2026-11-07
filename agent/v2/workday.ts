@@ -240,6 +240,52 @@ async function workdayAuth(page: Page, opts: ApplyOpts): Promise<AuthResult> {
     return true;
   };
 
+  /**
+   * Saved password rejected → "Forgot your password?": request the reset email, open its link (or type its
+   * code), set the password to the saved portal password, then come back to the job and sign in.
+   */
+  const resetPassword = async (): Promise<boolean> => {
+    if (!opts.emailLink) return false;
+    const forgot = `${WD("forgotPasswordLink")}, button:has-text('Forgot your password'), a:has-text('Forgot your password'), a:has-text('Forgot Password')`;
+    if (!(await visible(page, forgot))) return false;
+    await mouseClick(page, forgot);
+    await page.waitForTimeout(1500);
+    await fillVisible(page, `${WD("email")}, input[type=email]`, portal.email);
+    const since = new Date();
+    const send = `${WD("resetPasswordButton")}, ${WD("forgotPasswordSubmitButton")}, button:has-text('Reset'), button:has-text('Submit'), button:has-text('Send'), button:has-text('Continue')`;
+    await mouseClick(page, send);
+    await settle(page, 8000);
+    await trace(page, "reset requested");
+    const link = await opts
+      .emailLink(since, new RegExp(`reset|password|workday|${host.split(".")[0]}`, "i"))
+      .catch(() => null);
+    if (link) {
+      await page.goto(link, { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
+      await settle(page, 10000);
+    } else if (opts.emailCode && (await visible(page, "input[autocomplete='one-time-code'], input[name*=code i], input[aria-label*=code i]"))) {
+      const code = await opts.emailCode(since).catch(() => null);
+      if (!code) return false;
+      await fillVisible(page, "input[autocomplete='one-time-code'], input[name*=code i], input[aria-label*=code i]", code);
+    } else return false;
+    // New password + confirmation (Workday: password / verifyPassword; other pages: two password boxes).
+    const boxes = page.locator("input[type=password]");
+    const n = Math.min(await boxes.count().catch(() => 0), 4);
+    let filledBoxes = 0;
+    for (let i = 0; i < n; i++) {
+      if (!(await boxes.nth(i).isVisible().catch(() => false))) continue;
+      await boxes.nth(i).fill(portal.password).catch(() => {});
+      filledBoxes++;
+    }
+    if (!filledBoxes) return false;
+    await mouseClick(page, `${WD("resetPasswordSubmitButton")}, ${WD("changePasswordSubmitButton")}, button:has-text('Reset'), button:has-text('Change'), button:has-text('Save'), button:has-text('Submit'), button:has-text('Continue')`);
+    await settle(page, 10000);
+    await trace(page, "password reset submitted");
+    await page.goto(opts.url, { waitUntil: "domcontentloaded", timeout: 30000 });
+    await page.waitForTimeout(2500);
+    await startApplication(page);
+    return true;
+  };
+
   // Workday renders the sign-in form (or the first step, if already signed in) a few seconds after load.
   await page
     .locator(`${AUTH_FORM}, ${NEXT}, ${WD("signInLink")}, ${WD("createAccountLink")}, ${EMAIL_SIGN_IN}`)
@@ -273,6 +319,7 @@ async function workdayAuth(page: Page, opts: ApplyOpts): Promise<AuthResult> {
         result: { status: "needs_user", detail: `Your Workday account at ${host} isn't verified yet. Click the link in the email Workday sent to ${portal.email} (or connect Gmail so the agent does it), then Retry.` },
       };
     }
+    if (r === "bad_password" && (await resetPassword()) && (await signIn()) === "ok") return { ok: true, created: false };
     if (r === "bad_password")
       return { ok: false, result: { status: "needs_user", detail: `Workday (${host}) rejected the saved password. Use "Forgot your password?" there and set it to the password shown under Portal logins, then click Retry.` } };
   }
@@ -297,6 +344,7 @@ async function workdayAuth(page: Page, opts: ApplyOpts): Promise<AuthResult> {
     if (/already (exists|in use|registered|been used)|account with this email/i.test(t)) {
       const r = await signIn();
       if (r === "ok") return { ok: true, created: false };
+      if (r === "bad_password" && (await resetPassword()) && (await signIn()) === "ok") return { ok: true, created: false };
       if (r === "bad_password")
         return { ok: false, result: { status: "needs_user", detail: `You already have a Workday account at ${host} with a different password. Use "Forgot your password?" there and set it to the password under Portal logins, then click Retry.` } };
     }

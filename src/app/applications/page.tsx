@@ -3,6 +3,7 @@ import { requireUser } from "@/lib/v2/session";
 import { Badge, Card, EmptyState, Notice, PageHeader, StatCard, TabLink, buttonCls } from "@/components/ui";
 import { customStore, findSimilarAnswer, questionSimilarity, type CustomAnswers, type PendingQuestion } from "@/lib/v2/app-questions";
 import { PendingQuestions, type AskedQuestion } from "./pending-questions";
+import { BulkBar } from "./bulk-bar";
 import { STAGE_LABEL, roleFamily } from "@/lib/v2/tracking";
 import { ago } from "@/lib/v2/priority";
 import { dispatchConfigured, nextScheduledRun } from "@/lib/v2/dispatch";
@@ -45,9 +46,9 @@ const hostOf = (u: string | null | undefined) => {
 const readable = (answers: Record<string, string> | null) =>
   Object.entries(answers ?? {}).filter(([q, v]) => v && v !== "__RESUME__" && !/^f\d+(_\d+)?$/.test(q));
 
-export default async function ApplicationsPage({ searchParams }: { searchParams: Promise<{ tab?: string; msg?: string }> }) {
+export default async function ApplicationsPage({ searchParams }: { searchParams: Promise<{ tab?: string; msg?: string; sort?: string }> }) {
   const { supabase, user } = await requireUser();
-  const { tab = "active", msg } = await searchParams;
+  const { tab = "active", msg, sort = "newest" } = await searchParams;
   const [{ data }, { data: evs }, { data: logins }, { data: lastRun }, { data: prof }] = await Promise.all([
     supabase
       .from("applications")
@@ -126,6 +127,15 @@ export default async function ApplicationsPage({ searchParams }: { searchParams:
     if (tab === "rejected") return r.status === "rejected";
     if (tab === "active") return ["queued", "submitted", "received", "under_review"].includes(r.status);
     return true;
+  });
+  const STATUS_ORDER = ["needs_user", "failed", "queued", "submitted", "received", "under_review", "interview", "offer", "rejected", "withdrawn", "closed"];
+  const time = (x: string | null | undefined) => (x ? Date.parse(x) : 0);
+  filtered.sort((a, b) => {
+    if (sort === "oldest") return time(a.created_at) - time(b.created_at);
+    if (sort === "company") return (a.jobs?.company_name ?? "").localeCompare(b.jobs?.company_name ?? "") || time(b.created_at) - time(a.created_at);
+    if (sort === "status") return STATUS_ORDER.indexOf(a.status) - STATUS_ORDER.indexOf(b.status) || time(b.created_at) - time(a.created_at);
+    if (sort === "posted") return time(b.jobs?.job_postings?.posted_at) - time(a.jobs?.job_postings?.posted_at);
+    return time(b.created_at) - time(a.created_at);
   });
 
   return (
@@ -216,7 +226,7 @@ export default async function ApplicationsPage({ searchParams }: { searchParams:
 
       <div className="mb-4 flex flex-wrap gap-1.5">
         {TABS.map(([k, label]) => (
-          <TabLink key={k} href={`?tab=${k}`} active={tab === k}>
+          <TabLink key={k} href={`?tab=${k}&sort=${sort}`} active={tab === k}>
             {label}
             {k === "needs" && count(["needs_user"]) > 0 ? ` (${count(["needs_user"])})` : ""}
             {k === "queued" && queuedCount > 0 ? ` (${queuedCount})` : ""}
@@ -226,6 +236,8 @@ export default async function ApplicationsPage({ searchParams }: { searchParams:
 
       {rows.length === 0 && <EmptyState message="No applications yet. Click Apply on a matched job, ask in Chat, or turn on auto-submit." />}
       {rows.length > 0 && filtered.length === 0 && <EmptyState message="Nothing here right now." />}
+
+      {filtered.length > 0 && <BulkBar back={`/applications?tab=${tab}&sort=${sort}`} sort={sort} />}
 
       <div className="space-y-3">
         {filtered.map((r) => {
@@ -238,6 +250,14 @@ export default async function ApplicationsPage({ searchParams }: { searchParams:
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-2">
+                    <input
+                      type="checkbox"
+                      form="bulk"
+                      name="ids"
+                      value={r.id}
+                      aria-label={`Select ${r.jobs?.title ?? "application"} at ${r.jobs?.company_name ?? ""}`}
+                      className="h-4 w-4 accent-[var(--accent)]"
+                    />
                     <p className="font-medium">{r.jobs?.title ?? "Job"}</p>
                     <Badge variant={VARIANT[r.status] ?? "default"}>{STAGE_LABEL[r.status] ?? r.status}</Badge>
                   </div>
