@@ -104,7 +104,7 @@ export async function aiTailorResume(db: SupabaseClient, r: ParsedResume, job: {
   const exp = r.experience ?? [];
   const proj = r.projects ?? [];
   const prompt = `You tailor a resume to one job without lying. Job: "${job.title}" at ${job.company}.
-JOB DESCRIPTION: ${job.description.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").slice(0, 3500)}
+JOB DESCRIPTION: ${job.description.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").slice(0, 2500)}
 RESUME BULLETS (JSON): ${JSON.stringify({ experience: exp.map((e) => ({ company: e.company, title: e.title, bullets: e.bullets })), projects: proj.map((p) => ({ name: p.name, bullets: p.bullets })) })}
 SKILLS: ${JSON.stringify(r.skill_groups?.length ? r.skill_groups : r.skills ?? [])}
 RULES:
@@ -113,7 +113,7 @@ RULES:
 - Mark the 1-3 most job-relevant phrases in each bullet with **double asterisks**.
 - Skills: reorder so the job's most-wanted ones come first; keep the same groups.
 Return JSON: {"experience":[{"bullets":[...]}...], "projects":[{"bullets":[...]}...], "skills": <same shape as SKILLS>}`;
-  const out = await geminiJson<{ experience?: { bullets?: string[] }[]; projects?: { bullets?: string[] }[]; skills?: unknown }>(db, prompt, [], userId, { prefer: "fallback-only" });
+  const out = await geminiJson<{ experience?: { bullets?: string[] }[]; projects?: { bullets?: string[] }[]; skills?: unknown }>(db, prompt, [], userId, { prefer: "fallback-only", maxTokens: 1500 });
   const allText = `${resumeToText(r)} ${(r.skills ?? []).join(" ")} ${(r.skill_groups ?? []).flatMap((g) => g.items).join(" ")}`.toLowerCase();
   const allNums = numbers(allText);
   const ok = (orig: string, next: unknown): string => {

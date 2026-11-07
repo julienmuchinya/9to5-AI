@@ -48,8 +48,9 @@ export async function answerWaitingQuestions(
     }
 
   const list = [...generic.entries()];
-  for (let i = 0; i < list.length; i += 30) {
-    const batch = list.slice(i, i + 30);
+  // 15 per call keeps each prompt under Groq's 8,000 tokens/minute.
+  for (let i = 0; i < list.length; i += 15) {
+    const batch = list.slice(i, i + 15);
     try {
       out.aiCalls++;
       const ai = await geminiJson<Record<string, string | null>>(
@@ -57,10 +58,11 @@ export async function answerWaitingQuestions(
         answerPrompt({
           name: ctx.name,
           facts: { ...ctx.facts, saved_answers: ctx.answers, preferences: salaryFacts(ctx.answers, ctx.custom) },
-          questions: batch.map(([k, q], n) => ({ id: `q${n}`, question: q.label, type: q.kind, options: q.options ?? [], required: true })),
+          questions: batch.map(([k, q], n) => ({ id: `q${n}`, question: q.label, type: q.kind, options: (q.options ?? []).slice(0, 40), required: true })),
         }),
         [],
-        userId
+        userId,
+        { prefer: "fallback", maxTokens: 2500 }
       );
       batch.forEach(([k, q], n) => {
         const v = ai[`q${n}`];

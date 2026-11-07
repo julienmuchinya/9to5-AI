@@ -1,6 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { bumpUsage, checkGemini, FREE_LIMITS } from "./freeTier";
-import { fallbackConfigured, fallbackJson } from "./fallback-ai";
+import { fallbackAvailable, fallbackConfigured, fallbackJson } from "./fallback-ai";
 
 const API = "https://generativelanguage.googleapis.com/v1beta/models";
 /**
@@ -140,30 +140,35 @@ export async function geminiGenerate(
 const parseJson = <T,>(text: string): T => JSON.parse(text.replace(/^```(?:json)?\s*|\s*```$/g, "").trim()) as T;
 
 /**
- * Ask for JSON and parse it. Uses Gemini first; when Gemini's free quota is used up (or Google is down)
- * and a backup provider is configured (GROQ_API_KEY / OPENROUTER_API_KEY), the same prompt goes there.
- * `prefer: "fallback"` sends text-only work to the backup first, to save Gemini for PDFs and chat.
- * PDFs (inlineData) need Gemini — the backups only read text.
+ * Ask for JSON and parse it.
+ *  prefer "gemini" (default): Gemini first; the backup (Groq / OpenRouter) when Gemini's quota is used up or Google is down.
+ *  prefer "fallback": the backup first — it has ~10x Gemini's free daily requests — and Gemini only when the
+ *    backup can't (prompt too big for Groq's per-minute token limit, or its budget is used up). Use this for
+ *    agent work so Gemini stays free for reading PDFs and for chat, which only Gemini can do.
+ *  prefer "fallback-only": never spend Gemini (nice-to-have work like resume rewording).
+ * PDFs (inlineData) always need Gemini — the backups only read text.
  */
 export async function geminiJson<T>(
   db: SupabaseClient,
   prompt: string,
   extraParts: GeminiPart[] = [],
   userId?: string,
-  opts: { prefer?: "gemini" | "fallback" | "fallback-only" } = {}
+  opts: { prefer?: "gemini" | "fallback" | "fallback-only"; maxTokens?: number } = {}
 ): Promise<T> {
   const textOnly = extraParts.every((p) => !p.inlineData);
   const canFallback = textOnly && fallbackConfigured();
-  const viaFallback = async () => parseJson<T>(await fallbackJson(db, [...extraParts.map((p) => p.text ?? ""), prompt].join("\n\n"), userId));
+  const viaFallback = async () =>
+    parseJson<T>(await fallbackJson(db, [...extraParts.map((p) => p.text ?? ""), prompt].join("\n\n"), userId, { maxTokens: opts.maxTokens }));
   if (opts.prefer === "fallback-only") {
     if (!canFallback) throw new Error("No backup AI configured");
     return viaFallback();
   }
+  let backupError: Error | null = null;
   if (canFallback && opts.prefer === "fallback") {
     try {
       return await viaFallback();
-    } catch {
-      // fall through to Gemini
+    } catch (f) {
+      backupError = f as Error; // fall through to Gemini
     }
   }
   try {
@@ -175,7 +180,11 @@ export async function geminiJson<T>(
     });
     return parseJson<T>(text);
   } catch (e) {
-    if (!canFallback || opts.prefer === "fallback") throw e;
+    if (backupError) {
+      // Both tried: report a quota stop only if Gemini's was a quota stop.
+      throw e instanceof FreeTierLimitError ? new FreeTierLimitError(`${e.message} Backup AI: ${backupError.message}`) : e;
+    }
+    if (!canFallback) throw e;
     const quotaOrOutage = e instanceof FreeTierLimitError || /overloaded|network|GEMINI_API_KEY/i.test((e as Error).message);
     if (!quotaOrOutage) throw e;
     try {
@@ -186,10 +195,10 @@ export async function geminiJson<T>(
   }
 }
 
-/** Is any AI available right now (Gemini under budget, or a backup provider)? */
+/** Is any AI available right now (Gemini under budget, or a backup provider under its own budget)? */
 export async function aiAvailable(db: SupabaseClient): Promise<{ allowed: boolean; reason?: string; gemini: boolean }> {
   const g = await checkGemini(db);
   if (g.allowed) return { allowed: true, gemini: true };
-  if (fallbackConfigured()) return { allowed: true, gemini: false };
-  return { allowed: false, gemini: false, reason: g.reason };
+  if (fallbackConfigured() && (await fallbackAvailable(db))) return { allowed: true, gemini: false };
+  return { allowed: false, gemini: false, reason: fallbackConfigured() ? `${g.reason}; backup AI's daily budget is used up too` : g.reason };
 }

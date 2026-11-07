@@ -9,6 +9,7 @@ import type { ParsedResume } from "./resume";
 const bumps: { metric: string; by: number; scope?: string }[] = [];
 vi.mock("./freeTier", () => ({
   FREE_LIMITS: { geminiRequestsPerMinute: 100000 },
+  SAFETY_RATIO: 0.85,
   checkGemini: async () => ({ allowed: true }),
   readUsage: async () => 0,
   bumpUsage: async (_db: unknown, metric: string, by: number, scope?: string) => {
@@ -168,5 +169,47 @@ describe("AI resume tailoring guard rails", () => {
     const out = await aiTailorResume({} as never, sample, { title: "SWE", company: "X", description: "CI/CD" });
     expect(out.experience![0].bullets[0]).toBe(sample.experience![0].bullets[0]); // "9000" was invented → rejected
     expect(out.experience![0].bullets[1]).toBe("Set up **CI/CD pipelines** on AWS with Docker");
+  });
+});
+
+describe("backup AI limits (same guard rails as Gemini)", () => {
+  it("reads Groq's reset times", async () => {
+    const { parseDuration } = await import("./fallback-ai");
+    expect(parseDuration("1m26.4s")).toBe(86400);
+    expect(parseDuration("577ms")).toBe(577);
+    expect(parseDuration("7")).toBe(7000);
+    expect(parseDuration(null)).toBe(0);
+  });
+
+  it("refuses a prompt too big for Groq's per-minute token limit instead of failing at Groq", async () => {
+    process.env.GROQ_API_KEY = "g";
+    let called = 0;
+    vi.stubGlobal("fetch", async () => {
+      called++;
+      return new Response("{}", { status: 200 });
+    });
+    const { fallbackJson, PromptTooLargeError } = await import("./fallback-ai");
+    await expect(fallbackJson({} as never, "x".repeat(40000))).rejects.toBeInstanceOf(PromptTooLargeError);
+    expect(called).toBe(0);
+  });
+
+  it("moves to the next Groq model when one says its daily limit is reached", async () => {
+    process.env.GROQ_API_KEY = "g";
+    const seen: string[] = [];
+    vi.stubGlobal("fetch", async (_url: string, init: { body: string }) => {
+      const model = JSON.parse(init.body).model as string;
+      seen.push(model);
+      if (seen.length === 1) return new Response("rate limit: requests per day", { status: 429, headers: { "retry-after": "3600" } });
+      return new Response(JSON.stringify({ choices: [{ message: { content: '{"ok":1}' } }] }), { status: 200 });
+    });
+    const { fallbackJson } = await import("./fallback-ai");
+    await expect(fallbackJson({} as never, "hi")).resolves.toBe('{"ok":1}');
+    expect(new Set(seen).size).toBe(2);
+  });
+
+  it("counts Gemini by the Pacific-time day (when Google resets it)", async () => {
+    const { pacificDay } = await vi.importActual<typeof import("./freeTier")>("./freeTier");
+    expect(pacificDay(new Date("2026-11-08T03:00:00Z"))).toBe("2026-11-07"); // 7 pm Pacific, still the 7th
+    expect(pacificDay(new Date("2026-11-08T09:00:00Z"))).toBe("2026-11-08");
   });
 });

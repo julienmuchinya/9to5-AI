@@ -633,8 +633,9 @@ export async function answerFields(
         preferences: salaryFacts(opts.applicant.answers ?? {}, opts.applicant.custom ?? {}),
         jobs: (opts.applicant.experience ?? []).map((e) => `${e.title} @ ${e.company} (${e.start ?? "?"} – ${e.end ?? "?"})`),
         saved_answers: opts.applicant.answers ?? {},
-        resume: opts.applicant.resume_text.slice(0, 6000),
-        job_description: (opts.jobDescription ?? "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").slice(0, 3500),
+        // Trimmed so the whole prompt fits Groq's 8,000 tokens/minute (and costs Gemini less).
+        resume: opts.applicant.resume_text.replace(/\s+/g, " ").slice(0, 4500),
+        job_description: (opts.jobDescription ?? "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").slice(0, 2500),
       };
       try {
         aiCalls++;
@@ -645,10 +646,12 @@ export async function answerFields(
             jobTitle: opts.jobTitle,
             company: opts.company,
             facts,
-            questions: needAi.map((f) => ({ id: f.id, question: f.label, type: f.kind, options: f.options, required: f.required })),
+            questions: needAi.map((f) => ({ id: f.id, question: f.label, type: f.kind, options: f.options.slice(0, 40), required: f.required })),
           }),
           [],
-          opts.userId
+          opts.userId,
+          // Groq first (≈2,500 free requests/day vs Gemini's ≈210); Gemini only if Groq can't.
+          { prefer: "fallback", maxTokens: 1800 }
         );
         for (const f of needAi) {
           const v = ai[f.id];

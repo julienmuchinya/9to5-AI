@@ -1,5 +1,6 @@
 import { requireUser, serviceClient } from "@/lib/v2/session";
-import { freeTierSnapshot, SAFETY_RATIO, type LimitCheck } from "@/lib/v2/freeTier";
+import { check, freeTierSnapshot, SAFETY_RATIO, type LimitCheck } from "@/lib/v2/freeTier";
+import { fallbackStatus } from "@/lib/v2/fallback-ai";
 import { Card, PageHeader } from "@/components/ui";
 
 export const dynamic = "force-dynamic";
@@ -29,7 +30,8 @@ function Meter({ title, check, fmt = (n: number) => n.toLocaleString(), note }: 
 
 export default async function UsagePage() {
   await requireUser();
-  const s = await freeTierSnapshot(serviceClient());
+  const db = serviceClient();
+  const [s, backups] = await Promise.all([freeTierSnapshot(db), fallbackStatus(db)]);
   const stop = `${Math.round(SAFETY_RATIO * 100)}%`;
   return (
     <div className="max-w-4xl">
@@ -38,7 +40,23 @@ export default async function UsagePage() {
         description={`Every service this app uses has a free plan. The agent checks these before acting and pauses itself at ${stop} so nothing can ever bill you.`}
       />
       <div className="grid gap-4 md:grid-cols-2">
-        <Meter title="Gemini AI requests (today)" check={s.gemini} note="Resets daily. Used for reading resumes, chat, and application questions." />
+        <Meter
+          title="Gemini AI requests (today)"
+          check={s.gemini}
+          note={`Resets at midnight Pacific time. Used for reading resume PDFs and chat${backups.length ? ", and as the backup for application questions" : ", and application questions"}.`}
+        />
+        {backups.map((b) => (
+          <Meter
+            key={b.name}
+            title={`${b.name === "groq" ? "Groq" : "OpenRouter"} AI requests (today)`}
+            check={check(b.used, b.limit, `${b.name} requests today`)}
+            note={
+              b.name === "groq"
+                ? `Main AI for application questions and resume rewording. ${b.models} models × 1,000 requests a day, each stopped at ${stop}; used requests come back gradually (about one every 90 seconds), not at midnight. Each model also has ${b.tokensPerMinute.toLocaleString()} tokens a minute, so the agent paces itself.`
+                : `Used only when Groq can't answer. 50 free requests a day, stopped at ${stop}.`
+            }
+          />
+        ))}
         <Meter title="Supabase database" check={s.database} fmt={mb} note="Old job postings are deleted automatically after 30 days." />
         <Meter title="Supabase file storage (resumes)" check={s.storage} fmt={mb} note="One PDF per account." />
         <Meter title="Accounts" check={s.users} note="Supabase free plan: 50,000 monthly active users." />

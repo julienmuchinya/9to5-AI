@@ -35,13 +35,18 @@ export type Metric =
 
 export const today = () => new Date().toISOString().slice(0, 10);
 export const thisMonth = () => new Date().toISOString().slice(0, 7);
+/** Gemini's free quota resets at midnight Pacific time, not UTC (UTC midnight is 4-5 pm there). */
+export const pacificDay = (d = new Date()) => new Intl.DateTimeFormat("en-CA", { timeZone: "America/Los_Angeles" }).format(d);
+/** The counter period a metric belongs to. */
+export const periodFor = (metric: Metric) =>
+  metric === "github_actions_minutes" ? thisMonth() : metric.startsWith("gemini_") ? pacificDay() : today();
 
 export async function bumpUsage(
   db: SupabaseClient,
   metric: Metric,
   by = 1,
   scope = "global",
-  period = metric === "github_actions_minutes" ? thisMonth() : today()
+  period = periodFor(metric)
 ): Promise<number> {
   const { data, error } = await db.rpc("increment_usage", {
     p_scope: scope,
@@ -57,7 +62,7 @@ export async function readUsage(
   db: SupabaseClient,
   metric: Metric,
   scope = "global",
-  period = metric === "github_actions_minutes" ? thisMonth() : today()
+  period = periodFor(metric)
 ): Promise<number> {
   const { data } = await db
     .from("usage_counters")
