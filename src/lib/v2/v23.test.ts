@@ -73,3 +73,17 @@ describe('confirmation screens', () => {
     expect(SUCCESS.test('Apply for this job')).toBe(false);
   });
 });
+
+describe('Workday contact fields', () => {
+  const a: Applicant = { ...me, phone: '(+1) 555-010-0199', city: 'Atlanta', state: 'Georgia' };
+  it('only the phone NUMBER field gets the number', () => {
+    expect(knownValue(f('Phone Number', 'text'), a)).toBe('(+1) 555-010-0199');
+    expect(knownValue(f('Phone Device Type', 'combobox', ['Mobile', 'Home']), a)).toBe('Mobile');
+    expect(knownValue(f('Country Phone Code', 'combobox', ['Canada (+1)', 'United States of America (+1)']), a)).toBe('United States of America (+1)');
+    expect(knownValue(f('Phone Extension', 'text'), a)).toBeNull();
+  });
+  it('City gets the city, Location gets city and state', () => {
+    expect(knownValue(f('City', 'text'), a)).toBe('Atlanta');
+    expect(knownValue(f('Location - City and State of Residence', 'text'), a)).toBe('Atlanta, Georgia');
+  });
+});

@@ -8,6 +8,7 @@
 import type { Page } from "playwright";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { memoryKey, type PendingQuestion } from "../../src/lib/v2/app-questions";
+import { pickOption } from "../../src/lib/v2/app-questions";
 import { SUCCESS, answerFields, captchaVisible, collectFields, fill, labelled, readComboboxOptions, type ApplyOpts, type ApplyResult } from "./apply";
 
 const WD = (id: string) => `[data-automation-id="${id}"]`;
@@ -15,7 +16,32 @@ const AUTH_FORM = [WD("createAccountSubmitButton"), WD("signInSubmitButton"), WD
 const NEXT = [WD("pageFooterNextButton"), WD("bottom-navigation-next-button"), "button:has-text('Save and Continue')", "button:has-text('Next')"].join(", ");
 const ERRORS = [WD("errorMessage"), WD("errorBanner"), "[role=alert]"].join(", ");
 
+/** Debug trace of the Workday flow (only with APPLY_DEBUG_DIR). */
+async function trace(page: Page, what: string) {
+  if (!process.env.APPLY_DEBUG_DIR) return;
+  const st = await page
+    .evaluate(() => {
+      const vis = (sel: string) => Array.from(document.querySelectorAll(sel)).some((e) => (e as HTMLElement).getBoundingClientRect().width > 0);
+      return `create=${vis('[data-automation-id="createAccountSubmitButton"]')} signin=${vis('[data-automation-id="signInSubmitButton"]')} next=${vis('[data-automation-id="pageFooterNextButton"], [data-automation-id="bottom-navigation-next-button"]')} step=${(document.querySelector('[data-automation-id="progressBarActiveStep"]')?.textContent ?? "").replace(/\s+/g, " ").slice(0, 40)}`;
+    })
+    .catch(() => "?");
+  console.log(`[9to5]   wd: ${what} → ${st} ${page.url().replace(/^https:\/\/[^/]+/, "").slice(0, 70)}`);
+}
+
 const text = async (page: Page) => ((await page.innerText("body").catch(() => "")) ?? "").replace(/\s+/g, " ");
+/** Fill the visible match (Workday keeps hidden copies of the email/password inputs on the same page). */
+async function fillVisible(page: Page, sel: string, value: string) {
+  const all = page.locator(sel);
+  const n = Math.min(await all.count().catch(() => 0), 6);
+  for (let i = 0; i < n; i++) {
+    const el = all.nth(i);
+    if (await el.isVisible().catch(() => false)) {
+      await el.fill(value).catch(() => {});
+      return;
+    }
+  }
+}
+
 /** True when ANY element matching `sel` is visible (the first match can be a hidden one). */
 const visible = async (page: Page, sel: string) => {
   const all = page.locator(sel);
@@ -74,8 +100,85 @@ async function settle(page: Page, ms = 15000) {
 }
 
 async function errorsOnPage(page: Page): Promise<string> {
-  const errs = await page.locator(ERRORS).allTextContents().catch(() => [] as string[]);
-  return errs.map((e) => e.replace(/\s+/g, " ").trim()).filter(Boolean).join(" · ").slice(0, 300);
+  const errs = (await page.locator(ERRORS).allTextContents().catch(() => [] as string[])).map((e) => e.replace(/\s+/g, " ").trim()).filter(Boolean);
+  if (!errs.length) {
+    const body = await text(page);
+    for (const m of body.matchAll(/Error: ([^.]{3,160}\.)/g)) if (!errs.includes(m[1])) errs.push(m[1]);
+  }
+  return errs.join(" · ").slice(0, 400);
+}
+
+/**
+ * Workday "prompt" fields (How Did You Hear About Us?, some locations): a search box that only takes
+ * a value picked from its result list. Type, then click the first matching result (descending into
+ * a category like "Job Board" if that's what comes up).
+ */
+async function fillPrompt(page: Page, sel: string, value: string): Promise<boolean> {
+  // The answer itself first; then neutral, honest sources if it isn't listed as such.
+  const tries = [...new Set([value, "LinkedIn", "Job Board", "Company Website", "Website", "Other"])];
+  // A field that already shows a selection (saved draft): keep it only if it IS the intended answer or one of
+  // the honest fallbacks; otherwise remove it (e.g. "Alumni Referral" picked for "Referral") and pick again.
+  const selected = await page
+    .evaluate((s2) => {
+      const field = document.querySelector(s2)?.closest("[data-automation-id^=formField]");
+      if (!/([1-9]\d*) items? selected/i.test(field?.textContent ?? "")) return null;
+      const item = field?.querySelector("[data-automation-id=selectedItem], [data-automation-id=selectedItemList] li");
+      return ((item?.textContent ?? field?.textContent ?? "") as string).replace(/\s+/g, " ").trim();
+    }, sel)
+    .catch(() => null);
+  if (selected) {
+    const ok = tries.some((t) => new RegExp(`^\\s*${t.replace(/[.*+?^${}()|[\]\\]/g, (c) => "\\" + c)}\\b`, "i").test(selected.replace(/^.*items? selected,?\s*/i, "")));
+    if (ok) return true;
+    const field = page.locator(sel).locator("xpath=ancestor::*[starts-with(@data-automation-id,'formField')][1]");
+    const remove = field.locator(`${WD("DELETE_charm")}, [data-automation-id=removeSelectedItem], button[aria-label*=remove i], [data-automation-id=selectedItem] [role=button]`).first();
+    const b = await remove.boundingBox().catch(() => null);
+    if (b) await page.mouse.click(b.x + b.width / 2, b.y + b.height / 2);
+    await page.waitForTimeout(600);
+  }
+  for (const [n, v] of tries.entries()) {
+    await page.click(sel).catch(() => {});
+    await page.fill(sel, "").catch(() => {});
+    await page.keyboard.type(v, { delay: 30 });
+    await page.keyboard.press("Enter");
+    await page.waitForTimeout(1800);
+    for (let depth = 0; depth < 3; depth++) {
+      const esc = v.replace(/[.*+?^${}()|[\]\\]/g, (c) => "\\" + c);
+      const pool = page.locator(`${WD("promptOption")}, [data-automation-id="promptLeafNode"], [role=option]`);
+      const exact = pool.filter({ hasText: new RegExp(`^\\s*${esc}\\s*$`, "i") });
+      const starts = pool.filter({ hasText: new RegExp(`^\\s*${esc}`, "i") });
+      const contains = pool.filter({ hasText: new RegExp(esc.split(" ")[0], "i") });
+      // For the user's own answer accept only an exact / starts-with match ("Referral" must not become
+      // "Alumni Referral" or "Employee Referral"); the fallback sources may match loosely.
+      const strict = n === 0 && depth === 0;
+      const target = (await exact.count())
+        ? exact.first()
+        : (await starts.count())
+          ? starts.first()
+          : strict
+            ? null
+            : (await contains.count())
+              ? contains.first()
+              : pool.first();
+      if (!target) break;
+      if (!(await target.isVisible().catch(() => false))) break;
+      const box = await target.boundingBox();
+      if (box) await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+      await page.waitForTimeout(1200);
+      const picked = await page
+        .evaluate((s2) => {
+          const el = document.querySelector(s2);
+          const field = el?.closest("[data-automation-id^=formField]") ?? el?.parentElement?.parentElement;
+          return /([1-9]\d*) items? selected/i.test(field?.textContent ?? "") || Boolean(field?.querySelector("[data-automation-id=selectedItem]"));
+        }, sel)
+        .catch(() => false);
+      if (picked) {
+        await page.keyboard.press("Escape").catch(() => {});
+        return true;
+      }
+    }
+  }
+  await page.keyboard.press("Escape").catch(() => {});
+  return false;
 }
 
 type AuthResult = { ok: true; created: boolean } | { ok: false; result: ApplyResult };
@@ -90,11 +193,14 @@ async function workdayAuth(page: Page, opts: ApplyOpts): Promise<AuthResult> {
     if (!(await visible(page, WD("signInSubmitButton"))) && (await visible(page, WD("signInLink")))) {
       await clickWd(page, "signInLink");
       await page.waitForTimeout(1500);
+      await trace(page, "after Sign In link");
     }
-    await page.fill(WD("email"), portal.email).catch(() => {});
-    await page.fill(WD("password"), portal.password).catch(() => {});
+    await fillVisible(page, WD("email"), portal.email);
+    await fillVisible(page, WD("password"), portal.password);
+    await trace(page, "sign-in filled");
     await clickWd(page, "signInSubmitButton", "Sign In");
     await settle(page);
+    await trace(page, "after sign-in click");
     if (!(await visible(page, AUTH_FORM)) && ((await visible(page, NEXT)) || (await visible(page, WD("progressBarActiveStep"))))) return "ok";
     if (!(await visible(page, AUTH_FORM))) {
       await settle(page);
@@ -131,8 +237,18 @@ async function workdayAuth(page: Page, opts: ApplyOpts): Promise<AuthResult> {
     .waitFor({ state: "visible", timeout: 15000 })
     .catch(() => {});
   await page.waitForTimeout(800);
+  await trace(page, "auth start");
   const onAuth = (await visible(page, AUTH_FORM)) || ((await visible(page, WD("signInLink"))) && !(await visible(page, NEXT)));
-  if (!onAuth) return { ok: true, created: false }; // already signed in
+  if (!onAuth) {
+    const inFlow = (await visible(page, NEXT)) || (await visible(page, WD("progressBarActiveStep")));
+    if (inFlow) return { ok: true, created: false }; // already signed in
+    await startApplication(page);
+    await trace(page, "retried opening the application");
+    if (!(await visible(page, AUTH_FORM)) && !(await visible(page, WD("signInLink")))) {
+      if ((await visible(page, NEXT)) || (await visible(page, WD("progressBarActiveStep")))) return { ok: true, created: false };
+      return { ok: false, result: { status: "failed", detail: "Couldn't open the Workday application form — will retry next run" } };
+    }
+  }
 
   if (opts.accountExists) {
     const r = await signIn();
@@ -156,9 +272,9 @@ async function workdayAuth(page: Page, opts: ApplyOpts): Promise<AuthResult> {
   }
   if (await visible(page, WD("createAccountSubmitButton"))) {
     const since = new Date();
-    await page.fill(WD("email"), portal.email).catch(() => {});
-    await page.fill(WD("password"), portal.password).catch(() => {});
-    await page.fill(WD("verifyPassword"), portal.password).catch(() => {});
+    await fillVisible(page, WD("email"), portal.email);
+    await fillVisible(page, WD("password"), portal.password);
+    await fillVisible(page, WD("verifyPassword"), portal.password);
     const agree = page.locator(WD("createAccountCheckbox")).first();
     if (await agree.isVisible().catch(() => false)) await agree.check({ force: true }).catch(() => agree.click({ force: true }));
     if (await captchaVisible(page)) return { ok: false, result: { status: "needs_user", detail: `Workday (${host}) shows a CAPTCHA on account creation — create the account yourself with the login under Portal logins.` } };
@@ -189,36 +305,116 @@ async function workdayAuth(page: Page, opts: ApplyOpts): Promise<AuthResult> {
 /** From the job posting to the application flow (Apply → Apply Manually). */
 async function startApplication(page: Page) {
   const apply = page.locator(`${WD("adventureButton")}, a:has-text('Apply'), button:has-text('Apply')`).first();
-  if (await apply.isVisible().catch(() => false)) {
-    await apply.click().catch(() => {});
-    await page.waitForTimeout(2500);
-  }
+  await apply.waitFor({ state: "visible", timeout: 10000 }).catch(() => {});
+  if (await apply.isVisible().catch(() => false)) await apply.click().catch(() => {});
+  // The "Apply Manually / Autofill with Resume" pop-up can take a few seconds.
   const manual = page.locator(`${WD("applyManually")}, a:has-text('Apply Manually')`).first();
-  if (await manual.isVisible().catch(() => false)) {
-    await manual.click().catch(() => {});
-    await page.waitForTimeout(3500);
-  }
+  await manual.waitFor({ state: "visible", timeout: 8000 }).catch(() => {});
+  if (await manual.isVisible().catch(() => false)) await manual.click().catch(() => {});
+  await page
+    .locator(`${AUTH_FORM}, ${NEXT}, ${WD("progressBarActiveStep")}, ${WD("signInLink")}`)
+    .first()
+    .waitFor({ state: "visible", timeout: 15000 })
+    .catch(() => {});
+  await page.waitForTimeout(800);
 }
 
 /** Workday date pickers (e.g. the self-identification signature date) want today's date in MM / DD / YYYY boxes. */
-async function fillDates(page: Page) {
-  const months = page.locator(`${WD("dateSectionMonth-input")}`);
-  const n = await months.count();
+/** "January 2026" / "Jan 2023" / "2025-06" / "06/2025" / "2024" → { mm, yyyy }; "Present" → null. */
+export function parseMonthYear(s: string | null | undefined): { mm: string; yyyy: string } | null {
+  if (!s || /present|current|now/i.test(s)) return null;
+  const months = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+  const y = s.match(/(19|20)\d\d/)?.[0];
+  if (!y) return null;
+  const name = months.findIndex((m) => new RegExp(`\\b${m}`, "i").test(s));
+  const num = s.match(/\b(0?[1-9]|1[0-2])\s*[/-]\s*(19|20)\d\d\b|\b(19|20)\d\d\s*[/-]\s*(0?[1-9]|1[0-2])\b/);
+  let mm = name >= 0 ? name + 1 : 1;
+  if (name < 0 && num) mm = Number(num[1] ?? num[4]);
+  return { mm: String(mm).padStart(2, "0"), yyyy: y };
+}
+
+/**
+ * Workday date boxes. Work-history "From"/"To" come from the resume's jobs (in order; "Present" ticks
+ * "I currently work here"); any other date (e.g. the self-identification signature date) is today.
+ */
+async function fillDates(page: Page, jobs: { start?: string | null; end?: string | null }[]) {
+  // Each Workday date is a wrapper with a (hidden) month input and a visible "display" box on top.
+  const wrappers = page.locator(WD("dateInputWrapper"));
+  const n = await wrappers.count().catch(() => 0);
   const now = new Date();
+  let job = -1;
   for (let i = 0; i < n; i++) {
-    const m = months.nth(i);
-    if (!(await m.isVisible().catch(() => false))) continue;
-    const box = m.locator("xpath=ancestor::*[@data-automation-id='dateInputWrapper' or contains(@data-automation-id,'formField')][1]");
-    const value = await m.inputValue().catch(() => "");
-    if (value && value !== "MM") continue;
-    await m.click().catch(() => {});
-    await page.keyboard.type(`${String(now.getMonth() + 1).padStart(2, "0")}${String(now.getDate()).padStart(2, "0")}${now.getFullYear()}`, { delay: 40 });
-    await box.evaluate((el) => el.setAttribute("data-9to5-skip", "1")).catch(() => {});
+    const w = wrappers.nth(i);
+    if (!(await w.isVisible().catch(() => false))) continue;
+    const info = await w
+      .evaluate((el) => {
+        const field = el.closest("[data-automation-id^=formField]");
+        const fid = field?.getAttribute("data-automation-id") ?? "";
+        const label = (field?.querySelector("label, legend")?.textContent ?? "").replace(/\s+/g, " ").trim();
+        const month = el.querySelector("[data-automation-id=dateSectionMonth-input]") as HTMLInputElement | null;
+        return {
+          fid,
+          label,
+          hasDay: Boolean(el.querySelector("[data-automation-id=dateSectionDay-input]")),
+          filled: Boolean(month?.value && !/^m+$/i.test(month.value)) || /\d{1,2}\s*\/\s*\d{4}/.test(el.textContent ?? ""),
+        };
+      })
+      .catch(() => ({ fid: "", label: "", hasDay: true, filled: false }));
+    const isFrom = /startDate|fromDate/i.test(info.fid) || /^(from|start)/i.test(info.label);
+    const isTo = /endDate|toDate/i.test(info.fid) || /^(to|end)\b/i.test(info.label);
+    if (isFrom) job++;
+    if (info.filled) continue;
+    let typed: string | null = null;
+    if (isFrom || isTo) {
+      const j = jobs[Math.max(0, job)];
+      const d = parseMonthYear(isFrom ? j?.start : j?.end);
+      if (!d && isTo && j && /present|current/i.test(j.end ?? "")) {
+        // "I currently work here" instead of an end date.
+        const cb = page.locator(`${WD("formField-currentlyWorkHere")} input[type=checkbox], ${WD("currentlyWorkHere")}`).nth(Math.max(0, job));
+        if ((await cb.count()) && !(await cb.isChecked().catch(() => true))) {
+          const b = await cb.boundingBox().catch(() => null);
+          if (b) await page.mouse.click(b.x + b.width / 2, b.y + b.height / 2);
+          else await cb.check({ force: true }).catch(() => {});
+        }
+        continue;
+      }
+      if (d) typed = info.hasDay ? `${d.mm}01${d.yyyy}` : `${d.mm}${d.yyyy}`;
+    } else {
+      const mm = String(now.getMonth() + 1).padStart(2, "0");
+      typed = info.hasDay ? `${mm}${String(now.getDate()).padStart(2, "0")}${now.getFullYear()}` : `${mm}${now.getFullYear()}`;
+    }
+    if (!typed) continue;
+    // Click the visible month display (the input itself is hidden), then type; Workday moves to the next part.
+    const display = w.locator(`${WD("dateSectionMonth-display")}, ${WD("dateSectionMonth-input")}`).first();
+    const box = await display.boundingBox().catch(() => null);
+    if (box) await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    else await w.locator(WD("dateSectionMonth-input")).focus().catch(() => {});
+    await page.keyboard.type(typed, { delay: 60 });
+    await page.keyboard.press("Tab").catch(() => {});
+    await page.waitForTimeout(300);
   }
   // Mark the day/year parts too so the generic reader leaves them alone.
   await page.evaluate(() => {
     document.querySelectorAll("[data-automation-id^=dateSection]").forEach((e) => e.setAttribute("data-9to5-skip", "1"));
   });
+}
+
+/** Work Experience N → the N-th job on the resume: Job Title and Company, when Workday left them empty. */
+async function fillWorkHistory(page: Page, jobs: { title: string; company: string }[]) {
+  if (!jobs.length) return;
+  for (const [field, key] of [
+    ["jobTitle", "title"],
+    ["companyName", "company"],
+  ] as const) {
+    const inputs = page.locator(`[data-automation-id="formField-${field}"] input`);
+    const n = Math.min(await inputs.count().catch(() => 0), jobs.length);
+    for (let i = 0; i < n; i++) {
+      const el = inputs.nth(i);
+      if (!(await el.isVisible().catch(() => false))) continue;
+      if ((await el.inputValue().catch(() => "")).trim()) continue;
+      await el.fill(jobs[i][key]).catch(() => {});
+    }
+  }
 }
 
 export async function applyWorkday(page: Page, db: SupabaseClient, opts: ApplyOpts): Promise<ApplyResult> {
@@ -242,9 +438,18 @@ export async function applyWorkday(page: Page, db: SupabaseClient, opts: ApplyOp
 
     let lastStep = "";
     let sameStepTries = 0;
-    for (let step = 0; step < 12; step++) {
+    let reloads = 0;
+    for (let step = 0; step < 14; step++) {
       await page.waitForTimeout(2500);
-      const body = await text(page);
+      let body = await text(page);
+      // Workday's own transient error page: refresh like a person would (progress is saved per step).
+      if (/something went wrong/i.test(body) && /refresh the page|try again/i.test(body)) {
+        if (reloads++ >= 2) return { status: "failed", detail: "Workday kept showing \"Something went wrong\" — will retry next run", answers: allAnswers, learned, aiCalls, usedPortalLogin: true, accountCreated };
+        await page.reload({ waitUntil: "domcontentloaded" }).catch(() => {});
+        await settle(page);
+        sameStepTries = 0;
+        body = await text(page);
+      }
       if (SUCCESS.test(body) || /application (was )?submitted|you('|’)ve applied/i.test(body))
         return { status: "submitted", detail: "Application submitted on Workday", answers: allAnswers, learned, aiCalls, usedPortalLogin: true, accountCreated };
       if (await captchaVisible(page)) return { status: "needs_user", detail: "Workday shows a CAPTCHA — please finish this one yourself", answers: allAnswers, learned, aiCalls, usedPortalLogin: true, accountCreated };
@@ -277,12 +482,15 @@ export async function applyWorkday(page: Page, db: SupabaseClient, opts: ApplyOp
         await fileInput.setInputFiles(opts.resumePath).catch(() => {});
         await page.waitForTimeout(6000);
       }
-      await fillDates(page);
+      await fillDates(page, opts.applicant.experience ?? []);
+      await fillWorkHistory(page, opts.applicant.experience ?? []);
 
       const isReview = /review/i.test(stepName) || (await page.locator("button:has-text('Submit')").first().isVisible().catch(() => false));
       if (!isReview) {
         const fields = (await collectFields(page)).filter((f) => f.kind !== "file");
         await readComboboxOptions(page, fields);
+        if (process.env.APPLY_DEBUG_DIR)
+          for (const f of fields) console.log(`[9to5]   wd field: ${f.kind} req=${f.required} filled=${f.filled} "${f.label.slice(0, 90)}" opts=${f.options.length}`);
         const ans = await answerFields(db, fields, opts);
         aiCalls += ans.aiCalls;
         if (ans.quota) return { status: "needs_user", detail: "AI quota used up today — it retries tomorrow", answers: allAnswers, aiCalls, accountCreated };
@@ -310,12 +518,68 @@ export async function applyWorkday(page: Page, db: SupabaseClient, opts: ApplyOp
           const v = ans.answers[f.id];
           // Keep what Workday pre-filled unless we have a definite answer for a choice field.
           if (!v || (f.filled && (f.kind === "text" || f.kind === "textarea"))) continue;
-          await fill(page, f, v, opts.resumePath).catch(() => {});
+          const sel = `[data-9to5="${f.id}"]`;
+          const isPrompt = await page
+            .evaluate((s2) => {
+              const el = document.querySelector(s2);
+              return Boolean(el && (el.closest("[data-automation-id=multiselectInputContainer]") || el.getAttribute("data-uxi-widget-type") === "selectinput" || el.getAttribute("data-automation-id") === "searchBox"));
+            }, sel)
+            .catch(() => false);
+          if (isPrompt) {
+            await fillPrompt(page, sel, v);
+            continue;
+          }
+          if (f.kind === "radio" || f.kind === "checkboxes") {
+            const wanted = f.kind === "radio" ? [v] : v.split(/\s*[,;|]\s*/).filter(Boolean);
+            for (const w of wanted) {
+              const hit = pickOption(w, f.options);
+              const idx = hit ? f.options.indexOf(hit) : -1;
+              if (idx < 0) continue;
+              const target = `[data-9to5="${f.id}_${idx}"]`;
+              const already = await page.locator(target).isChecked().catch(() => false);
+              if (already) continue;
+              // Click the visible label for the choice (the input itself is often a styled 0-size element).
+              const id = await page.getAttribute(target, "id").catch(() => null);
+              const ok = (id && (await mouseClick(page, `label[for="${id}"]`))) || (await mouseClick(page, target));
+              if (!ok) await page.check(target, { force: true }).catch(() => {});
+              await page.waitForTimeout(200);
+            }
+            continue;
+          }
+          // Workday has its own country-code field: the number itself must be digits only.
+          const value = /phone number|phone$/i.test(f.label) && f.kind === "text" ? v.replace(/\D/g, "").replace(/^1(?=\d{10}$)/, "") : v;
+          await fill(page, f, value, opts.resumePath).catch(() => {});
           await page.waitForTimeout(150);
         }
         Object.assign(allAnswers, labelled(fields, ans.answers));
         await page.waitForTimeout(800);
+        await page.keyboard.press("Escape").catch(() => {});
+        const info = await page
+          .evaluate(
+            (sel) =>
+              Array.from(document.querySelectorAll(sel))
+                .filter((e) => (e as HTMLElement).getBoundingClientRect().width > 0)
+                .map((e) => `${e.tagName}[${e.getAttribute("data-automation-id")}] ${(e.textContent ?? "").trim().slice(0, 20)}`)
+                .join(" | "),
+            NEXT
+          )
+          .catch(() => "?");
+        await trace(page, `next buttons: ${info}`);
+        const stepBefore = rawStep;
         await mouseClick(page, NEXT);
+        await settle(page, 8000);
+        await trace(page, "after Save and Continue");
+        const stepNow = ((await page.locator(WD("progressBarActiveStep")).first().textContent().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+        if (stepNow === stepBefore && !(await errorsOnPage(page))) {
+          // The first click may only have closed an open picker: press the button via the keyboard, then directly.
+          const btn = page.locator(NEXT).last();
+          await btn.focus().catch(() => {});
+          await page.keyboard.press("Enter").catch(() => {});
+          await settle(page, 8000);
+          const stepAfter = ((await page.locator(WD("progressBarActiveStep")).first().textContent().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+          if (stepAfter === stepBefore) await btn.click({ timeout: 4000 }).catch(() => {});
+          await trace(page, "after Save and Continue (retry)");
+        }
         continue;
       }
 

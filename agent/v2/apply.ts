@@ -20,6 +20,8 @@ export interface Applicant {
   sponsorship_needed?: boolean | null;
   relocation?: boolean | null;
   resume_text: string;
+  /** Jobs from the parsed resume (most recent first) — for work-history dates on portals like Workday. */
+  experience?: { title: string; company: string; start?: string | null; end?: string | null }[];
   /** Saved answers to common application questions (Profile → Common questions). */
   answers?: AppAnswers;
   /** Answers the AI gave before to the same (non job-specific) question. */
@@ -146,10 +148,15 @@ export async function collectFields(page: Page): Promise<Field[]> {
     const labelFor = (el: Element): string => {
       const id = el.getAttribute("id");
       const byFor = id ? document.querySelector(`label[for="${CSS.escape(id)}"]`) : null;
-      const aria = el.getAttribute("aria-label");
+      // A dropdown button's own text ("Select One Required" on Workday) is a placeholder, not the question.
+      const rawAria = el.getAttribute("aria-label") ?? "";
+      const aria = /^\s*(select( one)?|choose( one)?|please select)\b[\s\w]{0,20}$/i.test(rawAria) ? "" : rawAria;
       const labelledby = el.getAttribute("aria-labelledby");
       const lb = labelledby ? labelledby.split(/\s+/).map((x) => document.getElementById(x)?.textContent ?? "").join(" ") : "";
-      return clean(textOf(byFor) || aria || lb || textOf(el.closest("label")) || questionText(el) || el.getAttribute("placeholder") || el.getAttribute("name") || "");
+      // Workday: the question is the formField's <label>, which isn't tied to the button by for=.
+      const wdField = el.closest("[data-automation-id^=formField-]");
+      const wdLabel = wdField ? textOf(wdField.querySelector("label, legend")) : "";
+      return clean(textOf(byFor) || aria || lb || textOf(el.closest("label")) || wdLabel || questionText(el) || el.getAttribute("placeholder") || el.getAttribute("name") || "");
     };
     const titleMarked = (el: Element) => {
       const id = el.getAttribute("id");
@@ -165,6 +172,10 @@ export async function collectFields(page: Page): Promise<Field[]> {
     const isRequired = (el: Element, label: string) => {
       const input = el as HTMLInputElement;
       if (titleMarked(el)) return true;
+      // "Select One Required" (Workday) / aria-label ending in "required".
+      if (/\brequired\s*$/i.test(el.getAttribute("aria-label") ?? "")) return true;
+      const wdLabel = el.closest("[data-automation-id^=formField-]")?.querySelector("label, legend");
+      if (wdLabel && /[*✱]/.test(wdLabel.textContent ?? "")) return true;
       return (
         input.required ||
         el.getAttribute("aria-required") === "true" ||
@@ -302,7 +313,19 @@ export function knownValue(f: Field, a: Applicant): string | null {
   if (/^(full )?name\b|your name|legal name/.test(l) && !/company|school|reference|employer/.test(l)) return `${a.first_name} ${a.last_name}`;
   if (/e-?mail/.test(l) && f.kind !== "checkbox" && f.kind !== "radio") return a.portal?.email && /account|login|user/.test(l) ? a.portal.email : a.email;
   // \b so "phonetic" or "mobile apps" don't count as a phone field.
-  if (/\b(phone|mobile|cell)( number| no\.?)?\b(?! app)/.test(l) && !/phonetic/.test(l) && f.kind !== "radio" && f.kind !== "checkbox" && f.kind !== "select") return a.phone ?? null;
+  // Not "Phone Device Type", "Country Phone Code" or "Phone Extension" — those aren't the number.
+  if (
+    /\b(phone|mobile|cell)( number| no\.?)?\b(?! app)/.test(l) &&
+    !/phonetic|device|type|country|code|extension|\bext\b/.test(l) &&
+    f.kind !== "radio" &&
+    f.kind !== "checkbox" &&
+    f.kind !== "select" &&
+    f.kind !== "combobox"
+  )
+    return a.phone ?? null;
+  if (/phone extension|\bext\b/.test(l)) return null;
+  // A field that's just "City" gets the city; "Location" / "City, State" get both.
+  if (/^city\b[\s*✱]*$/.test(l) && a.city) return a.city;
   const howHeard = /(hear|learn|find out|found|source|referr)/.test(l);
   if (/linkedin/.test(l) && !howHeard && f.kind !== "select" && f.kind !== "radio") return a.linkedin_url ?? null;
   if (/github/.test(l) && !howHeard) return a.github_url ?? null;

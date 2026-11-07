@@ -413,6 +413,7 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
     sponsorship_needed: u.sponsorship_needed,
     relocation: u.relocation,
     resume_text: u.resume_parsed ? resumeToText(u.resume_parsed) : "",
+    experience: (u.resume_parsed?.experience ?? []).map((e) => ({ title: e.title, company: e.company, start: e.start, end: e.end })),
     answers: u.application_answers ?? {},
     memory,
     custom: customStore(u.custom_answers),
@@ -423,7 +424,7 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
     inbox.inbox_email && inbox.inbox_password_enc && !u.inbox_error
       ? async (since) => {
           const t0 = Date.now();
-          const c = await waitForVerification(() => openMailbox(inbox), { since, match: /code|verif|security|greenhouse|lever|ashby/i, want: "code", timeoutMs: 90_000 });
+          const c = await waitForVerification(() => openMailbox(inbox), { since, match: /code|verif|security|greenhouse|lever|ashby/i, want: "code", timeoutMs: 90_000, log });
           log(`  email code ${c ? "found" : "not found"} after ${Math.round((Date.now() - t0) / 1000)}s`);
           return c;
         }
@@ -433,7 +434,7 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
     inbox.inbox_email && inbox.inbox_password_enc && !u.inbox_error
       ? async (since, match) => {
           const t0 = Date.now();
-          const l = await waitForVerification(() => openMailbox(inbox), { since, match, want: "link", timeoutMs: 120_000 });
+          const l = await waitForVerification(() => openMailbox(inbox), { since, match, want: "link", timeoutMs: 120_000, log });
           log(`  verification link ${l ? "found" : "not found"} after ${Math.round((Date.now() - t0) / 1000)}s`);
           return l;
         }

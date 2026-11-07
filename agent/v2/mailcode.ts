@@ -47,21 +47,26 @@ export function extractLink(html: string, text = ""): string | null {
  */
 export async function waitForVerification(
   open: () => Promise<Mailbox>,
-  opts: { since: Date; match: RegExp; want: "code" | "link"; timeoutMs?: number }
+  opts: { since: Date; match: RegExp; want: "code" | "link"; timeoutMs?: number; log?: (m: string) => void }
 ): Promise<string | null> {
   const deadline = Date.now() + (opts.timeoutMs ?? 90_000);
   const box = await open();
   const seen = new Set<string>();
+  // Search by keyword so a busy inbox can't push the email out of the newest-N window.
+  const hint = opts.want === "code" ? "{code passcode verification security}" : "{verify verification activate confirm account}";
   try {
     while (Date.now() < deadline) {
-      for (const m of await box.list(new Date(opts.since.getTime() - 60_000), 25)) {
+      for (const m of await box.list(new Date(opts.since.getTime() - 60_000), 40, hint)) {
         if (seen.has(m.id)) continue;
         seen.add(m.id);
-        if (!opts.match.test(`${m.from} ${m.subject}`)) continue;
+        if (!opts.match.test(`${m.from} ${m.subject}`)) {
+          opts.log?.(`    skipped email: ${m.from.slice(0, 50)} | ${m.subject.slice(0, 70)}`);
+          continue;
+        }
         const { text, html } = await m.body();
-        const found = opts.want === "code" ? extractCode(`${m.subject}
-${text}`) : extractLink(html, text);
+        const found = opts.want === "code" ? extractCode(`${m.subject}\n${text}`) : extractLink(html, text);
         if (found) return found;
+        opts.log?.(`    no ${opts.want} in: ${m.from.slice(0, 50)} | ${m.subject.slice(0, 70)} (${text.length} chars)`);
       }
       await new Promise((r) => setTimeout(r, 6000));
     }

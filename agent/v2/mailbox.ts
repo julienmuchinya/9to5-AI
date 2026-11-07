@@ -16,8 +16,8 @@ export interface MailItem {
 
 export interface Mailbox {
   kind: "gmail-api" | "imap";
-  /** Messages received since `since`, newest first, at most `max`. */
-  list(since: Date, max: number): Promise<MailItem[]>;
+  /** Messages received since `since`, newest first, at most `max`. `hint` narrows a Gmail search (ignored by IMAP). */
+  list(since: Date, max: number, hint?: string): Promise<MailItem[]>;
   close(): Promise<void>;
 }
 
@@ -29,10 +29,29 @@ export interface InboxCreds {
 
 export const isGoogleConnected = (u: InboxCreds) => u.inbox_host === GMAIL_OAUTH_HOST;
 
+/** Readable text from an HTML email (many ATS emails have no plain-text part). */
+export function htmlToText(html: string): string {
+  return html
+    .replace(/<(style|script|head)[^>]*>[\s\S]*?<\/\1>/gi, " ")
+    .replace(/<br\s*\/?>|<\/(p|div|tr|td|li|h\d)>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&#39;|&rsquo;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n\s*\n+/g, "\n")
+    .trim();
+}
+
 async function parse(raw: Buffer | string) {
   const { simpleParser } = await import("mailparser");
   const p = await simpleParser(raw);
-  return { text: (p.text ?? "").slice(0, 20_000), html: typeof p.html === "string" ? p.html.slice(0, 200_000) : "" };
+  const html = typeof p.html === "string" ? p.html.slice(0, 200_000) : "";
+  const text = (p.text && p.text.trim() ? p.text : htmlToText(html)).slice(0, 20_000);
+  return { text, html };
 }
 
 export async function openMailbox(u: InboxCreds): Promise<Mailbox> {
@@ -43,8 +62,8 @@ export async function openMailbox(u: InboxCreds): Promise<Mailbox> {
     const token = await gmailAccessToken(secret);
     return {
       kind: "gmail-api",
-      async list(since, max) {
-        const found = await gmailSearch(token, `${gmailAfter(since)} -in:chats`, max);
+      async list(since, max, hint) {
+        const found = await gmailSearch(token, `${gmailAfter(since)} -in:chats${hint ? ` ${hint}` : ""}`, max);
         return found.map((m) => ({ ...m, body: async () => parse(await gmailRaw(token, m.id)) }));
       },
       async close() {},
