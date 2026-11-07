@@ -9,32 +9,23 @@ export interface ParsedResume {
   location?: string;
   links?: { linkedin?: string; github?: string; website?: string };
   summary?: string;
-  /** Short line under the contact details, e.g. "Open to Work Remotely | Hybrid or Relocate". */
-  headline?: string;
   education?: { school: string; degree?: string; field?: string; graduation?: string; gpa?: string }[];
-  /** Bullets may mark the resume's bold phrases with **double asterisks**. */
-  experience?: { title: string; company: string; location?: string; start?: string; end?: string; url?: string | null; bullets: string[] }[];
-  projects?: { name: string; role?: string; org?: string; date?: string; url?: string | null; tech?: string[]; bullets: string[] }[];
+  experience?: { title: string; company: string; location?: string; start?: string; end?: string; bullets: string[] }[];
+  projects?: { name: string; tech?: string[]; bullets: string[] }[];
   skills?: string[];
-  /** Skills as grouped on the resume ("Programming Languages & Frameworks": [...]). */
-  skill_groups?: { name: string; items: string[] }[];
   certifications?: string[];
   awards?: string[];
   target_roles?: string[];
 }
 
 const PARSE_PROMPT = `Extract this resume into JSON with exactly these keys:
-name, email, phone, location, headline (the short availability/tagline line near the contact details, e.g. "Open to Work Remotely | Hybrid or Relocate", else null),
-links {linkedin, github, website} (the real URLs behind the links if visible, else the link text),
-summary,
+name, email, phone, location, links {linkedin, github, website}, summary,
 education [{school, degree, field, graduation, gpa}],
 experience [{title, company, location, start, end, bullets[]}],
-projects [{name, role, org, date, tech[], bullets[]}] (role = e.g. "Technical Specialist", org = e.g. the university, date = e.g. "Fall 2025"),
+projects [{name, tech[], bullets[]}],
 skills[] (individual technologies/skills, e.g. "Python", "React", "AWS"),
-skill_groups [{name, items[]}] (the skill categories exactly as grouped on the resume; [] if not grouped),
 certifications[], awards[],
 target_roles[] (3-5 job titles this person is best suited for, based ONLY on the resume).
-In bullets, wrap every phrase that is bold on the resume in **double asterisks**.
 Copy text faithfully. Never invent or embellish anything. Use null for missing fields.`;
 
 /** Read a resume PDF with Gemini (free tier). */
@@ -47,13 +38,11 @@ export async function parseResumePdf(db: SupabaseClient, pdf: Buffer, userId: st
   );
 }
 
-const plain = (s: string) => s.replace(/\*\*/g, "");
-
 export function resumeToText(r: ParsedResume): string {
   const lines: string[] = [];
   if (r.summary) lines.push(r.summary);
-  for (const e of r.experience ?? []) lines.push(`${e.title} at ${e.company}: ${plain(e.bullets.join(" "))}`);
-  for (const p of r.projects ?? []) lines.push(`${p.name} (${(p.tech ?? []).join(", ")}): ${plain(p.bullets.join(" "))}`);
+  for (const e of r.experience ?? []) lines.push(`${e.title} at ${e.company}: ${e.bullets.join(" ")}`);
+  for (const p of r.projects ?? []) lines.push(`${p.name} (${(p.tech ?? []).join(", ")}): ${p.bullets.join(" ")}`);
   for (const e of r.education ?? []) lines.push(`${e.degree ?? ""} ${e.field ?? ""}, ${e.school} ${e.graduation ?? ""}`);
   if (r.skills?.length) lines.push(`Skills: ${r.skills.join(", ")}`);
   return lines.join("\n");
@@ -63,9 +52,9 @@ export function resumeToText(r: ParsedResume): string {
 export function evidenceFromResume(r: ParsedResume) {
   const items: { category: string; title: string; content: string; skills: string[] }[] = [];
   for (const e of r.experience ?? [])
-    for (const b of e.bullets) items.push({ category: "experience", title: `${e.title} — ${e.company}`, content: plain(b), skills: [] });
+    for (const b of e.bullets) items.push({ category: "experience", title: `${e.title} — ${e.company}`, content: b, skills: [] });
   for (const p of r.projects ?? [])
-    for (const b of p.bullets) items.push({ category: "project", title: p.name, content: plain(b), skills: p.tech ?? [] });
+    for (const b of p.bullets) items.push({ category: "project", title: p.name, content: b, skills: p.tech ?? [] });
   for (const a of r.awards ?? []) items.push({ category: "award", title: a, content: a, skills: [] });
   for (const c of r.certifications ?? []) items.push({ category: "certification", title: c, content: c, skills: [] });
   return items;
@@ -87,7 +76,6 @@ export function tailorResume(r: ParsedResume, jobText: string): ParsedResume {
   return {
     ...r,
     skills: byRel(r.skills ?? [], (s) => s),
-    skill_groups: r.skill_groups?.map((g) => ({ ...g, items: byRel(g.items, (s) => s) })),
     experience: (r.experience ?? []).map((e) => ({ ...e, bullets: byRel(e.bullets, (b) => b) })),
     projects: byRel(r.projects ?? [], (p) => `${p.name} ${(p.tech ?? []).join(" ")} ${p.bullets.join(" ")}`).map((p) => ({
       ...p,

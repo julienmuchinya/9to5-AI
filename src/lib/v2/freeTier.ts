@@ -29,9 +29,7 @@ export type Metric =
   | "gemini_tokens"
   | "jobs_discovered"
   | "applications_submitted"
-  | "github_actions_minutes"
-  | "ai_groq_requests"
-  | "ai_openrouter_requests";
+  | "github_actions_minutes";
 
 export const today = () => new Date().toISOString().slice(0, 10);
 export const thisMonth = () => new Date().toISOString().slice(0, 7);
