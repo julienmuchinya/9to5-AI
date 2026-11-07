@@ -87,3 +87,16 @@ describe('Workday contact fields', () => {
     expect(knownValue(f('Location - City and State of Residence', 'text'), a)).toBe('Atlanta, Georgia');
   });
 });
+
+describe('more real-form fixes', () => {
+  it('never puts the email address into a consent dropdown', () => {
+    const label = 'Assurant will contact you about your application by email and/or phone. If you provide your consent below, we will also send you SMS/MMS messages';
+    const v = knownValue(f(label, 'combobox', ['Yes', 'No']), { ...me, email: 'a@b.c' });
+    expect(v).not.toBe('a@b.c');
+    expect(v).toBe('No');
+  });
+  it('reuses a pay answer given under different wording', () => {
+    const a: Applicant = { ...me, custom: { 'desired pay': '90000' } };
+    expect(knownValue(f('What is your expected compensation?', 'text'), a)).toBe('90000');
+  });
+});

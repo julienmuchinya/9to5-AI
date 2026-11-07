@@ -2,7 +2,7 @@ import type { Browser, Page } from "playwright";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { geminiJson, FreeTierLimitError } from "../../src/lib/v2/gemini";
 import { applyWorkday } from "./workday";
-import { answerFromProfile, commonSenseAnswer, findSimilarAnswer, memoryKey, pickOption, type AppAnswers, type PendingQuestion } from "../../src/lib/v2/app-questions";
+import { answerFromProfile, commonSenseAnswer, findSimilarAnswer, memoryKey, pickOption, questionFor, type AppAnswers, type PendingQuestion } from "../../src/lib/v2/app-questions";
 
 export interface Applicant {
   first_name: string;
@@ -311,7 +311,8 @@ export function knownValue(f: Field, a: Applicant): string | null {
   if (/first name|given name|preferred first|preferred name|nickname/.test(l)) return a.first_name;
   if (/last name|family name|surname/.test(l)) return a.last_name;
   if (/^(full )?name\b|your name|legal name/.test(l) && !/company|school|reference|employer/.test(l)) return `${a.first_name} ${a.last_name}`;
-  if (/e-?mail/.test(l) && f.kind !== "checkbox" && f.kind !== "radio") return a.portal?.email && /account|login|user/.test(l) ? a.portal.email : a.email;
+  // The email address goes only into a text box that asks for it — not into consent dropdowns that mention email.
+  if (/e-?mail/.test(l) && f.kind === "text" && l.length < 80) return a.portal?.email && /account|login|user/.test(l) ? a.portal.email : a.email;
   // \b so "phonetic" or "mobile apps" don't count as a phone field.
   // Not "Phone Device Type", "Country Phone Code" or "Phone Extension" — those aren't the number.
   if (
@@ -359,6 +360,16 @@ export function knownValue(f: Field, a: Applicant): string | null {
   if (/commut/.test(l)) return null;
   const saved = answerFromProfile(f.label, f.options, a.answers ?? {});
   if (saved) return saved;
+  // Same common question, different wording ("expected compensation" ≈ "Desired Pay" the user answered).
+  const key = questionFor(f.label)?.key;
+  if (key && a.custom) {
+    for (const [q, ans] of Object.entries(a.custom)) {
+      if (ans && questionFor(q)?.key === key) {
+        const v = f.options.length ? pickOption(ans, f.options) : ans;
+        if (v) return v;
+      }
+    }
+  }
   const opts = f.kind === "checkbox" ? ["Yes", "No"] : f.options;
   // The user's own answer to this (or a very similar) question beats anything the AI said before.
   const mine = findSimilarAnswer(f.label, opts, a.custom ?? {});
