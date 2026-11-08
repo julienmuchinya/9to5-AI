@@ -6,7 +6,7 @@
  * Optional: DISCOVER=false, APPLY=false, APPLY_DRY_RUN=true, BOARD_BATCH=40, ONLY_USER=<uuid>
  */
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import { mkdtempSync, writeFileSync } from "fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import {
@@ -36,6 +36,8 @@ import { decryptSecret, encryptSecret, generatePortalPassword } from "../../src/
 import { ageDays, COMPANY_DAILY_CAP, companyKey, MAX_DAILY_APPLY_CAP, MAX_POSTING_AGE_DAYS, planQueue, tooOld } from "../../src/lib/v2/priority";
 import { familyOf, judgeRoute, learnRoutes, titleKey } from "../../src/lib/v2/learning";
 import { isAggregator, resolveDirectLink } from "../../src/lib/v2/discovery/resolve";
+import { domainAgeYears, employerDomain } from "../../src/lib/v2/company-age";
+import { EXTRA_BOARDS } from "../../src/lib/v2/discovery/extra-boards";
 import { minutesPlan } from "../../src/lib/v2/minutes";
 import { sendRunDigest } from "./digest";
 import { customStore, memoryKey, rememberAnswers, type AppAnswers, type CustomAnswers } from "../../src/lib/v2/app-questions";
@@ -145,8 +147,19 @@ async function discover(sb: SupabaseClient): Promise<(Posting & { id: string; ve
   const simplifyAll = [...interns, ...newGrad];
   const names = new Map<string, string>();
   for (const p of simplifyAll) if (p.ats_board) names.set(`${p.ats}:${p.ats_board.toLowerCase()}`, p.company_name);
-  const boards = boardsFrom(simplifyAll);
-  const batch = Number(env("BOARD_BATCH", "40"));
+  // Boards: companies on the curated lists + every Greenhouse/Lever/Ashby company already seen in the
+  // database (from any source) + a starter list of well-known employers. Wider net, same verification.
+  const known = new Map(boardsFrom(simplifyAll).map((b) => [`${b.ats}:${b.board.toLowerCase()}`, b]));
+  const { data: dbBoards } = await sb.from("job_postings").select("ats,ats_board,company_name").in("ats", ["greenhouse", "lever", "ashby"]).not("ats_board", "is", null).limit(5000);
+  for (const r of dbBoards ?? []) {
+    const k = `${r.ats}:${String(r.ats_board).toLowerCase()}`;
+    if (!known.has(k)) known.set(k, { ats: r.ats, board: r.ats_board });
+    if (!names.has(k) && r.company_name) names.set(k, r.company_name);
+  }
+  for (const b of EXTRA_BOARDS) if (!known.has(`${b.ats}:${b.board}`)) known.set(`${b.ats}:${b.board}`, b);
+  const boards = [...known.values()].sort((a, b) => `${a.ats}${a.board}`.localeCompare(`${b.ats}${b.board}`));
+  // ~4 s per 40 boards: scan 160 a run so every board is seen about every couple of runs.
+  const batch = Number(env("BOARD_BATCH", "160"));
   const slot = Math.floor(Date.now() / (3 * 3600_000)) % Math.max(1, Math.ceil(boards.length / batch));
   const slice = boards.slice(slot * batch, slot * batch + batch);
   const boardPostings: Posting[] = [];
@@ -190,11 +203,23 @@ async function discover(sb: SupabaseClient): Promise<(Posting & { id: string; ve
     return [];
   }
 
+  // Company history for postings outside vetted sources: how old is the employer's own website domain?
+  const unvetted = postings.filter((p) => !["simplify_internships", "simplify_new_grad", "greenhouse", "lever", "ashby"].includes(p.source));
+  const domains = [...new Set(unvetted.map((p) => employerDomain(p.apply_url || p.url)).filter((d): d is string => Boolean(d)))].slice(0, 150);
+  const ages = new Map<string, number | null>();
+  for (const part of chunk(domains, 8)) await Promise.all(part.map(async (d) => ages.set(d, await domainAgeYears(d))));
+  const young = [...ages].filter(([, y]) => y != null && y < 1).map(([d]) => d);
+  if (domains.length) log(`company age: ${domains.length} employer sites checked${young.length ? `, under a year old: ${young.slice(0, 5).join(", ")}` : ""}`);
+  const ageOf = (p: Posting) => {
+    const d = employerDomain(p.apply_url || p.url);
+    return d ? (ages.get(d) ?? null) : null;
+  };
+
   const now = new Date().toISOString();
   const saved: (Posting & { id: string; verification_status: string; verification_score: number })[] = [];
   for (const part of chunk(postings, 400)) {
     const rows = part.map((p) => {
-      const v = verifyPosting(p);
+      const v = verifyPosting(p, undefined, ageOf(p));
       return {
         ...p,
         salary_min: p.salary_min ?? null,
@@ -575,21 +600,24 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
   const inbox = { inbox_email: u.inbox_email ?? null, inbox_host: u.inbox_host ?? null, inbox_password_enc: u.inbox_password_enc ?? null };
   // Only a sign-in problem (wrong app password, Google access removed) disables Gmail; anything else is retried.
   const inboxBroken = Boolean(u.inbox_error && /(password|expired|removed|connect with google|credentials|sign-in|imap is turned off)/i.test(u.inbox_error));
-  const emailCode: ((since: Date) => Promise<string | null>) | undefined =
+  const emailCode: ((since: Date, company?: string) => Promise<string | null>) | undefined =
     inbox.inbox_email && inbox.inbox_password_enc && !inboxBroken
-      ? async (since) => {
+      ? async (since, company) => {
           const t0 = Date.now();
-          const c = await waitForVerification(() => openMailbox(inbox), { since, match: /code|verif|security|greenhouse|lever|ashby/i, want: "code", timeoutMs: 90_000, log });
+          // `mention`: with several applications at once, only take the code email for THIS company.
+          const c = await waitForVerification(() => openMailbox(inbox), { since, match: /code|verif|security|greenhouse|lever|ashby/i, want: "code", timeoutMs: 90_000, log, mention: company });
           log(`  email code ${c ? "found" : "not found"} after ${Math.round((Date.now() - t0) / 1000)}s`);
           return c;
         }
       : undefined;
   // Verification links sites email when an account is created (Workday).
-  const emailLink: ((since: Date, match: RegExp, host?: string) => Promise<string | null>) | undefined =
+  // Short waits: an email that hasn't arrived is clicked on the next run (it looks back 3 days), instead of
+  // the run sitting idle for minutes (one Workday wait used to take 185 s of a 15-minute run).
+  const emailLink: ((since: Date, match: RegExp, host?: string, waitMs?: number) => Promise<string | null>) | undefined =
     inbox.inbox_email && inbox.inbox_password_enc && !inboxBroken
-      ? async (since, match, host) => {
+      ? async (since, match, host, waitMs = 45_000) => {
           const t0 = Date.now();
-          const l = await waitForVerification(() => openMailbox(inbox), { since, match, want: "link", timeoutMs: 180_000, log, host });
+          const l = await waitForVerification(() => openMailbox(inbox), { since, match, want: "link", timeoutMs: waitMs, log, host });
           log(`  verification link ${l ? "found" : "not found"} after ${Math.round((Date.now() - t0) / 1000)}s`);
           return l;
         }
@@ -606,20 +634,25 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
   let attempts = 0;
   const onlyCompany = env("APPLY_ONLY_COMPANY", "").toLowerCase(); // testing: one company only
   const onlyAts = env("APPLY_ONLY_ATS", "").split(",").map((x) => x.trim()).filter(Boolean); // testing: e.g. "lever,ashby"
-  for (const { appId, job } of picked) {
-    if (onlyCompany && !job.company_name.toLowerCase().includes(onlyCompany)) continue;
-    if (onlyAts.length && !onlyAts.includes(job.job_postings.ats)) continue;
-    if (remaining <= 0 || attempts >= attemptLimit) break;
+  // Several applications at once (different sites), so a run gets 2–3x more done in the same minutes.
+  const CONCURRENCY = Math.max(1, Number(env("APPLY_CONCURRENCY", "3")));
+  const busySites = new Set<string>();
+  const todo = [...picked];
+  let stopAll = false;
+  const processOne = async ({ appId, job }: (typeof picked)[number]): Promise<"next" | "stop"> => {
+    if (onlyCompany && !job.company_name.toLowerCase().includes(onlyCompany)) return "next";
+    if (onlyAts.length && !onlyAts.includes(job.job_postings.ats)) return "next";
+    if (remaining <= 0 || attempts >= attemptLimit) return "stop";
     if (timeLeft() < 4 * 60_000) {
       log("run time budget used; leaving the rest of the queue for the next run");
       result.time_budget = 1;
       moreWorkLeft = true;
-      break;
+      return "stop";
     }
     const company = companyKey(job.company_name);
     if ((perCompanyToday[company] ?? 0) >= COMPANY_CAP) {
       bump("company_daily_cap");
-      continue;
+      return "next";
     }
     const p = job.job_postings;
     const applyUrl = p.apply_url || p.url;
@@ -636,18 +669,18 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
           : "The agent can submit Greenhouse, Lever, Ashby, Workday, Workable and Rippling jobs — open this one and apply yourself (no account needed unless the site asks)";
       await save({ ...base, status: "needs_user", error: why });
       bump("needs_user");
-      continue;
+      return "next";
     }
     const key = siteKey(applyUrl);
     const host = hostOf(applyUrl);
     if (cooldowns.has(key) || cooldowns.has(host)) {
       bump("cooling_down");
       if (appId && !dryRun) await sb.from("applications").update({ error: `Waiting: ${host} asked us to slow down — retrying after the cooldown` }).eq("id", appId);
-      continue;
+      return "next";
     }
     if ((hostCount[host] ?? 0) >= ATS_DAILY_CAP) {
       bump("site_daily_cap");
-      continue;
+      return "next";
     }
     if (submittedThisRun > 0 && !dryRun) {
       // Human pace between submissions instead of bursts.
@@ -693,12 +726,18 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
         headline: parsed.headline ?? null,
       }).catch(() => null);
       if (pdf) {
-        resumePath = join(dir, `${(applicant.first_name + "_" + applicant.last_name).replace(/[^a-z0-9_]/gi, "")}_Resume.pdf`);
+        // One folder per job: parallel workers must not overwrite each other's tailored PDF (same file name).
+        const jobDir = join(dir, job.id);
+        mkdirSync(jobDir, { recursive: true });
+        resumePath = join(jobDir, `${(applicant.first_name + "_" + applicant.last_name).replace(/[^a-z0-9_]/gi, "")}_Resume.pdf`);
         writeFileSync(resumePath, pdf);
       }
     }
     if (library.resumes.length > 1 && entry) focus = focus ? `${entry.label} · ${focus}` : entry.label;
-    if (!resumePath) return { no_resume: 1 };
+    if (!resumePath) {
+      result.no_resume = 1;
+      return "stop";
+    }
 
     attempts++;
     // Workday needs a login: make sure one is saved (also on dry runs — the site account is real either way).
@@ -765,9 +804,9 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
       result.gemini_limit = 1;
       if (++aiMisses >= 3) {
         log("stop applying: AI quota used up and the next jobs need it");
-        break;
+        return "stop";
       }
-      continue;
+      return "next";
     }
     aiMisses = 0;
     if (r.status === "submitted") {
@@ -783,7 +822,29 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
         await bumpUsage(sb, "applications_submitted", 1, u.id);
       }
     }
-  }
+    return "next";
+  };
+  const worker = async () => {
+    while (!stopAll && todo.length) {
+      // Next job on a site no other worker is using right now (one form per company board at a time).
+      const i = todo.findIndex((x) => !busySites.has(siteKey(x.job.job_postings.apply_url || x.job.job_postings.url)));
+      if (i < 0) {
+        await sleep(1500);
+        continue;
+      }
+      const [item] = todo.splice(i, 1);
+      const site = siteKey(item.job.job_postings.apply_url || item.job.job_postings.url);
+      busySites.add(site);
+      try {
+        if ((await processOne(item)) === "stop") stopAll = true;
+      } catch (e) {
+        log(`  ${item.job.company_name}: ${(e as Error).message.slice(0, 160)}`);
+      } finally {
+        busySites.delete(site);
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: CONCURRENCY }, worker));
   if (memoryChanged && !dryRun) {
     const { error } = await sb.from("profiles").update({ answer_memory: memory }).eq("id", u.id);
     if (error) log(`couldn't save remembered answers: ${error.message}`);

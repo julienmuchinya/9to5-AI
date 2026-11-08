@@ -47,7 +47,8 @@ const SCAM_PATTERNS: [RegExp, string, number][] = [
 const hostMatches = (host: string, list: string[]) => list.some((d) => host === d || host.endsWith(`.${d}`));
 
 /** Text and link checks on one posting. Network checks for the company live in verifyCompanyDomain. */
-export function verifyPosting(p: Posting, companyDomainOk?: boolean): Verification {
+/** `domainAgeYears`: how long the employer's own website domain has existed (company-age.ts), when known. */
+export function verifyPosting(p: Posting, companyDomainOk?: boolean, domainAgeYears?: number | null): Verification {
   const signals: Signal[] = [];
   let score = 50;
   const add = (code: string, points: number, message: string) => {
@@ -64,6 +65,12 @@ export function verifyPosting(p: Posting, companyDomainOk?: boolean): Verificati
 
   if (companyDomainOk === true) add("COMPANY_SITE_OK", 15, "Company website exists and loads over HTTPS");
   if (companyDomainOk === false) add("COMPANY_SITE_MISSING", -25, "Could not find a working company website");
+  // Company history: established employers have had their website for years; scam companies rarely have.
+  if (domainAgeYears != null) {
+    if (domainAgeYears < 1) add("NEW_COMPANY_DOMAIN", -40, `Company website registered only ${Math.round(domainAgeYears * 12)} months ago`);
+    else if (domainAgeYears < 2) add("YOUNG_COMPANY_DOMAIN", -10, `Company website is under 2 years old`);
+    else if (domainAgeYears >= 3) add("ESTABLISHED_COMPANY", 10, `Company website registered ${Math.floor(domainAgeYears)} years ago`);
+  }
 
   const text = `${p.title}\n${p.description ?? ""}`;
   for (const [re, code, weight] of SCAM_PATTERNS) {

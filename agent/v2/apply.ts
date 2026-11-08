@@ -48,10 +48,10 @@ export interface ApplyOpts {
   dryRun?: boolean;
   jobDescription?: string;
   /** Reads a one-time code a site emailed during the application. */
-  emailCode?: (since: Date) => Promise<string | null>;
+  emailCode?: (since: Date, company?: string) => Promise<string | null>;
   /** Reads a "verify your account" link a site emailed (Workday account creation). */
   /** `host`: the portal the link should point at (e.g. acme.wd5.myworkdayjobs.com). */
-  emailLink?: (since: Date, match: RegExp, host?: string) => Promise<string | null>;
+  emailLink?: (since: Date, match: RegExp, host?: string, waitMs?: number) => Promise<string | null>;
   /** True when this portal account was already created on an earlier run. */
   accountExists?: boolean;
 }
@@ -797,7 +797,7 @@ async function fillAndSubmit(
     await page.waitForTimeout(6000);
 
     // Some sites (Greenhouse especially) email a security code after Submit and wait for it.
-    const code = await enterEmailCode(page, opts.emailCode, submittedAt);
+    const code = await enterEmailCode(page, opts.emailCode && ((since: Date) => opts.emailCode!(since, opts.company)), submittedAt);
     if (code === "no_inbox")
       return { status: "needs_user", detail: "The site emailed you a security code. Connect your Gmail on the Autopilot page so the agent can enter it next time — or finish this one yourself.", answers: labelled(fields, answers), learned, usedPortalLogin, aiCalls };
     if (code === "not_found")

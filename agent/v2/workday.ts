@@ -240,11 +240,11 @@ async function workdayAuth(page: Page, opts: ApplyOpts): Promise<AuthResult> {
   };
 
   /** Click the link Workday emails to confirm the account, then come back to the job. */
-  const confirmByEmail = async (since: Date): Promise<boolean> => {
+  const confirmByEmail = async (since: Date, waitMs = 45_000): Promise<boolean> => {
     if (!opts.emailLink) return false;
     const resend = page.locator("button:has-text('Resend'), a:has-text('Resend')").first();
     if (await resend.isVisible().catch(() => false)) await resend.click().catch(() => {});
-    const link = await opts.emailLink(since, new RegExp(`workday|${host.split(".")[0]}|verify|confirm|activate|account`, "i"), host).catch((e) => {
+    const link = await opts.emailLink(since, new RegExp(`workday|${host.split(".")[0]}|verify|confirm|activate|account`, "i"), host, waitMs).catch((e) => {
       console.log(`[9to5]   verification link lookup failed: ${(e as Error).message}`);
       return null;
     });
@@ -330,7 +330,8 @@ async function workdayAuth(page: Page, opts: ApplyOpts): Promise<AuthResult> {
     if (r === "ok") return { ok: true, created: false };
     if (r === "unverified") {
       // Look back far enough to find the email sent when the account was created on an earlier run.
-      if ((await confirmByEmail(new Date(Date.now() - 3 * 86400_000))) && (await signIn()) === "ok") return { ok: true, created: false };
+      // Looking back for an email from an earlier run: it is either there already or not — a quick look.
+      if ((await confirmByEmail(new Date(Date.now() - 3 * 86400_000), 12_000)) && (await signIn()) === "ok") return { ok: true, created: false };
       return {
         ok: false,
         // With Gmail connected the agent looks again next run (the email is often late); after 3 tries it comes to the user.
@@ -386,7 +387,7 @@ async function workdayAuth(page: Page, opts: ApplyOpts): Promise<AuthResult> {
   if (r === "ok") return { ok: true, created: false };
   // Sign-in failed without saying why (seen on T-Mobile, Ciena, Northrop): usually an unverified account or a
   // password that didn't stick. Try the verification email, then a password reset, before asking the user.
-  if (r !== "bad_password" && (await confirmByEmail(new Date(Date.now() - 3 * 86400_000))) && (await signIn()) === "ok") return { ok: true, created: false };
+  if (r !== "bad_password" && (await confirmByEmail(new Date(Date.now() - 3 * 86400_000), 12_000)) && (await signIn()) === "ok") return { ok: true, created: false };
   if ((await resetPassword()) && (await signIn()) === "ok") return { ok: true, created: false };
   const why = (await errorsOnPage(page)) || "the sign-in didn't go through and the reset email didn't arrive";
   // Emails from Workday are often minutes late: with Gmail connected, try again next run before asking the user.

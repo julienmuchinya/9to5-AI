@@ -20,7 +20,7 @@ describe("GitHub minutes planner", () => {
     expect(sched.skip).toBe(true);
     const manual = minutesPlan({ ...base, usedMonth: 280, usedToday: 62, manual: true, now: nov8 });
     expect(manual.skip).toBe(false);
-    expect(manual.budgetMin).toBeGreaterThanOrEqual(15);
+    expect(manual.budgetMin).toBeGreaterThanOrEqual(25);
   });
   it("stops everything at 85% of the month", () => {
     expect(minutesPlan({ ...base, usedMonth: 1699, usedToday: 0, manual: true, now: nov8 }).skip).toBe(true);

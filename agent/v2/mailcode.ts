@@ -53,6 +53,16 @@ export function extractLink(html: string, text = "", host?: string): string | nu
   return urls.find((u) => onHost(u) && keyword(u)) ?? urls.find(keyword) ?? urls.find((u) => onHost(u) && /(token|code|key)=|\/[A-Za-z0-9_-]{24,}/.test(u)) ?? null;
 }
 
+/** Does the email mention this company (its first distinctive word)? Unknown wording → yes. */
+function mentions(hay: string, company: string): boolean {
+  const word = company
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]+/g, " ")
+    .split(" ")
+    .find((w) => w.length >= 3 && !["the", "inc", "llc", "corp", "group", "company", "technologies"].includes(w));
+  return !word || hay.toLowerCase().includes(word);
+}
+
 /** Codes/links already used in this process — never enter the same one twice (it belonged to an earlier application). */
 const used = new Set<string>();
 
@@ -62,7 +72,7 @@ const used = new Set<string>();
  */
 export async function waitForVerification(
   open: () => Promise<Mailbox>,
-  opts: { since: Date; match: RegExp; want: "code" | "link"; timeoutMs?: number; log?: (m: string) => void; host?: string }
+  opts: { since: Date; match: RegExp; want: "code" | "link"; timeoutMs?: number; log?: (m: string) => void; host?: string; mention?: string }
 ): Promise<string | null> {
   const deadline = Date.now() + (opts.timeoutMs ?? 90_000);
   const box = await open();
@@ -82,6 +92,8 @@ export async function waitForVerification(
           continue;
         }
         const { text, html } = await m.body();
+        // Several applications run at once: skip a code email that names a different company.
+        if (opts.mention && !mentions(`${m.from} ${m.subject} ${text.slice(0, 3000)}`, opts.mention)) continue;
         const found = opts.want === "code" ? extractCode(`${m.subject}\n${text}`) : extractLink(html, text, opts.host);
         if (found && !used.has(found)) {
           used.add(found);
