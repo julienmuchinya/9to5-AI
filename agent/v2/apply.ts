@@ -332,6 +332,11 @@ export function knownValue(f: Field, a: Applicant): string | null {
   const l = f.label.toLowerCase();
   if (f.kind === "file") return /cover/.test(l) ? null : /resume|cv|attach/.test(l) || f.required ? "__RESUME__" : null;
   if (/password/.test(l)) return a.portal?.password ?? null;
+  // "By entering today's date I acknowledge…" / signature date: today's date.
+  if (/today.?s date|enter (the|today.?s|current) date|date of (signature|acknowledg)|signature date|^date\b|\bdate signed\b/.test(l) && f.kind !== "checkbox" && f.kind !== "radio") {
+    const d = new Date();
+    return `${String(d.getMonth() + 1).padStart(2, "0")}/${String(d.getDate()).padStart(2, "0")}/${d.getFullYear()}`;
+  }
   if (/first name|given name|preferred first|preferred name|nickname/.test(l)) return a.first_name;
   if (/last name|family name|surname/.test(l)) return a.last_name;
   if (/^(full )?name\b|your name|legal name/.test(l) && !/company|school|reference|employer/.test(l)) return `${a.first_name} ${a.last_name}`;

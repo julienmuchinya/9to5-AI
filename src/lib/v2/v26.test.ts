@@ -125,3 +125,11 @@ describe("security codes", async () => {
     expect(again).toBeNull(); // already used
   }, 20000);
 });
+
+describe("acknowledgement dates", async () => {
+  const { knownValue } = await import("../../../agent/v2/apply");
+  it("types today's date where a form asks for it", () => {
+    const f = { id: "f1", label: "By entering today’s date, I acknowledge that I have read and agree to these requirements", kind: "text", required: true, options: [], filled: false } as never;
+    expect(knownValue(f, { first_name: "A", last_name: "B" } as never)).toMatch(/^\d{2}\/\d{2}\/\d{4}$/);
+  });
+});

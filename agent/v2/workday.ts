@@ -380,7 +380,8 @@ async function workdayAuth(page: Page, opts: ApplyOpts): Promise<AuthResult> {
       const r = await signIn();
       if (r === "ok") return { ok: true, created: true };
     }
-    const pwRule = /(password must|at least \d+ characters|special character|uppercase|lowercase)/i.exec(t);
+    // Real error messages only: the page always prints its password rules ("must contain an uppercase…").
+    const pwRule = /(password must|at least \d+ characters|special character|uppercase|lowercase)/i.exec(await errorsOnPage(page));
     if (pwRule) return { ok: false, result: { status: "needs_user", detail: `Workday (${host}) didn't accept the generated password (${pwRule[0]}). Create the account yourself with a password it accepts.` } };
   }
   const r = await signIn();
@@ -614,6 +615,26 @@ export async function applyWorkday(page: Page, db: SupabaseClient, opts: ApplyOp
       lastStep = stepName;
       if (sameStepTries >= 2) {
         const errs = await errorsOnPage(page);
+        // Required questions the agent had NO answer for (e.g. a GPA that isn't on the resume): ask the user once —
+        // the answer is remembered for every later application — instead of failing the same way 3 times.
+        const norm = (x: string) => x.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+        const answered = Object.keys(allAnswers).map(norm);
+        const unanswered = [...errs.matchAll(/The field (.{2,240}?) is required and must have a value/g)]
+          .map((m) => m[1].trim())
+          .filter((l) => !answered.some((a) => a && (a.includes(norm(l).slice(0, 40)) || norm(l).includes(a.slice(0, 40)))));
+        if (unanswered.length) {
+          const pending: PendingQuestion[] = [...new Set(unanswered)].map((l) => ({ key: memoryKey(l), label: l, kind: "text", options: [], required: true }));
+          return {
+            status: "needs_user",
+            detail: `Waiting on your answer to ${pending.length} question${pending.length === 1 ? "" : "s"} (Workday "${stepName}") — answer once on this page and the agent reapplies`,
+            answers: allAnswers,
+            learned,
+            aiCalls,
+            pending,
+            usedPortalLogin: true,
+            accountCreated,
+          };
+        }
         // Often a slow page or a resume still parsing: the run loop retries it (up to 3 tries) before it goes to the user.
         return { status: "failed", detail: `Workday stopped at "${stepName}"${errs ? `: ${errs}` : ""} — will retry next run`, answers: allAnswers, learned, aiCalls, usedPortalLogin: true, accountCreated };
       }
