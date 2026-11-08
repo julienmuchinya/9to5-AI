@@ -130,7 +130,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
               Details
             </Link>
           </div>
-          <AiStatus data={ai} />
+          <AiStatus data={ai} when={t.dateTime} />
         </Card>
         <Card>
           <h2 className="mb-2 font-semibold">Recent runs</h2>

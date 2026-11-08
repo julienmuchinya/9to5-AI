@@ -172,7 +172,7 @@ export default async function ApplicationsPage({ searchParams }: { searchParams:
         description="Every application, where it stands, and what’s working. Statuses update from your inbox when it’s connected."
         action={
           <div className="flex flex-wrap items-center gap-3">
-            <AiStatus data={ai} compact />
+            <AiStatus data={ai} compact when={t.dateTime} />
             {dispatchConfigured() && <RunNowButton running={running} details />}
           </div>
         }

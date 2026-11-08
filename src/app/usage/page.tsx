@@ -1,6 +1,8 @@
 import { requireUser, serviceClient } from "@/lib/v2/session";
 import { check, freeTierSnapshot, SAFETY_RATIO, type LimitCheck } from "@/lib/v2/freeTier";
 import { fallbackStatus } from "@/lib/v2/fallback-ai";
+import { nextPacificMidnight, nextUtcMidnight } from "@/lib/v2/ai-status";
+import { timeFmt } from "@/lib/tz";
 import { Card, PageHeader } from "@/components/ui";
 
 export const dynamic = "force-dynamic";
@@ -31,7 +33,7 @@ function Meter({ title, check, fmt = (n: number) => n.toLocaleString(), note }: 
 export default async function UsagePage() {
   await requireUser();
   const db = serviceClient();
-  const [s, backups] = await Promise.all([freeTierSnapshot(db), fallbackStatus(db)]);
+  const [s, backups, t] = await Promise.all([freeTierSnapshot(db), fallbackStatus(db), timeFmt()]);
   const stop = `${Math.round(SAFETY_RATIO * 100)}%`;
   return (
     <div className="max-w-4xl">
@@ -43,7 +45,7 @@ export default async function UsagePage() {
         <Meter
           title="Gemini AI requests (today)"
           check={s.gemini}
-          note={`Resets at midnight Pacific time. Used for reading resume PDFs and chat${backups.length ? ", and as the backup for application questions" : ", and application questions"}.`}
+          note={`Next reset: ${t.dateTime(nextPacificMidnight())} (midnight Pacific). Used for reading resume PDFs and chat${backups.length ? ", and as the backup for application questions" : ", and application questions"}.`}
         />
         {backups.map((b) => (
           <Meter
@@ -52,8 +54,8 @@ export default async function UsagePage() {
             check={check(b.used, b.limit, `${b.name} requests today`)}
             note={
               b.name === "groq"
-                ? `Main AI for application questions and resume rewording. ${b.models} models × 1,000 requests a day, each stopped at ${stop}; used requests come back gradually (about one every 90 seconds), not at midnight. Each model also has ${b.tokensPerMinute.toLocaleString()} tokens a minute, so the agent paces itself.`
-                : `Used only when Groq can't answer. 50 free requests a day, stopped at ${stop}.`
+                ? `Next reset: ${t.dateTime(nextUtcMidnight())} (our daily counter, midnight UTC). Main AI for application questions and resume rewording. ${b.models} models × 1,000 requests a day, each stopped at ${stop}; used requests come back gradually (about one every 90 seconds), not at midnight. Each model also has ${b.tokensPerMinute.toLocaleString()} tokens a minute, so the agent paces itself.`
+                : `Next reset: ${t.dateTime(nextUtcMidnight())}. Used only when Groq can't answer. 50 free requests a day, stopped at ${stop}.`
             }
           />
         ))}

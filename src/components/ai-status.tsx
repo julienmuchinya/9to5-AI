@@ -35,7 +35,7 @@ const MODE = {
 } as const;
 
 /** Which AI the agent is on, how much of each free budget is used, and GitHub minutes. */
-export function AiStatus({ data, compact = false }: { data: AiStatusData; compact?: boolean }) {
+export function AiStatus({ data, compact = false, when = (iso: string) => new Date(iso).toUTCString() }: { data: AiStatusData; compact?: boolean; when?: (iso: string) => string }) {
   const m = MODE[data.mode];
   const groq = data.backups.find((b) => b.name === "groq");
   if (compact)
@@ -46,6 +46,7 @@ export function AiStatus({ data, compact = false }: { data: AiStatusData; compac
         <span>
           · Gemini {data.gemini.used}/{data.gemini.stopAt}
           {groq ? ` · Groq ${groq.used}/${groq.stopAt}` : ""}
+          {data.mode === "out" ? ` · resets ${when(data.gemini.resetAt)}` : ""}
         </span>
       </Link>
     );
@@ -55,9 +56,9 @@ export function AiStatus({ data, compact = false }: { data: AiStatusData; compac
         <span className={`h-2.5 w-2.5 rounded-full ${m.dot} ${data.mode !== "out" ? "animate-pulse" : ""}`} />
         <span className={`font-medium ${m.cls}`}>{m.text}</span>
       </div>
-      <Row name="Gemini (today)" used={data.gemini.used} stopAt={data.gemini.stopAt} limit={data.gemini.limit} note={`${data.gemini.used >= data.gemini.stopAt ? "At its limit — " : ""}resets in ${data.gemini.resetsInH} h (midnight Pacific). Reads resume PDFs, chat.`} />
+      <Row name="Gemini (today)" used={data.gemini.used} stopAt={data.gemini.stopAt} limit={data.gemini.limit} note={`${data.gemini.used >= data.gemini.stopAt ? "At its limit. " : ""}Next reset: ${when(data.gemini.resetAt)} (midnight Pacific, in ${data.gemini.resetsInH} h). Reads resume PDFs, chat.`} />
       {groq ? (
-        <Row name="Groq (today)" used={groq.used} stopAt={groq.stopAt} limit={groq.limit} note={groq.used >= groq.stopAt ? "At its limit — requests come back gradually (about one every 90 s per model)." : "Main AI for application questions. Used requests come back gradually through the day."} />
+        <Row name="Groq (today)" used={groq.used} stopAt={groq.stopAt} limit={groq.limit} note={`${groq.used >= groq.stopAt ? "At its limit. " : ""}Next reset: ${when(data.backupResetAt)} (midnight UTC). Groq also gives used requests back gradually, about one every 90 s per model. Main AI for application questions.`} />
       ) : (
         <p className="text-xs text-[var(--muted)]">No backup AI set up (add GROQ_API_KEY).</p>
       )}
@@ -71,8 +72,8 @@ export function AiStatus({ data, compact = false }: { data: AiStatusData; compac
           limit={Math.max(1, data.minutes.dayAllowance)}
           note={
             data.minutes.usedToday >= data.minutes.dayAllowance
-              ? `Today's share is used — scheduled runs resume in ${data.minutes.resetsInH} h. Run now still works. (${data.minutes.usedMonth}/${data.minutes.stopAt} this month)`
-              : `${data.minutes.usedMonth}/${data.minutes.stopAt} minutes this month, spread over the days left; new share in ${data.minutes.resetsInH} h. Run now always works.`
+              ? `Today's share is used — scheduled runs resume ${when(data.minutes.resetAt)}. Run now still works. (${data.minutes.usedMonth}/${data.minutes.stopAt} this month)`
+              : `${data.minutes.usedMonth}/${data.minutes.stopAt} minutes this month, spread over the days left; next share ${when(data.minutes.resetAt)}. Run now always works.`
           }
         />
       )}

@@ -77,3 +77,14 @@ describe("chat only changes things the latest message asks for", async () => {
     expect(changeNotAsked("get_status", "answer")).toBeNull(); // reading is always fine
   });
 });
+
+describe("next reset times", async () => {
+  const { nextPacificMidnight, nextUtcMidnight } = await import("./ai-status");
+  it("Gemini resets at the next midnight in Los Angeles, in winter and summer time", () => {
+    expect(nextPacificMidnight(new Date("2026-11-08T03:00:00Z")).toISOString()).toBe("2026-11-08T08:00:00.000Z"); // 7 pm PST Nov 7 → midnight PST
+    expect(nextPacificMidnight(new Date("2026-07-01T20:00:00Z")).toISOString()).toBe("2026-07-02T07:00:00.000Z"); // PDT
+  });
+  it("our backup-AI counters reset at the next midnight UTC", () => {
+    expect(nextUtcMidnight(new Date("2026-11-08T23:30:00Z")).toISOString()).toBe("2026-11-09T00:00:00.000Z");
+  });
+});
