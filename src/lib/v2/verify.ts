@@ -100,7 +100,8 @@ export async function verifyCompanyDomain(domain?: string): Promise<boolean | un
 /** Only these are eligible for automatic submission. */
 export const AUTO_SUBMIT_ATS = new Set(["greenhouse", "lever", "ashby"]);
 /** Sites whose plain application form the agent fills, whatever the posting's ats label says. */
-export const AUTO_SUBMIT_HOSTS = ["apply.workable.com"];
+// Rippling: guest form, no account, no CAPTCHA (checked Nov 2026).
+export const AUTO_SUBMIT_HOSTS = ["apply.workable.com", "ats.rippling.com"];
 export function canAutoSubmit(p: { ats?: string | null; verification_status?: string | null; apply_url?: string | null; url?: string }): boolean {
   if (p.verification_status !== "verified") return false;
   const host = domainOf(p.apply_url || p.url) ?? "";

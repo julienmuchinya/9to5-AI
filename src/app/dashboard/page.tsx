@@ -96,7 +96,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
       <div className="mb-6 grid grid-cols-2 gap-4 md:grid-cols-4">
         <StatCard label="Matched jobs" value={matched ?? 0} sub={`${verified ?? 0} verified employers`} icon={<Icon name="jobs" />} />
         <Link href="/applications?tab=sent" className="block rounded-2xl transition hover:opacity-90">
-          <StatCard label="Sent" value={c.sent} variant="success" sub={`${c.inReview} in review · ${c.interviews} interviews`} icon={<Icon name="applications" />} />
+          <StatCard label="Sent" value={c.sent} variant="success" sub={`${c.inReview} in review · ${c.screening} screening · ${c.interviews} interviews`} icon={<Icon name="applications" />} />
         </Link>
         <Link href="/applications?tab=needs" className="block rounded-2xl transition hover:opacity-90">
           <StatCard label="Needs you" value={c.needs} variant={c.needs > 0 ? "warning" : "default"} sub="Questions, sign-ins, CAPTCHAs" icon={<Icon name="profile" />} />

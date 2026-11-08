@@ -1,6 +1,6 @@
 /** Application status tracking: email classification, stage ordering, role families. */
 
-export type Stage = "submitted" | "received" | "under_review" | "interview" | "offer" | "rejected";
+export type Stage = "submitted" | "received" | "under_review" | "screening" | "interview" | "offer" | "rejected";
 
 export const STAGE_LABEL: Record<string, string> = {
   queued: "Queued for next run",
@@ -8,6 +8,7 @@ export const STAGE_LABEL: Record<string, string> = {
   submitted: "Submitted",
   received: "Application received",
   under_review: "Under consideration",
+  screening: "Screening",
   interview: "Interview",
   offer: "Offer",
   rejected: "Rejected",
@@ -17,7 +18,7 @@ export const STAGE_LABEL: Record<string, string> = {
 };
 
 // Higher = further along. Rejected/offer are final.
-const RANK: Record<string, number> = { queued: 0, needs_user: 0, failed: 0, submitted: 1, received: 2, under_review: 3, interview: 4, offer: 6, rejected: 6, withdrawn: 6 };
+const RANK: Record<string, number> = { queued: 0, needs_user: 0, failed: 0, submitted: 1, received: 2, under_review: 3, screening: 4, interview: 5, offer: 7, rejected: 7, withdrawn: 7 };
 
 /** Moves forward only; never un-rejects. Interview can still become offer or rejected. */
 export function nextStatus(current: string, incoming: Stage): string {
@@ -33,8 +34,14 @@ const RULES: { stage: Stage; re: RegExp }[] = [
   },
   { stage: "offer", re: /(pleased to (extend|offer)|offer letter|we('d| would) like to offer you|job offer)/i },
   {
+    // Real interviews with the team: onsite / virtual onsite / technical or final rounds.
     stage: "interview",
-    re: /(schedule (an? |your )?(interview|call|chat|time)|interview (invitation|request)|invite you to (an? )?(interview|call|chat)|phone screen|technical (interview|screen)|coding (challenge|assessment)|online assessment|hirevue|codesignal|hackerrank|availability for (an? )?(call|interview)|next round)/i,
+    re: /(technical interview|final (round|interview)|on-?site interview|virtual on-?site|panel interview|interview (with|loop)|meet (with )?the (team|hiring manager)|hiring manager interview|schedule (an? |your )interview|interview (invitation|request)|invite you to (an? )?interview|next round)/i,
+  },
+  {
+    // First filter: recruiter / phone screen, online assessment, coding test, recorded video.
+    stage: "screening",
+    re: /(phone screen|recruiter (call|screen|chat)|screening (call|interview)|initial (call|conversation|chat)|intro(ductory)? call|online assessment|coding (challenge|assessment|test)|technical (screen|assessment)|take-?home|hirevue|codesignal|hackerrank|codility|karat|schedule (a |your )?(call|chat|time)|availability for (an? )?(call|chat))/i,
   },
   { stage: "under_review", re: /(under (review|consideration)|reviewing your (application|profile)|moved to the next (step|stage)|shortlisted)/i },
   { stage: "received", re: /(thank(s| you) for (applying|your application|your interest)|we('ve| have) received your application|application (has been )?(received|submitted)|application confirmation)/i },

@@ -19,7 +19,7 @@ export async function scanInbox(sb: SupabaseClient, u: InboxUser, log: (m: strin
     .from("applications")
     .select("id,status,created_at, jobs(company_name,title)")
     .eq("user_id", u.id)
-    .in("status", ["submitted", "received", "under_review", "interview", "needs_user"]);
+    .in("status", ["submitted", "received", "under_review", "screening", "interview", "needs_user"]);
   type App = { id: string; status: string; created_at: string; jobs: { company_name: string; title: string } | null };
   const open = ((apps ?? []) as unknown as App[]).filter((a) => a.jobs?.company_name);
   if (!open.length) return out;

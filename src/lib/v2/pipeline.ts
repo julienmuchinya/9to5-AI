@@ -6,8 +6,8 @@ import type { SupabaseClient } from "@supabase/supabase-js";
  * Applications also counted received / in review / interview / rejected — and Applications only
  * looked at its newest 400 rows.)
  */
-export const SENT = ["submitted", "received", "under_review", "interview", "offer", "rejected", "withdrawn"] as const;
-export const PROGRESSED = ["under_review", "interview", "offer"] as const;
+export const SENT = ["submitted", "received", "under_review", "screening", "interview", "offer", "rejected", "withdrawn"] as const;
+export const PROGRESSED = ["under_review", "screening", "interview", "offer"] as const;
 export const IN_REVIEW = ["received", "under_review"] as const;
 
 export interface StatusRow {
@@ -24,6 +24,7 @@ export interface PipelineCounts {
   sent: number;
   needs: number;
   inReview: number;
+  screening: number;
   interviews: number;
   rejected: number;
   failed: number;
@@ -31,12 +32,13 @@ export interface PipelineCounts {
 }
 
 export function countPipeline(rows: { status: string; submitted_at?: string | null }[]): PipelineCounts {
-  const c: PipelineCounts = { total: rows.length, queued: 0, sent: 0, needs: 0, inReview: 0, interviews: 0, rejected: 0, failed: 0, closed: 0 };
+  const c: PipelineCounts = { total: rows.length, queued: 0, sent: 0, needs: 0, inReview: 0, screening: 0, interviews: 0, rejected: 0, failed: 0, closed: 0 };
   for (const r of rows) {
     if (isSent(r)) c.sent++;
     if (r.status === "queued") c.queued++;
     else if (r.status === "needs_user") c.needs++;
     else if ((IN_REVIEW as readonly string[]).includes(r.status)) c.inReview++;
+    else if (r.status === "screening") c.screening++;
     else if (r.status === "interview" || r.status === "offer") c.interviews++;
     else if (r.status === "rejected") c.rejected++;
     else if (r.status === "failed") c.failed++;

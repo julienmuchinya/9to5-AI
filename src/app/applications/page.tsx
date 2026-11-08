@@ -10,6 +10,7 @@ import { ago } from "@/lib/v2/priority";
 import { dispatchConfigured, nextScheduledRun } from "@/lib/v2/dispatch";
 import { RunNowButton } from "@/components/run-now";
 import { AiStatus } from "@/components/ai-status";
+import { StageTrack } from "@/components/stage-track";
 import { aiStatus } from "@/lib/v2/ai-status";
 import { RevealPassword } from "../accounts/reveal";
 import { markApplied, retryApplication, setApplicationStatus } from "../actions";
@@ -38,6 +39,7 @@ const FILTER: Record<string, string[] | null> = {
   sent: [...SENT],
   needs: ["needs_user"],
   review: ["received", "under_review"],
+  screening: ["screening"],
   interview: ["interview", "offer"],
   rejected: ["rejected"],
   all: null,
@@ -178,11 +180,12 @@ export default async function ApplicationsPage({ searchParams }: { searchParams:
         }
       />
 
-      <div className="mb-5 grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-7">
+      <div className="mb-5 grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-8">
         <StatButton href={link({ tab: "needs", why: undefined, page: 1 })} label="Needs you" value={c.needs} tone="warning" active={tab === "needs"} />
         <StatButton href={link({ tab: "queued", why: undefined, page: 1 })} label="Queued" value={c.queued} active={tab === "queued"} />
         <StatButton href={link({ tab: "sent", why: undefined, page: 1 })} label="Sent" value={c.sent} tone="info" active={tab === "sent"} />
         <StatButton href={link({ tab: "review", why: undefined, page: 1 })} label="In review" value={c.inReview} tone="info" active={tab === "review"} />
+        <StatButton href={link({ tab: "screening", why: undefined, page: 1 })} label="Screening" value={c.screening} tone="info" active={tab === "screening"} />
         <StatButton href={link({ tab: "interview", why: undefined, page: 1 })} label="Interviews" value={c.interviews} tone="success" active={tab === "interview"} />
         <StatButton href={link({ tab: "rejected", why: undefined, page: 1 })} label="Rejected" value={c.rejected} tone="danger" active={tab === "rejected"} />
         <StatButton href={link({ tab: "all", why: undefined, page: 1 })} label="All" value={c.total} active={tab === "all"} />
@@ -305,6 +308,7 @@ export default async function ApplicationsPage({ searchParams }: { searchParams:
                 {r.requested_by === "user" ? " · by you" : ""}
               </p>
               {r.resume_focus && <p className="truncate text-[11px] text-[var(--muted)]">Resume: {r.resume_focus}</p>}
+              <StageTrack status={r.status} history={timeline.map((e) => e.kind)} />
 
               {kind && <p className="mt-2 text-[11px] font-medium uppercase tracking-wide text-amber-300">{NEEDS_LABEL[kind].label}</p>}
               {r.error && ["needs_user", "queued", "failed"].includes(r.status) && (
@@ -365,7 +369,7 @@ export default async function ApplicationsPage({ searchParams }: { searchParams:
                   </ol>
                   <form action={setApplicationStatus.bind(null, r.id)} className="mt-2 flex flex-wrap gap-1.5">
                     <select name="status" defaultValue={r.status} className="rounded-lg border border-[var(--border)] bg-[var(--background-2)] px-1.5 py-1 text-xs">
-                      {["submitted", "received", "under_review", "interview", "offer", "rejected", "withdrawn"].map((s) => (
+                      {["submitted", "received", "under_review", "screening", "interview", "offer", "rejected", "withdrawn"].map((s) => (
                         <option key={s} value={s}>
                           {STAGE_LABEL[s]}
                         </option>

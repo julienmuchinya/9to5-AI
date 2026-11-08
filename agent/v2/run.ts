@@ -35,6 +35,7 @@ import { resumeFocus } from "../../src/lib/v2/tracking";
 import { decryptSecret, encryptSecret, generatePortalPassword } from "../../src/lib/v2/vault";
 import { ageDays, COMPANY_DAILY_CAP, companyKey, MAX_DAILY_APPLY_CAP, MAX_POSTING_AGE_DAYS, planQueue, tooOld } from "../../src/lib/v2/priority";
 import { familyOf, judgeRoute, learnRoutes, titleKey } from "../../src/lib/v2/learning";
+import { isAggregator, resolveDirectLink } from "../../src/lib/v2/discovery/resolve";
 import { minutesPlan } from "../../src/lib/v2/minutes";
 import { sendRunDigest } from "./digest";
 import { customStore, memoryKey, rememberAnswers, type AppAnswers, type CustomAnswers } from "../../src/lib/v2/app-questions";
@@ -68,7 +69,7 @@ const siteKey = (u: string) => {
   }
 };
 // Career sites that make you create an account before applying.
-const ACCOUNT_SITES = /(myworkdayjobs\.com|myworkdaysite\.com|icims\.com|taleo\.net|successfactors\.(com|eu)|oraclecloud\.com|brassring\.com|ultipro\.com|ukg\.net|jobvite\.com|avature\.net|phenompeople\.com|eightfold\.ai)/i;
+const ACCOUNT_SITES = /(myworkdayjobs\.com|myworkdaysite\.com|icims\.com|taleo\.net|successfactors\.(com|eu)|oraclecloud\.com|brassring\.com|ultipro\.com|ukg\.net|avature\.net|phenompeople\.com)/i; // Jobvite and Eightfold let you apply as a guest — no account needed
 
 // ── Anti-ban pacing (all tunable by env) ──────────────────────────────────
 const PACE_MIN_S = Number(env("PACE_MIN_S", "6"));
@@ -161,6 +162,27 @@ async function discover(sb: SupabaseClient): Promise<(Posting & { id: string; ve
   const all = new Map<string, Posting>();
   for (const p of [...simplifyAll, ...boardPostings, ...remote]) if (!all.has(p.source_key)) all.set(p.source_key, p);
   const postings = [...all.values()];
+
+  // Job-board links → the employer's real application page when the board shows it (The Muse etc.),
+  // so the agent can apply there itself. Only postings not saved before, a few at a time.
+  const boardLinks = postings.filter((p) => isAggregator(p.apply_url || p.url));
+  if (boardLinks.length) {
+    const { data: known } = await sb.from("job_postings").select("source_key").in("source_key", boardLinks.map((p) => p.source_key).slice(0, 500));
+    const seenKeys = new Set((known ?? []).map((k) => k.source_key));
+    let resolved = 0;
+    for (const part of chunk(boardLinks.filter((p) => !seenKeys.has(p.source_key)).slice(0, 120), 6)) {
+      await Promise.all(
+        part.map(async (p) => {
+          const direct = await resolveDirectLink(p.apply_url || p.url);
+          if (!direct) return;
+          p.apply_url = direct.url;
+          p.ats = direct.ats as Posting["ats"];
+          resolved++;
+        })
+      );
+    }
+    log(`job-board links: ${resolved}/${boardLinks.length - seenKeys.size} resolved to the employer's application page`);
+  }
 
   const limits = await freeTierSnapshot(sb);
   if (!limits.database.allowed) {
@@ -406,7 +428,7 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
     .eq("dismissed", false)
     .gte("fit_score", minFit)
     .eq("job_postings.verification_status", "verified")
-    .or(`ats.in.(greenhouse,lever,ashby${WORKDAY_ON ? ",workday" : ""}),apply_url.ilike.*apply.workable.com*`, { referencedTable: "job_postings" })
+    .or(`ats.in.(greenhouse,lever,ashby${WORKDAY_ON ? ",workday" : ""}),apply_url.ilike.*apply.workable.com*,apply_url.ilike.*ats.rippling.com*`, { referencedTable: "job_postings" })
     .order("created_at", { ascending: false })
     .limit(800);
 
@@ -435,7 +457,7 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
       .in("company_name", part)
       .eq("active", true)
       .eq("verification_status", "verified")
-      .or("ats.in.(greenhouse,lever,ashby),apply_url.ilike.*apply.workable.com*")
+      .or("ats.in.(greenhouse,lever,ashby),apply_url.ilike.*apply.workable.com*,apply_url.ilike.*ats.rippling.com*")
       .limit(2000);
     for (const a of alts ?? []) {
       const url = a.apply_url || a.url;
@@ -611,7 +633,7 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
         ? "This site needs an account. The email and password to use are on this card and under Portal logins — create the account, then apply."
         : /smartrecruiters\.com/i.test(applyUrl)
           ? "SmartRecruiters shows a CAPTCHA to automated browsers, so the agent can't apply here — open this one and apply yourself"
-          : "The agent can submit Greenhouse, Lever, Ashby, Workday and Workable jobs — open this one and apply yourself";
+          : "The agent can submit Greenhouse, Lever, Ashby, Workday, Workable and Rippling jobs — open this one and apply yourself (no account needed unless the site asks)";
       await save({ ...base, status: "needs_user", error: why });
       bump("needs_user");
       continue;

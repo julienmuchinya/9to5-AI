@@ -88,3 +88,40 @@ describe("next reset times", async () => {
     expect(nextUtcMidnight(new Date("2026-11-08T23:30:00Z")).toISOString()).toBe("2026-11-09T00:00:00.000Z");
   });
 });
+
+describe("stages: screening vs real interviews", async () => {
+  const { classifyEmail, nextStatus } = await import("./tracking");
+  it("tells a recruiter screen or assessment from an interview", () => {
+    expect(classifyEmail("Next steps", "We'd like to set up a phone screen with our recruiter")).toBe("screening");
+    expect(classifyEmail("Your HackerRank assessment", "Please complete the coding challenge")).toBe("screening");
+    expect(classifyEmail("Interview invitation", "We'd like to invite you to a technical interview with the team")).toBe("interview");
+  });
+  it("moves forward through the stages", () => {
+    expect(nextStatus("under_review", "screening")).toBe("screening");
+    expect(nextStatus("screening", "interview")).toBe("interview");
+    expect(nextStatus("interview", "screening")).toBe("interview");
+  });
+});
+
+describe("job-board links to the real application page", async () => {
+  const { findAtsLink, isAggregator } = await import("./discovery/resolve");
+  it("finds the employer's ATS link in a board page, skipping whole boards", () => {
+    const html = `<a href="https://boards.greenhouse.io/spacex">all jobs</a> "url":"https:\/\/boards.greenhouse.io\/spacex\/jobs\/8802897002?gh_jid=8802897002\\"`;
+    expect(findAtsLink(html)).toBe("https://boards.greenhouse.io/spacex/jobs/8802897002?gh_jid=8802897002");
+    expect(isAggregator("https://www.themuse.com/jobs/x")).toBe(true);
+    expect(isAggregator("https://job-boards.greenhouse.io/x")).toBe(false);
+  });
+});
+
+describe("security codes", async () => {
+  const { waitForVerification } = await import("../../../agent/v2/mailcode");
+  it("ignores a code from an earlier application and never reuses one", async () => {
+    const submit = new Date("2026-11-08T00:40:00Z");
+    const mail = (id: string, at: string, code: string) => ({ id, from: "Greenhouse <no-reply@greenhouse.io>", subject: "Security code for your application", date: new Date(at), body: async () => ({ text: `Your security code is ${code}`, html: "" }) });
+    const box = { kind: "gmail-api", list: async () => [mail("old", "2026-11-08T00:39:20Z", "OLD12345"), mail("new", "2026-11-08T00:40:12Z", "NEW67890")], close: async () => {} };
+    const got = await waitForVerification(async () => box as never, { since: submit, match: /greenhouse|code/i, want: "code", timeoutMs: 1000 });
+    expect(got).toBe("NEW67890");
+    const again = await waitForVerification(async () => box as never, { since: submit, match: /greenhouse|code/i, want: "code", timeoutMs: 50 });
+    expect(again).toBeNull(); // already used
+  }, 20000);
+});

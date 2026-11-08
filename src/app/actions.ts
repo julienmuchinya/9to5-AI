@@ -202,7 +202,7 @@ export async function markApplied(appId: string) {
   revalidatePath("/applications");
 }
 
-const TRACK_STATUSES = ["submitted", "received", "under_review", "interview", "offer", "rejected", "withdrawn"];
+const TRACK_STATUSES = ["submitted", "received", "under_review", "screening", "interview", "offer", "rejected", "withdrawn"];
 
 /** Manual status change from the Applications page (e.g. a recruiter called you). */
 export async function setApplicationStatus(appId: string, form: FormData) {

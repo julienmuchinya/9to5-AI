@@ -90,7 +90,7 @@ const CLOSED = /no longer (accepting|available|open)|job (is )?(closed|not found
 
 /** The page with the form: Lever "…/apply", Ashby "…/application" — added to the PATH, keeping any ?query. */
 export function applyUrlFor(ats: string, url: string): string {
-  const suffix = ats === "lever" || /apply\.workable\.com\/[^/]+\/j\//i.test(url) ? "apply" : ats === "ashby" ? "application" : null;
+  const suffix = ats === "lever" || /apply\.workable\.com\/[^/]+\/j\//i.test(url) || /ats\.rippling\.com\/[^/]+\/jobs\//i.test(url) ? "apply" : ats === "ashby" ? "application" : null;
   if (!suffix) return url;
   try {
     const u = new URL(url);

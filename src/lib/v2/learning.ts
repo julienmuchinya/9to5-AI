@@ -10,7 +10,7 @@
  * (no time or AI spent on them), and (3) prefer another route to the same job when one exists.
  */
 
-export type Family = "greenhouse" | "lever" | "ashby" | "workday" | "workable" | "other";
+export type Family = "greenhouse" | "lever" | "ashby" | "workday" | "workable" | "rippling" | "other";
 
 export function familyOf(url: string | null | undefined): Family {
   const u = (url ?? "").toLowerCase();
@@ -19,6 +19,7 @@ export function familyOf(url: string | null | undefined): Family {
   if (/ashbyhq\.com/.test(u)) return "ashby";
   if (/myworkday(jobs|site)\.com/.test(u)) return "workday";
   if (/apply\.workable\.com/.test(u)) return "workable";
+  if (/ats\.rippling\.com/.test(u)) return "rippling";
   return "other";
 }
 
@@ -32,7 +33,7 @@ export function siteOf(url: string | null | undefined): string {
   }
 }
 
-const SUCCESS = new Set(["submitted", "received", "under_review", "interview", "offer", "rejected", "withdrawn"]);
+const SUCCESS = new Set(["submitted", "received", "under_review", "screening", "interview", "offer", "rejected", "withdrawn"]);
 const MISS = new Set(["needs_user", "failed"]);
 
 export interface RouteStats {

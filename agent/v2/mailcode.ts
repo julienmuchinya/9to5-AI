@@ -53,6 +53,9 @@ export function extractLink(html: string, text = "", host?: string): string | nu
   return urls.find((u) => onHost(u) && keyword(u)) ?? urls.find(keyword) ?? urls.find((u) => onHost(u) && /(token|code|key)=|\/[A-Za-z0-9_-]{24,}/.test(u)) ?? null;
 }
 
+/** Codes/links already used in this process — never enter the same one twice (it belonged to an earlier application). */
+const used = new Set<string>();
+
 /**
  * Waits up to `timeoutMs` for an email that arrived after `since` and matches `match`
  * (tested against sender + subject), then returns its code or link.
@@ -71,13 +74,19 @@ export async function waitForVerification(
       for (const m of await box.list(new Date(opts.since.getTime() - 60_000), 40, hint)) {
         if (seen.has(m.id)) continue;
         seen.add(m.id);
+        // Only emails sent after Submit: an earlier application to the same company (minutes before)
+        // left its own code in the inbox, and entering that one makes the site reject the form.
+        if (m.date && m.date.getTime() < opts.since.getTime() - 5_000) continue;
         if (!opts.match.test(`${m.from} ${m.subject}`)) {
           opts.log?.(`    skipped email: ${m.from.slice(0, 50)} | ${m.subject.slice(0, 70)}`);
           continue;
         }
         const { text, html } = await m.body();
         const found = opts.want === "code" ? extractCode(`${m.subject}\n${text}`) : extractLink(html, text, opts.host);
-        if (found) return found;
+        if (found && !used.has(found)) {
+          used.add(found);
+          return found;
+        }
         opts.log?.(`    no ${opts.want} in: ${m.from.slice(0, 50)} | ${m.subject.slice(0, 70)} (${text.length} chars)`);
       }
       await new Promise((r) => setTimeout(r, 6000));
