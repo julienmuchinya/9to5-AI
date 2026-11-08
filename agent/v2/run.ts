@@ -530,8 +530,17 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
     items.push({ job: j, company: j.company_name, fit: j.fit_score ?? 50, postedAt: j.job_postings.posted_at, userRequested: false, routeBonus: verdict.bonus });
   }
 
+  // The same job often appears as two postings (curated list + company board): apply once.
+  const seenJob = new Set<string>();
+  const unique = items.filter((x) => {
+    const k = `${companyKey(x.company)}|${titleKey(x.job.title)}`;
+    if (seenJob.has(k)) return false;
+    seenJob.add(k);
+    return true;
+  });
+  if (items.length !== unique.length) log(`  ${items.length - unique.length} duplicate posting(s) of the same job skipped`);
   // Freshest + best-fitting first; at most COMPANY_CAP per company per day.
-  const { picked, skippedForCompanyCap } = planQueue(items, { appliedToday: perCompanyToday, perCompany: COMPANY_CAP });
+  const { picked, skippedForCompanyCap } = planQueue(unique, { appliedToday: perCompanyToday, perCompany: COMPANY_CAP });
   for (const x of skippedForCompanyCap) {
     bump("company_daily_cap");
     if (x.appId && !dryRun)

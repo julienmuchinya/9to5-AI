@@ -211,7 +211,8 @@ type AuthResult = { ok: true; created: boolean } | { ok: false; result: ApplyRes
 /** Gets past the Create Account / Sign In step. */
 async function workdayAuth(page: Page, opts: ApplyOpts): Promise<AuthResult> {
   const portal = opts.applicant.portal;
-  if (!portal) return { ok: false, result: { status: "needs_user", detail: "No saved login for this Workday site yet — it will be created on the next run." } };
+  // Not the user's problem: the login is created on the next run, so this just retries.
+  if (!portal) return { ok: false, result: { status: "failed", detail: "No saved login for this Workday site yet — it is created and tried again on the next run." } };
   const host = new URL(page.url()).host;
 
   const signIn = async (): Promise<"ok" | "bad_password" | "unverified" | "unknown"> => {
