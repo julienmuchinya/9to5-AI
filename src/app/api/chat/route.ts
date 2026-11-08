@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { apiUser, serviceClient } from "@/lib/v2/session";
+import { changeNotAsked } from "@/lib/v2/chat-guard";
 import { chatGenerate, FreeTierLimitError, type GeminiContent, type GeminiTool } from "@/lib/v2/gemini";
 import { freeTierSnapshot } from "@/lib/v2/freeTier";
 import { logEvent } from "@/lib/v2/log";
@@ -98,8 +99,11 @@ How to behave:
 - Use tools to act or look things up; never claim you did something unless a tool result confirms it.
 - When asked about their resume, skills or preferences, call get_profile first.
 - When asked about jobs or applications, call search_jobs or get_status. If there are 0 matched jobs, explain the agent searches every 3 hours, and offer run_agent_now.
-- Only verified jobs on Greenhouse, Lever or Ashby can be auto-submitted; other jobs go to "Needs you" for the user to finish.
-- The agent applies to the freshest postings first (last 24h, then 2-3 days, then this week) and sends at most 5 applications per company per day.
+- ONLY act on the user's LATEST message. Earlier messages are context: never repeat a change, queue or run from an earlier message (e.g. an old "cap of 20") unless the latest message asks for it again. A one-word message like "answer" or "why?" is a question — look things up, don't change settings.
+- The agent auto-submits verified jobs on Greenhouse, Lever, Ashby, Workday and Workable. SmartRecruiters and most other sites go to "Needs you" (SmartRecruiters blocks automated browsers with a CAPTCHA).
+- AI: Gemini first; when Gemini's daily quota is used, the agent and this chat switch to Groq automatically, so a Gemini limit does not stop applications.
+- Usual reasons for few submissions: the daily cap, GitHub run minutes for the day, CAPTCHAs, sites that need an account, or questions waiting in "Needs you". Check get_status before answering why.
+- The agent applies to the freshest postings first (last 24h, then 2-3 days, then this week), skips postings older than 21 days, and sends at most 5 applications per company per day.
 - Answers to common application questions (visa, EEO, start date, salary…) come from Resume & profile → Common questions; suggest filling those when applications land in "Needs you".
 - If the user asks to apply broadly ("apply to all backend jobs"), search first, then queue the verified matches and say how many.
 - Never invent facts about the user, their experience or a job. Keep replies short and concrete (counts, company names). Use plain text, short lists are fine.`;
@@ -122,6 +126,7 @@ const clean = (s: string) => s.replace(/[,()%*]/g, " ").trim();
 
 type Args = Record<string, unknown>;
 
+
 async function runTool(name: string, args: Args, sb: SupabaseClient, userId: string): Promise<Record<string, unknown>> {
   switch (name) {
     case "get_status": {
@@ -139,7 +144,7 @@ async function runTool(name: string, args: Args, sb: SupabaseClient, userId: str
         applications: byStatus,
         autopilot: settings,
         last_run: run,
-        gemini_today: `${free.gemini.used}/${free.gemini.limit}`,
+        gemini_today: `${free.gemini.used}/${free.gemini.limit}${free.gemini.allowed ? "" : " (used up; the agent uses Groq instead, so applying continues)"}`,
       };
     }
     case "search_jobs":
@@ -312,7 +317,9 @@ export async function POST(req: Request) {
         const { name, args, id } = c.functionCall!;
         let result: Record<string, unknown>;
         try {
-          result = await runTool(name, args ?? {}, supabase, user.id);
+          // Changes only when the LATEST message asks for one (an AI once replayed an old "cap of 20" request).
+          const blocked = changeNotAsked(name, text);
+          result = blocked ? { error: blocked } : await runTool(name, args ?? {}, supabase, user.id);
         } catch (err) {
           result = { error: (err as Error).message };
         }

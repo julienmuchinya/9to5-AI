@@ -63,3 +63,17 @@ describe("better role matching", () => {
     expect(matchPosting(profile, post("Software Engineer Intern", "internship")).score).toBeGreaterThan(matchPosting(profile, post("Senior Software Engineer")).score);
   });
 });
+
+describe("chat only changes things the latest message asks for", async () => {
+  const { changeNotAsked } = await import("./chat-guard");
+  it("doesn't replay an old cap change on 'answer' or a why-question", () => {
+    expect(changeNotAsked("set_autopilot", "answer")).not.toBeNull();
+    expect(changeNotAsked("set_autopilot", "why are my submition not being sent or submitted")).not.toBeNull();
+    expect(changeNotAsked("set_autopilot", "why is my daily cap so low?")).not.toBeNull();
+  });
+  it("still does what's asked", () => {
+    expect(changeNotAsked("set_autopilot", "Turn on auto-submit with a cap of 20 a day")).toBeNull();
+    expect(changeNotAsked("run_agent_now", "run the agent now")).toBeNull();
+    expect(changeNotAsked("get_status", "answer")).toBeNull(); // reading is always fine
+  });
+});
