@@ -48,3 +48,14 @@ describe("education section fields", async () => {
     expect(knownValue(f("Do you have a Bachelor's degree?", ["Yes", "No"]), a)).not.toBe("Bachelor's Degree");
   });
 });
+
+describe("Greenhouse security codes are 8 characters", async () => {
+  const { extractCode } = await import("../../../agent/v2/mailcode");
+  const email = "Reference code 2026114 for your records. Copy and paste this code into the security code field on your application: aB3dE5fG";
+  it("prefers the 8-character code when the site expects 8", () => {
+    expect(extractCode(email, 8)).toBe("aB3dE5fG");
+  });
+  it("still finds ordinary 6-digit codes", () => {
+    expect(extractCode("Your verification code is 482913")).toBe("482913");
+  });
+});

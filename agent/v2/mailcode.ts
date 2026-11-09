@@ -18,20 +18,28 @@ const codeLike = (w: string) => {
   return w.length >= 6 && upper >= 2 && lower >= 2 && !/^[A-Z][a-z]+$/.test(w) && !/^[A-Z]+[a-z]+$/.test(w);
 };
 
-export function extractCode(text: string): string | null {
+/**
+ * `length`: the code length the site expects (Greenhouse: always 8 characters). When given, a token of
+ * exactly that length wins over an earlier code-like word of another length.
+ */
+export function extractCode(text: string, length?: number): string | null {
   const t = text.replace(/\s+/g, " ");
+  const candidates: string[] = [];
   // 1. "…code …: XXXXXXXX" — the code right after a colon is the strongest signal.
   const colon = /(code|passcode|pin|otp)\b[^:\n]{0,120}:\s*([A-Za-z0-9]{4,12})\b/gi;
   let m: RegExpExecArray | null;
-  while ((m = colon.exec(t))) if (codeLike(m[2])) return m[2];
+  while ((m = colon.exec(t))) if (codeLike(m[2]) || (length && m[2].length === length && /[A-Za-z]/.test(m[2]) && /[0-9]/.test(m[2]))) candidates.push(m[2]);
   // 2. "Your verification code is 482913" / a code token shortly after the word "code".
   const re = /(code|passcode|pin|one[- ]time password|otp)\b/gi;
   while ((m = re.exec(t))) {
     const window = t.slice(m.index + m[0].length, m.index + m[0].length + 220);
-    const hit = (window.match(/\b[A-Za-z0-9]{4,12}\b/g) ?? []).find(codeLike);
-    if (hit) return hit;
+    for (const w of window.match(/\b[A-Za-z0-9]{4,12}\b/g) ?? []) if (codeLike(w)) candidates.push(w);
   }
-  return null;
+  if (length) {
+    const exact = candidates.find((c) => c.length === length);
+    if (exact) return exact;
+  }
+  return candidates[0] ?? null;
 }
 
 /** Pulls a verify/confirm/activate link out of an email (HTML or text). */
@@ -94,9 +102,13 @@ export async function waitForVerification(
         const { text, html } = await m.body();
         // Several applications run at once: skip a code email that names a different company.
         if (opts.mention && !mentions(`${m.from} ${m.subject} ${text.slice(0, 3000)}`, opts.mention)) continue;
-        const found = opts.want === "code" ? extractCode(`${m.subject}\n${text}`) : extractLink(html, text, opts.host);
+        // Greenhouse codes are always 8 characters ("enter the 8-character code").
+        const want = /greenhouse/i.test(`${m.from} ${m.subject}`) || /8-character/i.test(text) ? 8 : undefined;
+        const found = opts.want === "code" ? extractCode(`${m.subject}\n${text}`, want) : extractLink(html, text, opts.host);
         if (found && !used.has(found)) {
           used.add(found);
+          // Never the code itself in logs — only where it came from and its length, to spot a wrong pick.
+          if (opts.want === "code") opts.log?.(`    code from "${m.subject.slice(0, 60)}" (${found.length} chars${want && found.length !== want ? `, expected ${want}` : ""})`);
           return found;
         }
         opts.log?.(`    no ${opts.want} in: ${m.from.slice(0, 50)} | ${m.subject.slice(0, 70)} (${text.length} chars)`);
