@@ -54,6 +54,8 @@ export interface ApplyOpts {
   emailLink?: (since: Date, match: RegExp, host?: string, waitMs?: number) => Promise<string | null>;
   /** True when this portal account was already created on an earlier run. */
   accountExists?: boolean;
+  /** Writes a cover letter PDF for this job (only called when a form requires one). */
+  coverLetter?: () => Promise<string | null>;
 }
 
 export type ApplyStatus = "submitted" | "needs_user" | "failed" | "closed";
@@ -330,13 +332,17 @@ export const yesNo = (f: Field, yes: boolean): string => {
 /** Answers we know without asking the AI (free). */
 export function knownValue(f: Field, a: Applicant): string | null {
   const l = f.label.toLowerCase();
-  if (f.kind === "file") return /cover/.test(l) ? null : /resume|cv|attach/.test(l) || f.required ? "__RESUME__" : null;
+  // A required cover letter gets one written for this job (opts.coverLetter); optional ones are left empty.
+  if (f.kind === "file") return /cover/.test(l) ? (f.required ? "__COVER__" : null) : /resume|cv|attach/.test(l) || f.required ? "__RESUME__" : null;
   if (/password/.test(l)) return a.portal?.password ?? null;
   // "By entering today's date I acknowledge…" / signature date: today's date.
   if (/today.?s date|enter (the|today.?s|current) date|date of (signature|acknowledg)|signature date|^date\b|\bdate signed\b/.test(l) && f.kind !== "checkbox" && f.kind !== "radio") {
     const d = new Date();
     return `${String(d.getMonth() + 1).padStart(2, "0")}/${String(d.getDate()).padStart(2, "0")}/${d.getFullYear()}`;
   }
+  // "Please type your name to electronically sign this document" / e-signature: the full name.
+  if (/(type|enter|print) your (full |legal )?name|electronically sign|e-?signature|digital signature|^signature/.test(l) && f.kind !== "checkbox" && f.kind !== "radio")
+    return `${a.first_name} ${a.last_name}`;
   if (/first name|given name|preferred first|preferred name|nickname/.test(l)) return a.first_name;
   if (/last name|family name|surname/.test(l)) return a.last_name;
   if (/^(full )?name\b|your name|legal name/.test(l) && !/company|school|reference|employer/.test(l)) return `${a.first_name} ${a.last_name}`;
@@ -579,6 +585,18 @@ export async function readComboboxOptions(page: Page, fields: Field[]) {
   }
 }
 
+/** Close a cookie banner that would cover the Submit button (declines optional cookies when it can). */
+async function dismissCookies(page: Page) {
+  for (const t of ["Decline all", "Reject all", "Decline optional cookies", "Reject", "Decline", "Accept all", "Accept", "Got it", "I agree"]) {
+    const b = page.locator(`button:text-is("${t}"), a[role=button]:text-is("${t}")`).first();
+    if (await b.isVisible().catch(() => false)) {
+      await b.click({ timeout: 2000 }).catch(() => {});
+      await page.waitForTimeout(400);
+      return;
+    }
+  }
+}
+
 /** Testing aid: with APPLY_DEBUG_DIR set, keep a screenshot, the page text and the result of every attempt. */
 async function saveDebug(context: import("playwright").BrowserContext, company: string, r: ApplyResult) {
   const dir = process.env.APPLY_DEBUG_DIR;
@@ -737,6 +755,7 @@ async function fillAndSubmit(
     // so the autofill can't overwrite answers filled afterwards.
     const tick = (what: string) => process.env.APPLY_DEBUG_DIR && console.log(`[9to5]   t+${Math.round((Date.now() - t0) / 1000)}s ${what}`);
     tick("page open");
+    await dismissCookies(page);
     const resumeInput = page.locator("input[type=file]").first();
     if ((await resumeInput.count()) && opts.resumePath) {
       await resumeInput.setInputFiles(opts.resumePath).catch(() => {});
@@ -786,11 +805,36 @@ async function fillAndSubmit(
         await retag(page, fields);
       }
       const tf = Date.now();
+      if (v === "__COVER__") {
+        const path = await opts.coverLetter?.().catch(() => null);
+        if (path) await page.setInputFiles(`[data-9to5="${f.id}"]`, path).catch(() => {});
+        continue;
+      }
       await fill(page, f, v === "__RESUME__" ? "" : v, opts.resumePath).catch(() => {});
       if (Date.now() - tf > 4000) tick(`slow fill (${Math.round((Date.now() - tf) / 1000)}s): ${f.kind} ${f.label.slice(0, 60)}`);
     }
     tick("filled");
     await page.waitForTimeout(1500);
+
+    // Follow-up questions appear only after an answer (Greenhouse shows "Please identify your race" once
+    // "Are you Hispanic/Latino?" is answered). Look again and answer the new ones, up to twice.
+    for (let pass = 0; pass < 2; pass++) {
+      const seen = new Set(fields.map((f) => `${f.kind}|${f.label}`));
+      const extra = (await collectFields(page)).filter((f) => !seen.has(`${f.kind}|${f.label}`) && !f.filled && f.kind !== "file");
+      if (!extra.length) break;
+      await readComboboxOptions(page, extra);
+      const more = await answerFields(db, extra, opts);
+      aiCalls += more.aiCalls;
+      learned.push(...more.learned);
+      for (const f of extra) {
+        const v = more.answers[f.id];
+        if (v) await fill(page, f, v, opts.resumePath).catch(() => {});
+      }
+      tick(`answered ${extra.filter((f) => more.answers[f.id]).length}/${extra.length} follow-up question(s)`);
+      if (more.quota) break;
+      await page.waitForTimeout(1000);
+    }
+    await dismissCookies(page);
 
     if (await captchaVisible(page)) return { status: "needs_user", detail: "Site shows a CAPTCHA — please submit this one yourself", answers: labelled(fields, answers), learned, usedPortalLogin, aiCalls };
     if (opts.dryRun) return { status: "needs_user", detail: "Dry run: form filled but not submitted", answers: labelled(fields, answers), learned, usedPortalLogin, aiCalls };
@@ -814,7 +858,20 @@ async function fillAndSubmit(
     if (SUCCESS.test(after) || /confirmation|thank/i.test(page.url())) return { status: "submitted", detail: "Application submitted", answers: labelled(fields, answers), learned, usedPortalLogin, aiCalls };
     if (await captchaVisible(page)) return { status: "needs_user", detail: "CAPTCHA appeared on submit — please submit this one yourself", answers: labelled(fields, answers), learned, usedPortalLogin, aiCalls };
     // Real validation messages only — not helper text like "please select all that apply".
-    const err = after.match(/(your form needs corrections[^.]{0,40}|missing entry for required field:?[^.?]{0,120}|this field is required|(field|question|answer) is required|please (enter|fill in|complete|provide)[^.]{0,80}|(is )?invalid (email|phone|format|value)[^.]{0,40})/i)?.[0];
+    // The fields the page itself marks invalid, by their question — not question text that merely says "please provide…".
+    const invalid = await page
+      .evaluate(() =>
+        Array.from(document.querySelectorAll("[aria-invalid=true]"))
+          .filter((e) => (e as HTMLElement).getBoundingClientRect().width > 0)
+          .map((e) => {
+            const id = e.getAttribute("id");
+            const lab = (id && document.querySelector(`label[for="${id}"]`)) || e.closest("label, fieldset, [class*=field i], [class*=question i]")?.querySelector("label, legend");
+            return (lab?.textContent ?? e.getAttribute("aria-label") ?? "").replace(/\s+/g, " ").replace(/\*/g, "").trim().slice(0, 80);
+          })
+          .filter(Boolean)
+      )
+      .catch(() => [] as string[]);
+    const err = invalid.length ? `needs ${[...new Set(invalid)].slice(0, 3).join("; ")}` : after.match(/(your form needs corrections[^.]{0,40}|missing entry for required field:?[^.?]{0,120}|this field is required|(field|question|answer) is required|please (enter|fill in|complete|provide)[^.]{0,80}|(is )?invalid (email|phone|format|value)[^.]{0,40})/i)?.[0];
     return { status: "needs_user", detail: err ? `Form rejected: ${err}` : "Submitted but no confirmation seen — please check", answers: labelled(fields, answers), learned, usedPortalLogin, aiCalls };
   } catch (e) {
     return { status: "failed", detail: (e as Error).message.slice(0, 300), aiCalls };

@@ -35,24 +35,30 @@ export function detectLevel(title: string, extra = ""): JobLevel {
 }
 
 const US_STATES =
-  "AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|DC";
+  "AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|DC|PR|GU|VI|AS|MP"; // + US territories: Puerto Rico, Guam, US Virgin Islands, American Samoa, Northern Mariana Islands
 const US_STATE_NAMES =
-  "alabama|alaska|arizona|arkansas|california|colorado|connecticut|delaware|florida|georgia|hawaii|idaho|illinois|indiana|iowa|kansas|kentucky|louisiana|maine|maryland|massachusetts|michigan|minnesota|mississippi|missouri|montana|nebraska|nevada|new hampshire|new jersey|new mexico|new york|north carolina|north dakota|ohio|oklahoma|oregon|pennsylvania|rhode island|south carolina|south dakota|tennessee|texas|utah|vermont|virginia|washington|west virginia|wisconsin|wyoming";
+  "alabama|alaska|arizona|arkansas|california|colorado|connecticut|delaware|florida|georgia|hawaii|idaho|illinois|indiana|iowa|kansas|kentucky|louisiana|maine|maryland|massachusetts|michigan|minnesota|mississippi|missouri|montana|nebraska|nevada|new hampshire|new jersey|new mexico|new york|north carolina|north dakota|ohio|oklahoma|oregon|pennsylvania|rhode island|south carolina|south dakota|tennessee|texas|utah|vermont|virginia|washington|west virginia|wisconsin|wyoming|puerto rico|guam|virgin islands|american samoa|northern mariana islands|district of columbia";
 const US_RE = new RegExp(
-  `\\b(united states|usa|u\\.s\\.a?\\.?|us|${US_STATE_NAMES})\\b|,\\s*(${US_STATES})\\b|\\b(${US_STATES})\\s*$|\\b(new york|nyc|san francisco|seattle|austin|boston|chicago|atlanta|denver|los angeles|bay area|silicon valley)\\b`,
+  `\\b(united states|usa|u\\.s\\.a?\\.?|us|${US_STATE_NAMES})\\b|,\\s*(${US_STATES})\\b|\\b(${US_STATES})\\s*$|\\b(new york|nyc|san francisco|seattle|austin|boston|chicago|atlanta|denver|los angeles|bay area|silicon valley|san juan|hagatna|saipan)\\b`,
   "i"
 );
+// Jobs only in the US and US territories: anything placed in another country is out.
 const NON_US =
-  /\b(canada|toronto|vancouver|montreal|ontario|united kingdom|\buk\b|london|england|ireland|dublin|germany|berlin|munich|france|paris|netherlands|amsterdam|spain|india|bangalore|bengaluru|hyderabad|pune|singapore|japan|tokyo|china|australia|sydney|brazil|mexico|poland|israel|tel aviv|emea|apac|latam|europe)\b/i;
+  /\b(canada|canadian|toronto|vancouver|montreal|ontario|quebec|british columbia|alberta|calgary|ottawa|united kingdom|\buk\b|britain|london|england|scotland|wales|ireland|dublin|germany|berlin|munich|hamburg|france|paris|netherlands|amsterdam|belgium|brussels|spain|madrid|barcelona|portugal|lisbon|italy|milan|rome|switzerland|zurich|geneva|austria|vienna|sweden|stockholm|norway|oslo|denmark|copenhagen|finland|helsinki|poland|warsaw|krakow|czech|prague|hungary|budapest|romania|bucharest|bulgaria|greece|ukraine|kyiv|serbia|croatia|estonia|latvia|lithuania|turkey|istanbul|israel|tel aviv|egypt|cairo|nigeria|lagos|kenya|nairobi|south africa|cape town|johannesburg|morocco|uae|dubai|abu dhabi|saudi|qatar|india|bangalore|bengaluru|hyderabad|pune|chennai|mumbai|delhi|noida|gurgaon|gurugram|pakistan|bangladesh|sri lanka|nepal|singapore|malaysia|kuala lumpur|indonesia|jakarta|philippines|manila|vietnam|ho chi minh|hanoi|thailand|bangkok|japan|tokyo|korea|seoul|china|shanghai|beijing|shenzhen|hong kong|taiwan|taipei|australia|sydney|melbourne|new zealand|auckland|brazil|sao paulo|são paulo|argentina|buenos aires|chile|santiago|colombia|bogota|bogotá|medellin|peru|lima|mexico|mexico city|guadalajara|costa rica|uruguay|emea|apac|latam|europe|asia)\b/i;
 
 export function isUsLocation(loc: string): boolean {
   if (!loc) return false;
-  if (US_RE.test(loc)) return true;
-  return false;
+  // "Toronto, Canada" or "London, UK" are not US even if a word like "us" slips in; a list that also
+  // names a US place ("New York, NY or London") still counts — the user can take the US one.
+  if (NON_US.test(loc) && !US_PLACE.test(loc)) return false;
+  return US_RE.test(loc);
 }
+/** A concrete US place (state, territory or big US city) — stronger than the bare word "US". */
+const US_PLACE = new RegExp(`,\\s*(${US_STATES})\\b|\\b(${US_STATE_NAMES}|united states|usa)\\b|\\b(new york|nyc|san francisco|seattle|austin|boston|chicago|atlanta|denver|los angeles|san juan)\\b`, "i");
 
 /** True when a remote job is open to US-based people. */
 export function isUsRemote(loc: string): boolean {
+  if (loc && NON_US.test(loc) && !US_PLACE.test(loc)) return false;
   if (!loc || /^remote$|anywhere|worldwide|global/i.test(loc.trim())) return true;
   if (NON_US.test(loc) && !US_RE.test(loc)) return false;
   return US_RE.test(loc) || /north america|americas/i.test(loc);

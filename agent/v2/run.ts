@@ -38,6 +38,7 @@ import { familyOf, judgeRoute, learnRoutes, titleKey } from "../../src/lib/v2/le
 import { isAggregator, resolveDirectLink } from "../../src/lib/v2/discovery/resolve";
 import { domainAgeYears, employerDomain } from "../../src/lib/v2/company-age";
 import { EXTRA_BOARDS } from "../../src/lib/v2/discovery/extra-boards";
+import { coverLetterPdf, writeCoverLetter } from "../../src/lib/v2/cover-letter";
 import { minutesPlan } from "../../src/lib/v2/minutes";
 import { sendRunDigest } from "./digest";
 import { customStore, memoryKey, rememberAnswers, type AppAnswers, type CustomAnswers } from "../../src/lib/v2/app-questions";
@@ -763,7 +764,18 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
     );
     applicant.memory = { ...memory, ...reuse };
     const t0 = Date.now();
-    const r = await applyToJob(browser, sb, { url: applyUrl, ats: p.ats, applicant, resumePath, jobTitle: job.title, company: job.company_name, userId: u.id, dryRun, jobDescription: p.description, emailCode, emailLink, accountExists: Boolean(acct?.account_created) });
+    const r = await applyToJob(browser, sb, { url: applyUrl, ats: p.ats, applicant, resumePath, jobTitle: job.title, company: job.company_name, userId: u.id, dryRun, jobDescription: p.description, emailCode, emailLink, accountExists: Boolean(acct?.account_created),
+      coverLetter: async () => {
+        const who = { name: `${applicant.first_name} ${applicant.last_name}`, email: applicant.email, phone: applicant.phone, company: job.company_name };
+        const body = await writeCoverLetter(sb, { ...who, title: job.title, resume: applicant.resume_text, jobDescription: p.description ?? "", userId: u.id });
+        const jobDir = join(dir, `${job.id}-cover`);
+        mkdirSync(jobDir, { recursive: true });
+        const path = join(jobDir, `${`${applicant.first_name}_${applicant.last_name}`.replace(/[^a-z0-9_]/gi, "")}_Cover_Letter.pdf`);
+        writeFileSync(path, await coverLetterPdf(who, body));
+        bump("cover_letter_written");
+        return path;
+      },
+    });
     log(`apply ${u.id.slice(0, 8)} → ${job.company_name} / ${job.title}: ${r.status} in ${Math.round((Date.now() - t0) / 1000)}s, ${r.aiCalls ?? 0} AI call(s) (${r.detail})`);
     if (dryRun && r.answers) log("  answers:", JSON.stringify(r.answers).slice(0, 1500));
     if (dryRun && r.pending?.length) log("  waiting on user:", JSON.stringify(r.pending).slice(0, 1500));
