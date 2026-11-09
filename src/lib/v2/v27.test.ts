@@ -28,3 +28,23 @@ describe("signature fields", () => {
     expect(knownValue(f, { first_name: "Ada", last_name: "Lovelace" } as never)).toBe("Ada Lovelace");
   });
 });
+
+describe("education section fields", async () => {
+  const { knownValue, gradParts } = await import("../../../agent/v2/apply");
+  const a = { first_name: "A", last_name: "B", graduation_date: "May 2027", education: [{ school: "State U", degree: "Bachelor's Degree", field: "Software Engineering", graduation: "May 2027" }] } as never;
+  const f = (label: string, options: string[] = [], kind = "combobox") => ({ id: "x", label, kind, required: true, options, filled: false }) as never;
+  it("reads graduation dates", () => {
+    expect(gradParts("May 2027")).toEqual({ year: 2027, monthName: "May" });
+    expect(gradParts("2026-12")).toEqual({ year: 2026, monthName: "December" });
+  });
+  it("fills Greenhouse education: degree, discipline, start and end dates", () => {
+    expect(knownValue(f("Degree", ["High School", "Bachelor's Degree", "Master's Degree"]), a)).toBe("Bachelor's Degree");
+    expect(knownValue(f("Discipline", ["Computer Science", "Software Engineering"]), a)).toBe("Software Engineering");
+    expect(knownValue(f("End date year", ["2026", "2027", "2028"]), a)).toBe("2027");
+    expect(knownValue(f("End date month"), a)).toBe("May");
+    expect(knownValue(f("Start date year"), a)).toBe("2023");
+  });
+  it("doesn't answer questions that only mention a degree", () => {
+    expect(knownValue(f("Do you have a Bachelor's degree?", ["Yes", "No"]), a)).not.toBe("Bachelor's Degree");
+  });
+});

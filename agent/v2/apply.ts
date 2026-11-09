@@ -389,6 +389,18 @@ export function knownValue(f: Field, a: Applicant): string | null {
   )
     return a.school;
   if (/graduat/.test(l) && /date|year|when|expected/.test(l) && f.kind === "text" && a.graduation_date) return a.graduation_date;
+  // Education section fields (Greenhouse: Degree / Discipline / Start & End date month + year).
+  const edu = a.education?.[0];
+  const isQuestion = /\?|\b(do you|have you|are you|will you|did you|what is your highest)\b/.test(l);
+  if (!isQuestion && edu) {
+    const grad = gradParts(edu.graduation ?? a.graduation_date);
+    if (/\bdegree\b/.test(l) && !/year|date|month/.test(l) && edu.degree) return f.options.length ? pickOption(edu.degree, f.options) ?? edu.degree : edu.degree;
+    if (/discipline|field of study|\bmajor\b|area of study/.test(l) && edu.field) return f.options.length ? pickOption(edu.field, f.options) ?? edu.field : edu.field;
+    if (grad && /(end|graduation|completion|to)\b.{0,12}\b(date )?year|^year\b.{0,10}(end|graduat)/.test(l)) return String(grad.year);
+    if (grad && /(end|graduation|completion|to)\b.{0,12}\b(date )?month/.test(l)) return grad.monthName;
+    if (grad && /(start|from)\b.{0,12}\b(date )?year/.test(l)) return String(grad.year - (/master|m\.?s\b/i.test(edu.degree ?? "") ? 2 : 4));
+    if (grad && /(start|from)\b.{0,12}\b(date )?month/.test(l)) return "August";
+  }
   // Sponsorship before authorization: "authorized … without sponsorship" questions mention both.
   // Only real questions about NEEDING sponsorship — not notices like "sponsorship is not available, select Yes to confirm".
   const asksSponsorship =
@@ -465,6 +477,8 @@ export async function fill(page: Page, f: Field, value: string, resumePath: stri
   const sel = `[data-9to5="${f.id}"]`;
   switch (f.kind) {
     case "file":
+      // The resume never goes into a cover-letter slot (a required one gets a written letter instead).
+      if (/cover/i.test(f.label)) return;
       await page.setInputFiles(sel, resumePath);
       return;
     case "text":
@@ -583,6 +597,18 @@ export async function readComboboxOptions(page: Page, fields: Field[]) {
       // leave it as free text
     }
   }
+}
+
+const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+/** "May 2027" / "2027-05" / "05/2027" / "2027" → { year, monthName } (month defaults to May). */
+export function gradParts(s: string | null | undefined): { year: number; monthName: string } | null {
+  if (!s) return null;
+  const year = Number(s.match(/(19|20)\d\d/)?.[0]);
+  if (!year) return null;
+  const named = MONTHS.findIndex((m) => new RegExp(m.slice(0, 3), "i").test(s));
+  const num = s.match(/(?:^|[^\d])(1[0-2]|0?[1-9])[/-](?:19|20)\d\d|(?:19|20)\d\d-(1[0-2]|0?[1-9])/); // "12" before "1"
+  const idx = named >= 0 ? named : num ? Number(num[1] ?? num[2]) - 1 : 4;
+  return { year, monthName: MONTHS[idx] };
 }
 
 /** Close a cookie banner that would cover the Submit button (declines optional cookies when it can). */
@@ -894,8 +920,15 @@ async function enterEmailCode(page: Page, emailCode: ((since: Date) => Promise<s
     return null;
   });
   if (!code) return "not_found";
-  if (n > 1 && n >= code.length) for (let i = 0; i < code.length; i++) await boxes.nth(i).fill(code[i]);
-  else await boxes.first().fill(code);
+  if (n > 1 && n >= code.length) {
+    // One box per character (Greenhouse: 8 boxes). Type the whole code from the first box so the site
+    // moves focus itself — filling box by box lost a character and left Submit disabled.
+    await boxes.first().click().catch(() => {});
+    await page.keyboard.type(code, { delay: 90 });
+    await page.waitForTimeout(300);
+    const got = await boxes.evaluateAll((els) => els.map((e) => (e as HTMLInputElement).value).join(""));
+    if (got.length < code.length) for (let i = 0; i < code.length; i++) await boxes.nth(i).fill(code[i]).catch(() => {});
+  } else await boxes.first().fill(code);
   await page.waitForTimeout(500);
   const again = page.locator("button[type=submit], input[type=submit], button:has-text('Submit'), button:has-text('Verify')").last();
   if (await again.count()) await again.click().catch(() => {});

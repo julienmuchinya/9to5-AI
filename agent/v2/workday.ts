@@ -108,12 +108,15 @@ async function settle(page: Page, ms = 15000) {
 }
 
 async function errorsOnPage(page: Page): Promise<string> {
-  const errs = (await page.locator(ERRORS).allTextContents().catch(() => [] as string[])).map((e) => e.replace(/\s+/g, " ").trim()).filter(Boolean);
-  if (!errs.length) {
-    const body = await text(page);
-    for (const m of body.matchAll(/Error: ([^.]{3,160}\.)/g)) if (!errs.includes(m[1])) errs.push(m[1]);
-  }
-  return errs.join(" · ").slice(0, 400);
+  // Upload confirmations ("Resume.pdf successfully uploaded") share the alert style — they aren't errors.
+  const errs = (await page.locator(ERRORS).allTextContents().catch(() => [] as string[]))
+    .map((e) => e.replace(/\s+/g, " ").trim())
+    .filter((e) => e && !/successfully uploaded|upload(ed)? successfully/i.test(e));
+  const body = await text(page);
+  if (!errs.length) for (const m of body.matchAll(/Error: ([^.]{3,160}\.)/g)) if (!errs.includes(m[1])) errs.push(m[1]);
+  // Always include the page's own "The field X is required" lines (they name the question).
+  for (const m of body.matchAll(/The field .{2,700}? is required and must have a value\./g)) if (!errs.some((e) => e.includes(m[0].slice(0, 60)))) errs.push(m[0]);
+  return errs.join(" · ").slice(0, 2000);
 }
 
 /** Remove the last picked item of a Workday multi-select: Backspace in its empty search box. */
@@ -620,7 +623,7 @@ export async function applyWorkday(page: Page, db: SupabaseClient, opts: ApplyOp
         // the answer is remembered for every later application — instead of failing the same way 3 times.
         const norm = (x: string) => x.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
         const answered = Object.keys(allAnswers).map(norm);
-        const unanswered = [...errs.matchAll(/The field (.{2,240}?) is required and must have a value/g)]
+        const unanswered = [...errs.matchAll(/The field (.{2,700}?) is required and must have a value/g)]
           .map((m) => m[1].trim())
           .filter((l) => !answered.some((a) => a && (a.includes(norm(l).slice(0, 40)) || norm(l).includes(a.slice(0, 40)))));
         if (unanswered.length) {
@@ -637,7 +640,7 @@ export async function applyWorkday(page: Page, db: SupabaseClient, opts: ApplyOp
           };
         }
         // Often a slow page or a resume still parsing: the run loop retries it (up to 3 tries) before it goes to the user.
-        return { status: "failed", detail: `Workday stopped at "${stepName}"${errs ? `: ${errs}` : ""} — will retry next run`, answers: allAnswers, learned, aiCalls, usedPortalLogin: true, accountCreated };
+        return { status: "failed", detail: `Workday stopped at "${stepName}"${errs ? `: ${errs.slice(0, 300)}` : ""} — will retry next run`, answers: allAnswers, learned, aiCalls, usedPortalLogin: true, accountCreated };
       }
 
       // Resume upload (My Experience). Workday parses it and pre-fills work history.
