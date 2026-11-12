@@ -51,7 +51,7 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
             <label className="block text-sm">
               Max applications per day
               <input className={input} type="number" name="daily_apply_cap" min={0} max={300} defaultValue={s?.daily_apply_cap ?? 5} />
-              <span className="mt-1 block text-xs text-[var(--muted)]">0–100 in total. Never more than 5 per company per day, freshest postings first. The free AI quota is the real limit.</span>
+              <span className="mt-1 block text-xs text-[var(--muted)]">0–100 in total. Never more than 10 per company per day, freshest postings first. The free AI quota is the real limit.</span>
             </label>
             <label className="block text-sm">
               Minimum fit score to auto-apply

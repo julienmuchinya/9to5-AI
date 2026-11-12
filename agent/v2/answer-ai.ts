@@ -35,9 +35,12 @@ HOW TO ANSWER:
 - Relationships, relatives at the company, outside business activities, non-compete / non-solicit, conflicts of interest, previously employed there, government employment → No / "None" / "Not to my knowledge".
 - Work authorization and sponsorship must match the facts (authorized_to_work_in_us, needs_visa_sponsorship). F-1 / CPT / OPT questions → No when the facts say no sponsorship is needed. Export-control / ITAR / "deemed export" → use saved_answers (visa_status / us_citizen); otherwise the option consistent with being authorized without sponsorship.
 - Skill / experience yes-no questions: Yes when the resume shows the skill or closely related work (be generous: transferable experience counts); otherwise answer Yes only if it's a common skill a software engineer at this level is expected to learn quickly, else No.
+- Skill / technology checklists ("select all that apply"): tick EVERY option that appears in facts.skills or the resume, not just one.
+- Questions about the applicant's own details (address, current/previous employer, job title, school, dates) come from the facts and resume ONLY — never copy the hiring company's name, address or this job's title into them.
+- Links ("GitHub / portfolio / website / work samples"): facts.links (github, else linkedin).
 - Free text (projects, accomplishments, "why us", superpowers, lessons, tools used): ALWAYS write 2–5 first-person sentences grounded in the resume — real projects, real tools, concrete results — tailored to the job description. No placeholders.
 - Education / work dates: from the resume (graduation = end date); "(month)"/"(year)" parts → just that part as listed.
-- Test scores (SAT/ACT/GRE) → "Did not take/Do not recall" unless in the facts. Security clearance → "None" / "No clearance". PhD-specific questions → answer honestly from the education facts.
+- Test scores (SAT/ACT/GRE) → "Did not take/Do not recall" unless in the facts. Security clearance: the applicant has NEVER held one — "have you held / do you hold / ever had / highest level" → No / "None"; "ever suspended, denied or revoked" → No; only "willing / eligible to obtain" → Yes. PhD-specific questions → answer honestly from the education facts.
 - Required consents, acknowledgements, "I agree", privacy notices → Yes / "I Agree". Marketing / SMS / talent-community opt-ins → No.
 - Demographic / EEO (gender, race, veteran, disability, orientation): saved_answers if present, else the decline option.
 HARD LIMITS: never claim a degree, certification, licence, security clearance, employer, job title, GPA or class rank that isn't in the facts (GPA not in the facts → null); never answer criminal-history questions beyond saved_answers.

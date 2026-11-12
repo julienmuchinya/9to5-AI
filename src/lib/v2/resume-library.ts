@@ -71,6 +71,27 @@ export function resumeJobScore(resume: ParsedResume | null, jobText: string): nu
   return hit / total;
 }
 
+/** Technologies a job posting names, so coverage can be judged on what the job actually asks for. */
+const TECH =
+  "python java javascript typescript c c++ c# go golang rust ruby php swift kotlin scala r matlab sql nosql html css react angular vue svelte next.js node node.js express django flask fastapi spring rails .net asp.net graphql rest grpc aws azure gcp docker kubernetes terraform ansible jenkins ci/cd git linux unix bash powershell postgresql postgres mysql mongodb redis elasticsearch kafka rabbitmq spark hadoop airflow snowflake databricks pandas numpy pytorch tensorflow keras scikit-learn sklearn llm llms openai langchain rag nlp ml ai machine-learning deep-learning computer-vision opencv cuda embedded firmware rtos verilog vhdl fpga arm stm32 ros simulink labview sap salesforce tableau powerbi excel jira agile scrum microservices oop tdd junit pytest selenium playwright cypress jest unity unreal ios android flutter react-native xcode figma firebase supabase stripe oauth jwt security devops sre observability prometheus grafana datadog splunk sdlc api apis"
+    .split(" ")
+    .filter(Boolean);
+const TECH_SET = new Set(TECH);
+
+/**
+ * Share (0–1) of the technologies the job names that the resume already has. 1 when the job names none.
+ * Used to decide whether the original PDF goes out untouched (strong match) or gets tailored first.
+ */
+export function jobSkillCoverage(resume: ParsedResume | null, jobText: string): { coverage: number; missing: string[]; asked: string[] } {
+  const asked = [...new Set(tokens(jobText).map((w) => w.replace(/[.,;:]+$/, "")).filter((w) => TECH_SET.has(w)))];
+  if (!resume || !asked.length) return { coverage: resume ? 1 : 0, missing: [], asked };
+  const mine = new Set(tokens(`${resumeToText(resume)} ${(resume.skills ?? []).join(" ")}`).map((w) => w.replace(/[.,;:]+$/, "")));
+  const alias: Record<string, string[]> = { node: ["node.js", "nodejs"], "node.js": ["node", "nodejs"], golang: ["go"], go: ["golang"], postgres: ["postgresql"], postgresql: ["postgres"], sklearn: ["scikit-learn"], "scikit-learn": ["sklearn"], ml: ["machine-learning", "machine"], ai: ["artificial"], apis: ["api"], api: ["apis"], "ci/cd": ["ci", "cd"], llms: ["llm"], llm: ["llms"] };
+  const has = (w: string) => mine.has(w) || (alias[w] ?? []).some((a) => mine.has(a));
+  const missing = asked.filter((w) => !has(w));
+  return { coverage: (asked.length - missing.length) / asked.length, missing, asked };
+}
+
 /** The resume (of several) that best fits this job. */
 export function pickResume(lib: ResumeLibrary, jobText: string): ResumeEntry | null {
   const usable = lib.resumes.filter((r) => r.parsed?.experience?.length || r.parsed?.skills?.length);

@@ -114,7 +114,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
             <Badge variant={s?.auto_submit_enabled ? "success" : "default"}>Auto-submit {s?.auto_submit_enabled ? `on · max ${s?.daily_apply_cap}/day` : "off"}</Badge>
           </div>
           <p className="mt-3 text-sm text-[var(--muted)]">
-            Freshest postings first, max 5 per company per day. Next scheduled run{" "}
+            Freshest postings first, max 10 per company per day. Next scheduled run{" "}
             ~{t.time(nextScheduledRun(), true)} (GitHub may start it late).
           </p>
           <div className="mt-auto pt-4">

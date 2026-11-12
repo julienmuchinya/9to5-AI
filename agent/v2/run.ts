@@ -24,9 +24,9 @@ import { bumpUsage, freeTierSnapshot, readUsage, SAFETY_RATIO, today } from "../
 import { aiAvailable } from "../../src/lib/v2/gemini";
 import { fallbackConfigured } from "../../src/lib/v2/fallback-ai";
 import { renderClassicResume } from "../../src/lib/v2/resume-render";
-import { aiTailorResume, boldJobKeywords, loadLibrary, pickResume, resumeJobScore, type ResumeEntry } from "../../src/lib/v2/resume-library";
+import { aiTailorResume, boldJobKeywords, jobSkillCoverage, loadLibrary, pickResume, resumeJobScore, type ResumeEntry } from "../../src/lib/v2/resume-library";
 import { tailorResume, resumeToText, type ParsedResume } from "../../src/lib/v2/resume";
-import { applyToJob, type Applicant } from "./apply";
+import { applyToJob, cleanMemory, type Applicant } from "./apply";
 import { scanInbox } from "./inbox";
 import { waitForVerification } from "./mailcode";
 import { openMailbox } from "./mailbox";
@@ -75,8 +75,9 @@ const siteKey = (u: string) => {
 const ACCOUNT_SITES = /(myworkdayjobs\.com|myworkdaysite\.com|icims\.com|taleo\.net|successfactors\.(com|eu)|oraclecloud\.com|brassring\.com|ultipro\.com|ukg\.net|avature\.net|phenompeople\.com)/i; // Jobvite and Eightfold let you apply as a guest — no account needed
 
 // ── Anti-ban pacing (all tunable by env) ──────────────────────────────────
-const PACE_MIN_S = Number(env("PACE_MIN_S", "6"));
-const PACE_MAX_S = Number(env("PACE_MAX_S", "15"));
+// 2–6 s between submissions per worker (was 6–15 s: ~7 minutes of a 25-minute run spent sleeping).
+const PACE_MIN_S = Number(env("PACE_MIN_S", "2"));
+const PACE_MAX_S = Number(env("PACE_MAX_S", "6"));
 const ATS_DAILY_CAP = Number(env("ATS_DAILY_CAP", "150")); // per ATS host, all users combined
 const COMPANY_CAP = Number(env("COMPANY_DAILY_CAP", String(COMPANY_DAILY_CAP))); // per company, per user, per day
 const MAX_DAILY_CAP = MAX_DAILY_APPLY_CAP;
@@ -87,7 +88,9 @@ let RUN_BUDGET_MS = Number(env("RUN_BUDGET_MIN", "40")) * 60_000;
 /** Started with "Run now" / Run workflow (not the schedule). */
 const MANUAL = env("GITHUB_EVENT_NAME") === "workflow_dispatch";
 /** Resume already covers this share of the job's words → skip AI rewording (saves one AI call). */
-const TAILOR_SKIP_SCORE = Number(env("TAILOR_SKIP_SCORE", "0.6"));
+const TAILOR_SKIP_SCORE = Number(env("TAILOR_SKIP_SCORE", "0.7"));
+/** The resume already has this share of the technologies the job names → send the original PDF untouched. */
+const RESUME_ORIGINAL_SCORE = Number(env("RESUME_ORIGINAL_SCORE", "0.8"));
 /** Set when a run stopped with work left (time budget), so it can hand over to a follow-up run. */
 let moreWorkLeft = false;
 const timeLeft = () => RUN_BUDGET_MS - (Date.now() - startedAt);
@@ -413,7 +416,7 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
           jobs: (u.resume_parsed?.experience ?? []).map((e) => `${e.title} @ ${e.company} (${e.start ?? "?"} – ${e.end ?? "?"})`),
           resume: u.resume_parsed ? resumeToText(u.resume_parsed).slice(0, 5000) : "",
         },
-        memory: u.answer_memory ?? {},
+        memory: cleanMemory((u.answer_memory ?? {}) as Record<string, string>),
         custom: customStore(u.custom_answers),
         answers: u.application_answers ?? {},
       },
@@ -557,8 +560,8 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
     hostCount[h] = (hostCount[h] ?? 0) + 1;
   }
   let submittedThisRun = 0;
-  let memory: AppAnswers = { ...(u.answer_memory ?? {}) };
-  let memoryChanged = false;
+  let memory: AppAnswers = cleanMemory({ ...(u.answer_memory ?? {}) } as Record<string, string>);
+  let memoryChanged = Object.keys(memory).length !== Object.keys(u.answer_memory ?? {}).length;
 
   const dir = mkdtempSync(join(tmpdir(), "9to5-"));
   // Every resume the user keeps (Resume library); each job gets the one that fits it best.
@@ -596,12 +599,13 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
     sponsorship_needed: u.sponsorship_needed,
     relocation: u.relocation,
     resume_text: u.resume_parsed ? resumeToText(u.resume_parsed) : "",
-    experience: (u.resume_parsed?.experience ?? []).map((e) => ({ title: e.title, company: e.company, start: e.start, end: e.end })),
+    experience: (u.resume_parsed?.experience ?? []).map((e) => ({ title: e.title, company: e.company, start: e.start, end: e.end, location: e.location ?? null, bullets: (e.bullets ?? []).map((b) => b.replace(/\*\*/g, "")) })),
+    skills: [...new Set([...(u.resume_parsed?.skills ?? []), ...(u.skills ?? [])])],
     gpa: (u.resume_parsed?.education ?? []).find((e) => e.gpa)?.gpa ?? null,
     // Bachelor's first: Workday's Education 1 is usually the completed / nearest degree.
     education: [...(u.resume_parsed?.education ?? [])]
       .sort((x, y) => (/bachelor/i.test(y.degree ?? "") ? 1 : 0) - (/bachelor/i.test(x.degree ?? "") ? 1 : 0))
-      .map((e) => ({ school: e.school, degree: e.degree, field: e.field, graduation: e.graduation })),
+      .map((e) => ({ school: e.school, degree: e.degree, field: e.field, graduation: e.graduation, gpa: e.gpa ?? null })),
     answers: u.application_answers ?? {},
     memory,
     custom: customStore(u.custom_answers),
@@ -645,7 +649,7 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
   const onlyCompany = env("APPLY_ONLY_COMPANY", "").toLowerCase(); // testing: one company only
   const onlyAts = env("APPLY_ONLY_ATS", "").split(",").map((x) => x.trim()).filter(Boolean); // testing: e.g. "lever,ashby"
   // Several applications at once (different sites), so a run gets 2–3x more done in the same minutes.
-  const CONCURRENCY = Math.max(1, Number(env("APPLY_CONCURRENCY", "3")));
+  const CONCURRENCY = Math.max(1, Number(env("APPLY_CONCURRENCY", "4")));
   const busySites = new Set<string>();
   const todo = [...picked];
   let stopAll = false;
@@ -709,11 +713,23 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
     let resumePath = await originalFor(entry);
     let focus: string | null = null;
     const parsed = entry?.parsed ?? u.resume_parsed;
-    if (parsed?.experience?.length && tailorMode !== "off") {
+    // How much of what the job asks for (named technologies) the resume already has.
+    const cover = jobSkillCoverage(parsed ?? null, jobText);
+    // Strong match (≥ RESUME_ORIGINAL_SCORE, default 80%): the user's own PDF goes out untouched — faster, and
+    // nothing to review. Below that the resume is tailored: free reorder/bold, and the AI rewords bullets
+    // only below TAILOR_SKIP_SCORE (default 70%).
+    const sendOriginal = cover.coverage >= RESUME_ORIGINAL_SCORE;
+    if (sendOriginal) {
+      bump("resume_original");
+      focus = `original · ${Math.round(cover.coverage * 100)}% match`;
+    }
+    if (parsed?.experience?.length && tailorMode !== "off" && !sendOriginal) {
       let tailored = tailorResume(parsed, jobText);
-      // Already a strong keyword match: the free tailoring is enough — save the AI call.
-      const strong = resumeJobScore(parsed, jobText) >= TAILOR_SKIP_SCORE;
+      // Already a decent keyword match: the free tailoring is enough — save the AI call.
+      const strong = cover.coverage >= TAILOR_SKIP_SCORE || resumeJobScore(parsed, jobText) >= TAILOR_SKIP_SCORE;
       if (strong) bump("tailor_skipped_strong_match");
+      else bump("resume_tailored_ai");
+      if (cover.missing.length) log(`  resume covers ${Math.round(cover.coverage * 100)}% of the job's tech (missing: ${cover.missing.slice(0, 6).join(", ")})`);
       if (tailorMode === "ai" && !aiOut && !strong) {
         try {
           tailored = await aiTailorResume(sb, tailored, { title: job.title, company: job.company_name, description: p.description ?? "" }, u.id);
@@ -722,7 +738,7 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
         }
       }
       tailored = boldJobKeywords(tailored, jobText);
-      focus = resumeFocus(tailored.skills);
+      focus = `${resumeFocus(tailored.skills)} · ${Math.round(cover.coverage * 100)}% match`;
       // Same layout as the user's own resume, always one page; if it can't fit, send the original PDF.
       const looksLikeUrl = (x?: string | null) => (x && /^https?:|\.(com|io|dev|me)\b/i.test(x) ? x : null);
       const pdf = await renderClassicResume(tailored, {
@@ -751,7 +767,8 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
 
     attempts++;
     // Workday needs a login: make sure one is saved (also on dry runs — the site account is real either way).
-    if (isWorkday) await ensurePortalLogin(sb, u.id, email, job.company_name, applyUrl);
+    // Any Workday URL (also user-queued jobs still under review): the login is created before the first attempt.
+    if (/myworkday(jobs|site).com/i.test(applyUrl)) await ensurePortalLogin(sb, u.id, email, job.company_name, applyUrl);
     applicant.portal = await portalLogin(sb, u.id, applyUrl);
     const { data: acct } = await sb.from("application_accounts").select("account_created").eq("user_id", u.id).eq("portal_host", host).maybeSingle();
     // Retrying this job? Reuse the long written answers ("Why us?", project write-ups) from the last attempt
@@ -805,7 +822,8 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
       status,
       error: r.status === "submitted" ? null : detail,
       answers: r.answers ?? {},
-      pending_questions: r.status === "needs_user" && r.pending?.length ? r.pending : null,
+      // Also after the third failed try (status becomes needs_user): the questions it was stuck on, with their choices.
+      pending_questions: status === "needs_user" && r.pending?.length ? r.pending : null,
       submitted_at: r.status === "submitted" ? new Date().toISOString() : null,
       resume_focus: focus,
     });

@@ -238,7 +238,7 @@ export default async function ApplicationsPage({ searchParams }: { searchParams:
             {running
               ? `The agent is applying right now (started ${ago(lastRun?.started_at)}).`
               : `${c.queued} waiting — next scheduled run ~${t.time(next, true)} (GitHub may start it late).`}{" "}
-            <span className="text-[var(--muted)]">Freshest postings go first, max 5 per company per day.{lastRun && !running ? ` Last run ${ago(lastRun.started_at)} (${lastRun.status}).` : ""}</span>
+            <span className="text-[var(--muted)]">Freshest postings go first, max 10 per company per day.{lastRun && !running ? ` Last run ${ago(lastRun.started_at)} (${lastRun.status}).` : ""}</span>
           </p>
         </Card>
       )}

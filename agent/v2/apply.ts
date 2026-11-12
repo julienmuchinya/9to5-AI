@@ -22,11 +22,13 @@ export interface Applicant {
   relocation?: boolean | null;
   resume_text: string;
   /** Jobs from the parsed resume (most recent first) — for work-history dates on portals like Workday. */
-  experience?: { title: string; company: string; start?: string | null; end?: string | null }[];
+  experience?: { title: string; company: string; start?: string | null; end?: string | null; location?: string | null; bullets?: string[] }[];
+  /** Skills from the resume and profile (for "Skills" boxes and skill questions). */
+  skills?: string[];
   /** GPA exactly as on the resume, if it lists one. */
   gpa?: string | null;
   /** Schools from the parsed resume (most recent first). */
-  education?: { school?: string | null; degree?: string | null; field?: string | null; graduation?: string | null }[];
+  education?: { school?: string | null; degree?: string | null; field?: string | null; graduation?: string | null; gpa?: string | null }[];
   /** Saved answers to common application questions (Profile → Common questions). */
   answers?: AppAnswers;
   /** Answers the AI gave before to the same (non job-specific) question. */
@@ -54,6 +56,8 @@ export interface ApplyOpts {
   emailLink?: (since: Date, match: RegExp, host?: string, waitMs?: number) => Promise<string | null>;
   /** True when this portal account was already created on an earlier run. */
   accountExists?: boolean;
+  /** Fields whose earlier answer the site rejected: skip saved answers and ask the AI with the real options. */
+  forceAi?: (f: Field) => boolean;
   /** Writes a cover letter PDF for this job (only called when a form requires one). */
   coverLetter?: () => Promise<string | null>;
 }
@@ -82,6 +86,9 @@ export interface Field {
   options: string[];
   /** The control already has a value (pre-filled by the site). */
   filled?: boolean;
+  /** Repeating resume blocks (Greenhouse "Employment" / "Education"): which block, 0-based. */
+  section?: "employment" | "education";
+  index?: number;
 }
 
 const STAND_OUT = /(why (do you|are you|this|our|us)|cover letter|anything else|additional (information|comments)|tell us|what (excites|interests)|interest(ed)? in)/i;
@@ -280,7 +287,14 @@ export async function collectFields(page: Page): Promise<Field[]> {
       } else if ((el.getAttribute("role") === "combobox" || el.getAttribute("aria-haspopup") === "listbox") && el.tagName !== "SELECT") {
         out.push({ id, label, kind: "combobox", required, options: [], filled: isFilled(el) });
       } else if (type === "file") {
-        out.push({ id, label, kind: "file", required, options: [] });
+        // Greenhouse labels both upload buttons "Attach": name the slot by its group ("Resume/CV", "Cover Letter") or id.
+        const generic = !label || /^(attach|upload|browse|choose( a)? file|select file|drop files?)\b/i.test(label);
+        const isGeneric = (t: string) => !t || /^(attach|upload|browse|choose( a)? file|select file|drop files?|or drag)\b/i.test(t);
+        const group = el.closest("[class*=upload i], [class*=file i], [class*=field i], fieldset")?.querySelector("legend, h3, h4, [class*=label]:not(label), [id*=label i]:not(label)");
+        const fileLabel = !generic
+          ? label
+          : [textOf(group), questionText(el), clean(`${input.id} ${input.name}`.replace(/[_-]+/g, " "))].find((t) => !isGeneric(t)) || label;
+        out.push({ id, label: fileLabel, kind: "file", required: required || /resume|cv/i.test(`${input.id} ${input.name}`), options: [] });
       } else if (type === "checkbox") {
         // A single checkbox: usually a consent ("I agree…") — its own text is the question.
         out.push({ id, label: ownLabel(el) || label, kind: "checkbox", required, options: [], filled: isFilled(el) });
@@ -309,6 +323,22 @@ export async function collectFields(page: Page): Promise<Field[]> {
         filled: btns.some((b) => b.getAttribute("aria-pressed") === "true"),
       });
     }
+    // Repeating resume blocks (Greenhouse "Employment" and "Education", one block per job/degree, "Add another"):
+    // their fields share labels ("Start date year" twice), so name them by block — "Employment 1 — Start date year" —
+    // and let the answer code fill them from the resume instead of the AI or remembered answers.
+    for (const f of out) {
+      const el = document.querySelector(`[data-9to5="${f.id}"], [data-9to5="${f.id}_0"]`);
+      if (!el) continue;
+      const box = el.closest("[class*=employment-form], [class*=employment--form], [class*=education--form], [class*=education-form]");
+      if (!box) continue;
+      const section = /employment/i.test(box.className) ? "employment" : "education";
+      const sel = section === "employment" ? "[class*=employment-form], [class*=employment--form]" : "[class*=education--form], [class*=education-form]";
+      const fromId = (el.id || "").match(/-(\d+)(?:_\d+)?$/);
+      const index = fromId ? Number(fromId[1]) : Math.max(0, Array.from(document.querySelectorAll(sel)).indexOf(box));
+      f.section = section;
+      f.index = index;
+      f.label = `${section === "employment" ? "Employment" : "Education"} ${index + 1} — ${f.label}`;
+    }
     return out;
   });
 }
@@ -329,9 +359,139 @@ export const yesNo = (f: Field, yes: boolean): string => {
   return opts.find((o) => negative.test(o) && !qualified.test(o)) ?? "No";
 };
 
+/** Leave this field empty on purpose (e.g. the end date of the job you still have). */
+export const SKIP = "__SKIP__";
+/** Several things to try typing into a search-and-pick box, best first ("Software Engineering" → "Computer Science"…). */
+export const ALT = " ||| ";
+const straight = (s: string) => s.replace(/[’‘`]/g, "'").replace(/\s+/g, " ").trim();
+const isCurrent = (end?: string | null) => !end || /present|current|now|ongoing|today/i.test(end);
+const degreeYears = (deg?: string | null) => (/ph\.?d|doctor/i.test(deg ?? "") ? 5 : /master|m\.?s\b|m\.?eng|mba/i.test(deg ?? "") ? 2 : /associate/i.test(deg ?? "") ? 2 : 4);
+
+/** What to type for a degree, with simpler fallbacks for pickers that don't have the exact wording. */
+export function degreeChoices(deg: string): string[] {
+  const d = straight(deg);
+  if (/master/i.test(d)) return [d, "Master's Degree", "Master of Science", "Master's", "Master"];
+  if (/bachelor/i.test(d)) return [d, "Bachelor's Degree", "Bachelor of Science", "Bachelor's", "Bachelor"];
+  if (/ph\.?d|doctor/i.test(d)) return [d, "Doctor of Philosophy", "Ph.D.", "PhD", "Doctorate"];
+  if (/associate/i.test(d)) return [d, "Associate's Degree", "Associate"];
+  return [d];
+}
+
+/** What to type for a field of study: the resume's wording, then the closest common names. */
+export function disciplineChoices(field: string): string[] {
+  const f = straight(field);
+  const out = [f];
+  const words = f.split(/\s+/);
+  if (/ and /i.test(f)) out.push(...f.split(/\s+and\s+/i).map((p, i, all) => (i === 0 && all[1] ? `${p} ${all[1].split(" ").slice(1).join(" ")}`.trim() : p)));
+  if (words.length > 2) out.push(words.slice(-2).join(" "));
+  // Greenhouse's list is coarse ("Computer Science", "Electronics", "Engineering" — no "Software Engineering").
+  if (/electric/i.test(f)) out.push("Electrical Engineering", "Computer Engineering", "Electrical and Electronics Engineering", "Engineering", "Electronics");
+  if (/software|computer|comput|information tech|data/i.test(f)) out.push("Computer Science", "Computer Engineering", "Software Engineering");
+  if (/engineer/i.test(f)) out.push("Engineering");
+  return [...new Set(out.map((x) => x.trim()).filter(Boolean))];
+}
+
+/**
+ * Greenhouse-style "Employment N" / "Education N" blocks, filled from the N-th job / degree on the resume.
+ * Returns undefined when the field isn't part of such a block, SKIP when it should stay empty.
+ */
+export function sectionValue(f: Field, a: Applicant): string | null | undefined {
+  if (!f.section) return undefined;
+  const i = f.index ?? 0;
+  const l = f.label.replace(/^(employment|education) \d+ — /i, "").toLowerCase();
+  const month = (p: { monthName: string } | null) => (p ? (f.options.length ? (pickOption(p.monthName, f.options) ?? p.monthName) : p.monthName) : null);
+  if (f.section === "employment") {
+    const job = a.experience?.[i];
+    if (!job) return i === 0 ? null : SKIP;
+    const current = isCurrent(job.end);
+    const start = gradParts(job.start);
+    const end = current ? null : gradParts(job.end);
+    if (f.kind === "checkbox") return /current|present|still|i work here|currently/.test(l) ? (current ? "yes" : SKIP) : SKIP;
+    if (/\b(start|from)\b/.test(l)) return /month/.test(l) ? month(start) : /year/.test(l) ? (start ? String(start.year) : null) : job.start ?? null;
+    if (/\b(end|to|until)\b/.test(l)) {
+      if (current) return SKIP;
+      return /month/.test(l) ? month(end) : /year/.test(l) ? (end ? String(end.year) : null) : job.end ?? null;
+    }
+    if (/company|employer|organi[sz]ation|business name/.test(l)) return job.company;
+    if (/title|position|role/.test(l)) return job.title;
+    if (/location|city/.test(l)) return job.location ?? null;
+    if (/description|responsibilit|summary|duties|achievement/.test(l)) return (job.bullets ?? []).join(" ").slice(0, 1500) || null;
+    return null;
+  }
+  const edu = a.education?.[i];
+  if (!edu) return i === 0 ? null : SKIP;
+  const grad = gradParts(edu.graduation ?? (i === 0 ? a.graduation_date : null));
+  if (/\b(start|from)\b/.test(l)) {
+    if (!grad) return null;
+    return /month/.test(l) ? month({ monthName: "August" }) : /year/.test(l) ? String(grad.year - degreeYears(edu.degree)) : null;
+  }
+  if (/\b(end|to|graduat|completion)\b/.test(l)) return /month/.test(l) ? month(grad) : /year/.test(l) && grad ? String(grad.year) : null;
+  if (/school|university|college|institution/.test(l)) return edu.school ?? (i === 0 ? a.school ?? null : null);
+  if (/\bdegree\b/.test(l)) {
+    if (!edu.degree) return null;
+    const choices = degreeChoices(edu.degree);
+    if (f.options.length && f.kind !== "combobox") return choices.map((c) => pickOption(c, f.options)).find(Boolean) ?? null;
+    return choices.join(ALT);
+  }
+  if (/discipline|field of study|major|area of study|concentration/.test(l)) {
+    if (!edu.field) return null;
+    const choices = disciplineChoices(edu.field);
+    if (f.options.length && f.kind !== "combobox") return choices.map((c) => pickOption(c, f.options)).find(Boolean) ?? null;
+    return choices.join(ALT);
+  }
+  if (/\bgpa\b|grade point/.test(l)) return edu.gpa ?? (i === 0 ? a.gpa ?? null : null) ?? SKIP;
+  return null;
+}
+
+/**
+ * "Which of these languages / tools are you proficient in? (select all)": every listed option that is on the
+ * resume's skills (Python, Java, JavaScript…), else the "none" option. Not spoken languages.
+ */
+export function skillOptions(f: Field, a: Applicant): string | null {
+  if (f.kind !== "checkboxes" || !f.options.length || !a.skills?.length) return null;
+  const l = f.label.toLowerCase();
+  if (!/(proficien|experience (with|in|using)|familiar|skills?\b|programming|languages?|technolog|tools?\b|frameworks?|platforms?|stack)/.test(l)) return null;
+  if (/(speak|spoken|fluent|written|native|bilingual)/.test(l)) return null;
+  const norm = (x: string) => x.toLowerCase().replace(/\.js\b/g, "js").replace(/[^a-z0-9+#]+/g, " ").trim();
+  const mine = a.skills.map(norm);
+  const hits = f.options.filter((o) => {
+    const n = norm(o);
+    return n && !/^(none|other|n a)\b/.test(n) && mine.some((m) => m === n || m.split(/\s*\/\s*| /).includes(n) || (n.length > 3 && m.includes(n)));
+  });
+  if (hits.length) return hits.join(", ");
+  return f.options.find((o) => /^none\b/i.test(o)) ?? null;
+}
+
+/**
+ * Security clearance questions for someone who holds none (saved answer "Eligible / willing to obtain").
+ * The saved answer only fits "are you willing / eligible to obtain one?" — reusing it elsewhere answered
+ * "Yes" to "Have you ever held a clearance?" and to "…ever had a clearance suspended, denied or revoked?".
+ */
+export function clearanceAnswer(f: Field, a: Applicant): string | null {
+  const l = f.label.toLowerCase();
+  if (!/clearance|polygraph|security access/.test(l)) return null;
+  const saved = a.answers?.security_clearance ?? "";
+  const holdsOne = /(secret|ts\/sci|public trust|confidential|\bq\b|\bl\b clearance|dod)/i.test(saved) && !/(willing|eligible|obtain|none|no\b)/i.test(saved);
+  if (holdsOne) return null; // the applicant's own answer decides
+  const none = () => (f.options.length ? (f.options.find((o) => /^none\b|no clearance|^n\/?a\b|not applicable|never (held|had)|do not (hold|have)|^no\b/i.test(o)) ?? null) : "None");
+  const choice = f.kind === "select" || f.kind === "radio" || f.kind === "combobox" || f.options.length > 0;
+  if (/(suspend|denied|revok|debar|terminat)/.test(l)) return yesNo(f, false);
+  if (/polygraph/.test(l)) return choice ? (none() ?? yesNo(f, false)) : "No";
+  if (/(willing|able|eligible|obtain|consent|agree|pass|qualify)/.test(l) && !/(held|hold|currently have|possess)/.test(l)) return null; // the saved answer / AI handle these
+  if (/(highest|what|which|type|level|kind).{0,30}clearance/.test(l)) return choice ? none() : "None";
+  if (/(ever|currently|active|held|hold|have|possess|obtained).{0,60}clearance|clearance.{0,30}(held|hold|active|obtained)/.test(l)) return choice ? yesNo(f, false) : "No";
+  return null;
+}
+
 /** Answers we know without asking the AI (free). */
 export function knownValue(f: Field, a: Applicant): string | null {
+  const fromResume = sectionValue(f, a);
+  if (fromResume !== undefined) return fromResume;
   const l = f.label.toLowerCase();
+  const clearance = clearanceAnswer(f, a);
+  if (clearance) return clearance;
+  const skillPick = skillOptions(f, a);
+  if (skillPick) return skillPick;
   // A required cover letter gets one written for this job (opts.coverLetter); optional ones are left empty.
   if (f.kind === "file") return /cover/.test(l) ? (f.required ? "__COVER__" : null) : /resume|cv|attach/.test(l) || f.required ? "__RESUME__" : null;
   if (/password/.test(l)) return a.portal?.password ?? null;
@@ -371,6 +531,18 @@ export function knownValue(f: Field, a: Applicant): string | null {
   if (/github/.test(l) && !howHeard) return a.github_url ?? null;
   // A link only goes into a short text field that asks for one — not a question that merely mentions "website".
   if (/website|portfolio|personal (site|url)/.test(l) && f.kind === "text" && l.length < 60 && !/\?/.test(l)) return a.website_url ?? a.github_url ?? null;
+  // "Please provide a link to your GitHub profile, portfolio, personal website, or a demonstration of your work":
+  // a request for a link (not a yes/no about having one) → the best link the applicant has.
+  if ((f.kind === "text" || f.kind === "textarea") && /\b(link|url|urls)\b/.test(l) && /(github|portfolio|website|personal site|work samples?|demonstration|projects?)/.test(l) && !/\b(do you|have you|are you)\b/.test(l))
+    return a.website_url ?? a.github_url ?? a.linkedin_url ?? null;
+  // Your own address (never one copied from the employer's page): street from Profile → Common questions + city/state/ZIP.
+  if ((f.kind === "text" || f.kind === "textarea") && /\b(physical|home|permanent|current|mailing|residential|street)? ?address\b/.test(l) && !/e-?mail|ip address|company|employer|office|work address|web/.test(l)) {
+    const street = a.answers?.address;
+    const cityLine = [a.city, [a.state, a.answers?.zip].filter(Boolean).join(" ")].filter(Boolean).join(", ");
+    if (/street|line 1/.test(l)) return street ?? null;
+    if (/city.{0,20}(state|zip)/.test(l) && cityLine) return cityLine;
+    return [street, cityLine].filter(Boolean).join(", ") || null;
+  }
   if ((/^(current )?(location|city)\b|where are you (located|based)/.test(l) || /city.{0,10}state/.test(l)) && f.kind !== "radio" && f.kind !== "checkbox")
     return [a.city, a.state].filter(Boolean).join(", ") || null;
   if (/^state\b|state of residence|province/.test(l) && f.kind !== "radio" && a.state) return f.options.length ? pickOption(a.state, f.options) : a.state;
@@ -475,6 +647,12 @@ export const captchaVisible = (page: Page) =>
 
 export async function fill(page: Page, f: Field, value: string, resumePath: string) {
   const sel = `[data-9to5="${f.id}"]`;
+  if (value === SKIP) return;
+  if (value.includes(ALT)) {
+    const choices = value.split(ALT).filter(Boolean);
+    if (f.kind === "combobox") return pickFromSearch(page, sel, choices);
+    value = (f.options.length ? choices.map((c) => pickOption(c, f.options)).find(Boolean) : null) ?? choices[0];
+  }
   switch (f.kind) {
     case "file":
       // The resume never goes into a cover-letter slot (a required one gets a written letter instead).
@@ -519,26 +697,102 @@ export async function fill(page: Page, f: Field, value: string, resumePath: stri
       return;
     }
     case "combobox": {
+      // Pick the option whose text IS the answer — a "contains" match chose "Female" for "Male".
+      const choose = async (): Promise<boolean> => {
+        const list = await page.getAttribute(sel, "aria-controls").catch(() => null);
+        const scope = list ? `[id="${list}"] ` : "";
+        const loc = page.locator(`${scope}[role=option], ${scope}[class*='select__option']`);
+        const texts = await loc
+          .evaluateAll((els) => els.map((e) => ((e as HTMLElement).offsetParent !== null ? (e.textContent ?? "").replace(/\s+/g, " ").trim() : "")))
+          .catch(() => [] as string[]);
+        const norm = (x: string) => x.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+        let idx = texts.findIndex((t) => t && norm(t) === norm(value));
+        if (idx < 0) {
+          const hit = pickOption(value, texts.filter(Boolean));
+          idx = hit ? texts.indexOf(hit) : -1;
+        }
+        if (idx < 0) return false;
+        await loc.nth(idx).click().catch(() => {});
+        return true;
+      };
       await page.click(sel);
       await page.waitForTimeout(400);
-      const list = await page.getAttribute(sel, "aria-controls").catch(() => null);
-      const scope = list ? `[id="${list}"] ` : "";
-      const option = page.locator(`${scope}[role=option]`).filter({ hasText: value }).first();
-      if (await option.isVisible().catch(() => false)) {
-        await option.click();
-        return;
-      }
+      if (await choose()) return;
       const tag = await page.evaluate((s2) => document.querySelector(s2)?.tagName ?? "", sel);
       if (tag === "INPUT") await page.fill(sel, value).catch(() => page.keyboard.type(value));
       else await page.keyboard.type(value, { delay: 30 });
       await page.waitForTimeout(800);
-      await page.keyboard.press("Enter");
+      if (await choose()) return;
+      // Free-text search box (cities, schools): take the site's suggestion only when there is exactly one.
+      const shown = await page.locator("[role=option]:visible, [class*='select__option']:visible").count().catch(() => 0);
+      if (shown >= 1) await page.keyboard.press("Enter");
       return;
     }
   }
 }
 
 /** After a resume upload, sites parse it and re-render the form. Wait until the form stops changing. */
+/**
+ * Search-and-pick box (Greenhouse School / Degree / Discipline): type each choice until the list offers a
+ * real match, and pick it. Lists are long and only partly rendered, so typing is what finds the option.
+ */
+async function pickFromSearch(page: Page, sel: string, choices: string[]) {
+  const words = (s: string) => straight(s).toLowerCase().replace(/[^a-z0-9' ]+/g, " ").split(/\s+/).filter((w) => w.length > 2);
+  for (const choice of choices) {
+    await page.click(sel).catch(() => {});
+    await page.fill(sel, "").catch(() => {});
+    await page.keyboard.type(choice, { delay: 25 });
+    await page.waitForTimeout(900);
+    const list = await page.getAttribute(sel, "aria-controls").catch(() => null);
+    const scope = list ? `[id="${list}"] ` : "";
+    const opts = await page
+      .locator(`${scope}[role=option]`)
+      .evaluateAll((els) => els.filter((e) => (e as HTMLElement).offsetParent !== null).map((e) => (e.textContent ?? "").replace(/\s+/g, " ").trim()))
+      .catch(() => [] as string[]);
+    const want = words(choice);
+    // An option that contains every meaningful word of the choice ("Master's Degree" ↔ "Master's Degree (M.S.)").
+    const idx = opts.findIndex((o) => !/no (results|options)|not found/i.test(o) && want.every((w) => straight(o).toLowerCase().includes(w)));
+    if (idx >= 0) {
+      await page.locator(`${scope}[role=option]`).filter({ hasText: opts[idx] }).first().click().catch(async () => page.keyboard.press("Enter"));
+      await page.waitForTimeout(250);
+      return;
+    }
+    await page.keyboard.press("Escape").catch(() => {});
+  }
+  // Nothing matched cleanly: type the first choice and take the site's top suggestion.
+  await page.click(sel).catch(() => {});
+  await page.fill(sel, "").catch(() => {});
+  await page.keyboard.type(choices[0], { delay: 25 });
+  await page.waitForTimeout(900);
+  await page.keyboard.press("Enter").catch(() => {});
+}
+
+/**
+ * Greenhouse lists one Employment / Education block; "Add another" adds more. Add enough for every job and
+ * degree on the resume (max 3 each) so the application shows the full history, not just the latest entry.
+ */
+export async function expandResumeBlocks(page: Page, a: Applicant) {
+  for (const [kind, want] of [
+    ["employment", Math.min(3, a.experience?.length ?? 0)],
+    ["education", Math.min(3, a.education?.length ?? 0)],
+  ] as const) {
+    for (let guard = 0; guard < 3; guard++) {
+      const counts = await page
+        .evaluate((k) => {
+          const forms = document.querySelectorAll(k === "employment" ? "[class*=employment-form], [class*=employment--form]" : "[class*=education--form], [class*=education-form]").length;
+          const container = document.querySelector(`[class*=${k}--container], [class*=${k}-container]`);
+          const add = container ? Array.from(container.querySelectorAll("button")).find((b) => /add another/i.test(b.textContent ?? "")) : null;
+          if (add) add.setAttribute("data-9to5-add", k);
+          return { forms, add: Boolean(add) };
+        }, kind)
+        .catch(() => ({ forms: 0, add: false }));
+      if (!counts.forms || !counts.add || counts.forms >= want) break;
+      await page.click(`[data-9to5-add="${kind}"]`).catch(() => {});
+      await page.waitForTimeout(400);
+    }
+  }
+}
+
 export async function waitForFormToSettle(page: Page, maxMs = 25000) {
   const snapshot = () =>
     page
@@ -644,6 +898,50 @@ async function saveDebug(context: import("playwright").BrowserContext, company: 
   }
 }
 
+/** A dropdown's placeholder text — never an answer (the memory had learned "Select One" for a clearance question). */
+export const PLACEHOLDER = /^\s*(select( one| an option)?|choose( one| an option)?|please select|--+|n\/a - select)\s*\.{0,3}\s*$/i;
+
+/** True when the options list is the whole set of choices (not the first page of a search-as-you-type box). */
+function optionsAreComplete(f: Field): boolean {
+  if (!f.options.length) return false;
+  if (f.kind === "select" || f.kind === "radio" || f.kind === "checkboxes") return true;
+  // Comboboxes: a short list is the full list; a long one (schools, cities) is searched by typing.
+  return f.kind === "combobox" && f.options.length < 40 && !/school|university|college|city|location|country|state|discipline|major|field of study/i.test(f.label);
+}
+
+/**
+ * Should the AI's answer be reused on other applications? Not when it is about this job or employer
+ * ("Company name" → Samsung, "Physical Address" → Samsung's office), a resume block, or a contact detail.
+ */
+export function worthRemembering(label: string, answer: string, opts: { company: string; jobTitle: string }): boolean {
+  const l = label.toLowerCase();
+  const v = answer.toLowerCase();
+  if (PLACEHOLDER.test(answer)) return false;
+  if (/^(employment|education) \d+ — /.test(l)) return false;
+  if (/^(title|job title|company( name)?|employer|start date|end date|degree|school|discipline|address|physical address|street|location|city|current (title|employer)|position)\b/.test(l.replace(/[^a-z ]+/g, " ").trim())) return false;
+  if (/address|zip|postal/.test(l)) return false;
+  const company = opts.company.toLowerCase().replace(/,? (inc|llc|corp|corporation|ltd|co)\.?$/, "").trim();
+  if (company.length > 2 && v.includes(company)) return false;
+  if (opts.jobTitle && v.includes(opts.jobTitle.toLowerCase())) return false;
+  return true;
+}
+
+/**
+ * Drop remembered answers that must never be reused: placeholders ("Select One"), resume-block fields and
+ * addresses learned from one employer's form ("company name" → Samsung, "physical address" → Samsung's office).
+ */
+export function cleanMemory(memory: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(memory ?? {})) {
+    if (typeof v !== "string" || !k.trim() || !v.trim() || PLACEHOLDER.test(v)) continue;
+    if (/^(title|job title|company name|company|employer|start date (month|year)|end date (month|year)|degree|school|discipline|position)$/.test(k)) continue;
+    if (/address|zip code|postal/.test(k)) continue;
+    if (/clearance|polygraph/.test(k)) continue; // answered by the clearance rules, never a remembered guess
+    out[k] = v;
+  }
+  return out;
+}
+
 /**
  * Answers for a set of form fields: profile/known values first (free), then — only if a required
  * question is still blank — one AI call for those plus optional "stand out" free-text questions.
@@ -657,9 +955,17 @@ export async function answerFields(
     const answers: Record<string, string> = {};
     const unknown: Field[] = [];
     for (const f of fields) {
-      const v = knownValue(f, opts.applicant);
+      let v = opts.forceAi?.(f) ? null : knownValue(f, opts.applicant);
+      // A saved / remembered answer that isn't one of this question's choices ("Eligible / willing to obtain"
+      // for a clearance list, a remembered "Select One") would leave it empty: ask the AI with the real options.
+      if (v && v !== SKIP && !v.includes(ALT) && !f.section && optionsAreComplete(f)) {
+        const hit = f.kind === "checkboxes" ? v.split(/\s*[,;|]\s*/).map((x) => pickOption(x, f.options)).filter(Boolean).join(", ") : pickOption(v, f.options);
+        v = hit || null;
+      }
       if (v) answers[f.id] = v;
-      else unknown.push(f);
+      // Resume blocks (Employment / Education) come only from the resume — never the AI, which put the
+      // employer being applied to ("Samsung") into Company name.
+      else if (!f.section) unknown.push(f);
     }
 
     // AI only when a REQUIRED question is still blank. Optional free-text questions that help an
@@ -680,7 +986,10 @@ export async function answerFields(
         needs_visa_sponsorship: opts.applicant.sponsorship_needed,
         willing_to_relocate: opts.applicant.relocation ?? true,
         preferences: salaryFacts(opts.applicant.answers ?? {}, opts.applicant.custom ?? {}),
-        jobs: (opts.applicant.experience ?? []).map((e) => `${e.title} @ ${e.company} (${e.start ?? "?"} – ${e.end ?? "?"})`),
+        jobs: (opts.applicant.experience ?? []).map((e) => `${e.title} @ ${e.company}${e.location ? `, ${e.location}` : ""} (${e.start ?? "?"} – ${e.end ?? "?"})`),
+        education: (opts.applicant.education ?? []).map((e) => `${e.degree ?? ""} in ${e.field ?? "?"}, ${e.school ?? "?"} (graduation ${e.graduation ?? "?"})`),
+        skills: (opts.applicant.skills ?? []).slice(0, 60),
+        links: { linkedin: opts.applicant.linkedin_url, github: opts.applicant.github_url, website: opts.applicant.website_url },
         saved_answers: opts.applicant.answers ?? {},
         // Trimmed so the whole prompt fits Groq's 8,000 tokens/minute (and costs Gemini less).
         resume: opts.applicant.resume_text.replace(/\s+/g, " ").slice(0, 4500),
@@ -704,9 +1013,9 @@ export async function answerFields(
         );
         for (const f of needAi) {
           const v = ai[f.id];
-          if (v != null && String(v).trim()) {
+          if (v != null && String(v).trim() && !PLACEHOLDER.test(String(v))) {
             answers[f.id] = String(v);
-            if (f.kind !== "checkbox") learned.push({ label: f.label, answer: String(v) });
+            if (f.kind !== "checkbox" && worthRemembering(f.label, String(v), opts)) learned.push({ label: f.label, answer: String(v) });
           }
         }
       } catch (e) {
@@ -788,6 +1097,7 @@ async function fillAndSubmit(
       await waitForFormToSettle(page);
     }
     tick("resume uploaded");
+    await expandResumeBlocks(page, opts.applicant);
     const fields = await collectFields(page);
     tick(`read ${fields.length} fields`);
     await readComboboxOptions(page, fields);
@@ -860,6 +1170,40 @@ async function fillAndSubmit(
       if (more.quota) break;
       await page.waitForTimeout(1000);
     }
+
+    // Safety net: an answered box that is still empty on the page (some year / search boxes ignore a
+    // programmatic fill) gets the answer typed again like a person — click, type, Enter/Tab.
+    let retyped = 0;
+    for (const f of fields) {
+      const v = answers[f.id];
+      if (!v || v.startsWith("__") || v.includes(ALT) || (f.kind !== "text" && f.kind !== "combobox")) continue;
+      const sel = `[data-9to5="${f.id}"]`;
+      const empty = await page
+        .locator(sel)
+        .evaluate((e) => {
+          const own = ((e as HTMLInputElement).value ?? "").trim();
+          if (own) return false;
+          // A picked dropdown value is shown next to the (empty) search input, e.g. react-select's
+          // "select__single-value" — look in the control around the input, not at the input itself.
+          for (let a = e.parentElement, d = 0; a && d < 5; a = a.parentElement, d++)
+            if (a.querySelector("[class*=single-value], [class*=multi-value], [class*=singleValue], [class*=multiValue]")) return false;
+          const control = e.closest("[class*=select__control], [class*=-control], [role=group]") ?? e.parentElement?.parentElement;
+          const shown = (control?.textContent ?? "").replace(/select\.{3}|search|type to search|no options/gi, "").trim();
+          return !shown;
+        })
+        .catch(() => false);
+      if (!empty) continue;
+      if (f.kind === "combobox") await fill(page, f, v, opts.resumePath).catch(() => {});
+      else {
+        await page.click(sel).catch(() => {});
+        await page.keyboard.press("Control+A").catch(() => {});
+        await page.keyboard.type(v, { delay: 40 });
+        await page.waitForTimeout(700);
+        await page.keyboard.press("Tab").catch(() => {});
+      }
+      retyped++;
+    }
+    if (retyped) tick(`retyped ${retyped} answer(s) the page hadn't kept`);
     await dismissCookies(page);
 
     if (await captchaVisible(page)) return { status: "needs_user", detail: "Site shows a CAPTCHA — please submit this one yourself", answers: labelled(fields, answers), learned, usedPortalLogin, aiCalls };
@@ -897,8 +1241,28 @@ async function fillAndSubmit(
           .filter(Boolean)
       )
       .catch(() => [] as string[]);
-    const err = invalid.length ? `needs ${[...new Set(invalid)].slice(0, 3).join("; ")}` : after.match(/(your form needs corrections[^.]{0,40}|missing entry for required field:?[^.?]{0,120}|this field is required|(field|question|answer) is required|please (enter|fill in|complete|provide)[^.]{0,80}|(is )?invalid (email|phone|format|value)[^.]{0,40})/i)?.[0];
-    return { status: "needs_user", detail: err ? `Form rejected: ${err}` : "Submitted but no confirmation seen — please check", answers: labelled(fields, answers), learned, usedPortalLogin, aiCalls };
+    // Error messages the page shows next to fields (red helper text / alerts), with the question they belong to.
+    const shownErrors = invalid.length
+      ? []
+      : await page
+          .evaluate(() =>
+            Array.from(document.querySelectorAll("[role=alert], [class*=error i], [class*=invalid i], [id*=error i]"))
+              .filter((e) => (e as HTMLElement).getBoundingClientRect().width > 0 && !e.querySelector("input, select, textarea") && (e.textContent ?? "").trim().length > 2)
+              .map((e) => {
+                const q = e.closest("[class*=field i], [class*=question i], fieldset")?.querySelector("label, legend")?.textContent ?? "";
+                return `${q.replace(/\s+/g, " ").replace(/\*/g, "").trim().slice(0, 70)}${q ? ": " : ""}${(e.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, 80)}`;
+              })
+          )
+          .catch(() => [] as string[]);
+    const err = invalid.length
+      ? `needs ${[...new Set(invalid)].slice(0, 3).join("; ")}`
+      : shownErrors.length
+        ? [...new Set(shownErrors)].slice(0, 3).join("; ")
+        : after.match(/(your form needs corrections[^.]{0,40}|missing entry for required field:?[^.?]{0,120}|this field is required|(field|question|answer) is required|please (enter|fill in|complete|provide)[^.]{0,80}|(is )?invalid (email|phone|format|value)[^.]{0,40})/i)?.[0];
+    // The rejected fields as full questions (text + choices), so the user can answer them once on the Needs-you page.
+    const rejectedLabels = invalid.length ? invalid : shownErrors.map((x) => x.split(": ")[0]).filter(Boolean);
+    const pending = questionsFor(rejectedLabels, fields);
+    return { status: "needs_user", detail: err ? `Form rejected: ${err}` : "Submitted but no confirmation seen — please check", answers: labelled(fields, answers), learned, usedPortalLogin, aiCalls, pending: pending.length ? pending : undefined };
   } catch (e) {
     return { status: "failed", detail: (e as Error).message.slice(0, 300), aiCalls };
   }
@@ -936,13 +1300,37 @@ async function enterEmailCode(page: Page, emailCode: ((since: Date) => Promise<s
   return "entered";
 }
 
+/**
+ * The full questions (text, kind, choices) behind a list of labels the site complained about, so the user
+ * sees exactly what to answer instead of just "needs End date year". Labels with no matching field still show.
+ */
+export function questionsFor(labels: string[], fields: Field[]): PendingQuestion[] {
+  const norm = (x: string) => x.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const out: PendingQuestion[] = [];
+  const seen = new Set<string>();
+  for (const raw of labels) {
+    const l = norm(raw);
+    if (!l || seen.has(l)) continue;
+    seen.add(l);
+    const f = fields.find((x) => x.kind !== "file" && (norm(x.label) === l || norm(x.label).includes(l) || l.includes(norm(x.label).slice(0, 40))));
+    out.push({
+      key: memoryKey(f?.label ?? raw),
+      label: f?.label ?? raw,
+      kind: f?.kind ?? "text",
+      options: f ? (f.kind === "checkbox" ? ["Yes", "No"] : f.options.slice(0, 60)) : [],
+      required: true,
+    });
+  }
+  return out;
+}
+
 /** Answers keyed by the question text (what the user sees), not internal field ids. */
 export function labelled(fields: Field[], answers: Record<string, string>): Record<string, string> {
   const out: Record<string, string> = {};
   for (const f of fields) {
     const v = answers[f.id];
-    if (!v || f.kind === "file" || /password/i.test(f.label)) continue;
-    out[f.label || f.id] = v;
+    if (!v || v === SKIP || f.kind === "file" || /password/i.test(f.label)) continue;
+    out[f.label || f.id] = v.split(ALT)[0];
   }
   return out;
 }

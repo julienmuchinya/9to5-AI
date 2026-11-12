@@ -28,16 +28,16 @@ describe("freshness priority", () => {
 
 describe("planQueue", () => {
   const mk = (company: string, fit: number, h: number) => ({ company, fit, postedAt: hoursAgo(h) });
-  it("caps each company at 5 per day and orders freshest-first", () => {
-    const items = [...Array.from({ length: 8 }, (_, i) => mk("Acme Inc", 80, i + 1)), mk("Beta", 60, 2), mk("Gamma", 95, 24 * 20)];
+  it("caps each company at 10 per day and orders freshest-first", () => {
+    const items = [...Array.from({ length: 13 }, (_, i) => mk("Acme Inc", 80, i + 1)), mk("Beta", 60, 2), mk("Gamma", 95, 24 * 20)];
     const { picked, skippedForCompanyCap } = planQueue(items, { now: NOW });
-    expect(picked.filter((x) => companyKey(x.company) === "acme")).toHaveLength(5);
+    expect(picked.filter((x) => companyKey(x.company) === "acme")).toHaveLength(10);
     expect(skippedForCompanyCap).toHaveLength(3);
     expect(picked[0].company).toBe("Acme Inc");
     expect(picked.at(-1)?.company).toBe("Gamma"); // old posting goes last despite top fit
   });
   it("counts what was already sent today", () => {
-    const { picked } = planQueue([mk("Acme", 80, 1), mk("acme, inc.", 80, 2)], { appliedToday: { acme: 4 }, now: NOW });
+    const { picked } = planQueue([mk("Acme", 80, 1), mk("acme, inc.", 80, 2)], { appliedToday: { acme: 9 }, now: NOW });
     expect(picked).toHaveLength(1);
   });
 });

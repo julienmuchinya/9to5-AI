@@ -213,3 +213,24 @@ describe("backup AI limits (same guard rails as Gemini)", () => {
     expect(pacificDay(new Date("2026-11-08T09:00:00Z"))).toBe("2026-11-08");
   });
 });
+
+describe("job skill coverage decides whether the original resume goes out", async () => {
+  const { jobSkillCoverage } = await import("./resume-library");
+  const resume: ParsedResume = {
+    skills: ["Python", "React", "Node.js", "AWS", "Docker", "PostgreSQL"],
+    experience: [{ title: "Software Engineer", company: "Widget Co", bullets: ["Built REST APIs with FastAPI and React, deployed on AWS with Docker"] }],
+  };
+  it("counts only the technologies the job names, with aliases", () => {
+    const r = jobSkillCoverage(resume, "We use Python, React, Node and Postgres on AWS. Docker experience required. Kubernetes a plus.");
+    expect(r.asked).toEqual(expect.arrayContaining(["python", "react", "node", "postgres", "aws", "docker", "kubernetes"]));
+    expect(r.missing).toEqual(["kubernetes"]);
+    expect(r.coverage).toBeCloseTo(6 / 7, 2);
+  });
+  it("is 100% when the job names no technology, 0 without a resume", () => {
+    expect(jobSkillCoverage(resume, "Great communicator wanted for a growing team").coverage).toBe(1);
+    expect(jobSkillCoverage(null, "Python").coverage).toBe(0);
+  });
+  it("is low when the stack is a different one", () => {
+    expect(jobSkillCoverage(resume, "C++ and CUDA on embedded Linux with Verilog and FPGA work").coverage).toBeLessThan(0.3);
+  });
+});

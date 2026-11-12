@@ -76,6 +76,22 @@ describe("chat only changes things the latest message asks for", async () => {
     expect(changeNotAsked("run_agent_now", "run the agent now")).toBeNull();
     expect(changeNotAsked("get_status", "answer")).toBeNull(); // reading is always fine
   });
+  it("retry / answer / mark / dismiss / search commands go through when asked", () => {
+    expect(changeNotAsked("retry_applications", "Retry everything that failed")).toBeNull();
+    expect(changeNotAsked("retry_applications", "put the Samsung ones back in the queue")).toBeNull();
+    expect(changeNotAsked("answer_question", "Answer 'highest clearance' with None")).toBeNull();
+    expect(changeNotAsked("update_applications", "mark Anduril as applied, I did it myself")).toBeNull();
+    expect(changeNotAsked("update_applications", "I got an interview at Bose")).toBeNull();
+    expect(changeNotAsked("dismiss_jobs", "dismiss the Palantir jobs, not interested")).toBeNull();
+    expect(changeNotAsked("run_agent_now", "look for new jobs and start applying")).toBeNull();
+    expect(changeNotAsked("run_agent_now", "search for jobs")).toBeNull();
+  });
+  it("reading applications never counts as a change; a bare question changes nothing", () => {
+    expect(changeNotAsked("list_applications", "what's waiting on me?")).toBeNull();
+    expect(changeNotAsked("explain_last_run", "why are so few applications going out?")).toBeNull();
+    expect(changeNotAsked("retry_applications", "why did Samsung fail?")).not.toBeNull();
+    expect(changeNotAsked("update_applications", "how many did I apply to?")).not.toBeNull();
+  });
 });
 
 describe("next reset times", async () => {
@@ -131,5 +147,22 @@ describe("acknowledgement dates", async () => {
   it("types today's date where a form asks for it", () => {
     const f = { id: "f1", label: "By entering today’s date, I acknowledge that I have read and agree to these requirements", kind: "text", required: true, options: [], filled: false } as never;
     expect(knownValue(f, { first_name: "A", last_name: "B" } as never)).toMatch(/^\d{2}\/\d{2}\/\d{4}$/);
+  });
+});
+
+describe("chat follow-through: changes the message clearly asks for", async () => {
+  const { expectedChanges, expectedLookups } = await import("../../app/api/chat/intent");
+  it("knows an interview / retry / dismiss must end in a tool call", () => {
+    expect(expectedChanges("Retry everything that failed, and I got an interview at ICF")).toEqual(["update_applications", "retry_applications"]);
+    expect(expectedChanges("mark Anduril as applied")).toEqual(["update_applications"]);
+    expect(expectedChanges("dismiss the Palantir jobs")).toEqual(["dismiss_jobs"]);
+    expect(expectedChanges("did I get an interview?")).toEqual([]);
+  });
+  it("knows a data question must be looked up, never guessed", () => {
+    expect(expectedLookups("Who should I follow up with?")).toEqual(["follow_ups"]);
+    expect(expectedLookups("What's waiting on me?")).toEqual(["list_applications"]);
+    expect(expectedLookups("why are so few applications going out")).toEqual(["explain_last_run"]);
+    expect(expectedLookups("how well do I match the Cboe job?")).toEqual(["job_match_report"]);
+    expect(expectedLookups("thanks!")).toEqual([]);
   });
 });

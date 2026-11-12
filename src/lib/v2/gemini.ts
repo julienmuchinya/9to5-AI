@@ -233,36 +233,51 @@ export function toChatMessages(contents: GeminiContent[], system?: string): Chat
  * Chat turn with tools: Gemini first; when Gemini's quota is used up (or Google is down) and a backup
  * is configured, the same conversation goes to Groq in OpenAI format. Returns Gemini-shaped parts.
  */
+/** One chat turn through the backup (Groq / OpenRouter) models, in Gemini's part format. */
+async function backupGenerate(db: SupabaseClient, opts: { contents: GeminiContent[]; system?: string; tools?: GeminiTool[]; userId?: string }): Promise<{ parts: GeminiPart[]; text: string; via: "backup" }> {
+  const msg: ChatMessage = await fallbackChat(db, toChatMessages(opts.contents, opts.system), {
+    userId: opts.userId,
+    maxTokens: 1200,
+    tools: opts.tools?.map((t) => ({ type: "function" as const, function: { name: t.name, description: t.description, parameters: t.parameters } })),
+  });
+  const parts: GeminiPart[] = [];
+  if (msg.content) parts.push({ text: msg.content });
+  for (const c of msg.tool_calls ?? []) {
+    let args: Record<string, unknown> = {};
+    try {
+      args = JSON.parse(c.function.arguments || "{}");
+    } catch {
+      // leave empty
+    }
+    parts.push({ functionCall: { id: c.id, name: c.function.name, args } });
+  }
+  return { parts, text: msg.content ?? "", via: "backup" };
+}
+
+/**
+ * A chat turn with tools. Gemini first, backup on quota/outage — or, with `prefer: "backup"`, the fast backup
+ * first (the chat page: Gemini's free tier is paced to ~6 s between calls, so a 4-tool reply took over a minute).
+ */
 export async function chatGenerate(
   db: SupabaseClient,
-  opts: { contents: GeminiContent[]; system?: string; tools?: GeminiTool[]; userId?: string }
+  opts: { contents: GeminiContent[]; system?: string; tools?: GeminiTool[]; userId?: string; prefer?: "gemini" | "backup" }
 ): Promise<{ parts: GeminiPart[]; text: string; via: "gemini" | "backup" }> {
+  if (opts.prefer === "backup" && fallbackConfigured()) {
+    try {
+      return await backupGenerate(db, opts);
+    } catch {
+      // the backup is out of quota or down: Gemini below
+    }
+  }
   try {
     return { ...(await geminiGenerate(db, opts)), via: "gemini" };
   } catch (e) {
     const quotaOrOutage = e instanceof FreeTierLimitError || /overloaded|network/i.test((e as Error).message);
-    if (!quotaOrOutage || !fallbackConfigured()) throw e;
-    let msg: ChatMessage;
+    if (!quotaOrOutage || !fallbackConfigured() || opts.prefer === "backup") throw e;
     try {
-      msg = await fallbackChat(db, toChatMessages(opts.contents, opts.system), {
-        userId: opts.userId,
-        maxTokens: 1200,
-        tools: opts.tools?.map((t) => ({ type: "function" as const, function: { name: t.name, description: t.description, parameters: t.parameters } })),
-      });
+      return await backupGenerate(db, opts);
     } catch (f) {
       throw e instanceof FreeTierLimitError ? new FreeTierLimitError(`${e.message} Backup AI also failed: ${(f as Error).message}`) : e;
     }
-    const parts: GeminiPart[] = [];
-    if (msg.content) parts.push({ text: msg.content });
-    for (const c of msg.tool_calls ?? []) {
-      let args: Record<string, unknown> = {};
-      try {
-        args = JSON.parse(c.function.arguments || "{}");
-      } catch {
-        // leave empty
-      }
-      parts.push({ functionCall: { id: c.id, name: c.function.name, args } });
-    }
-    return { parts, text: msg.content ?? "", via: "backup" };
   }
 }

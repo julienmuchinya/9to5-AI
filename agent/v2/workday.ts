@@ -9,7 +9,7 @@ import type { Page } from "playwright";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { memoryKey, type PendingQuestion } from "../../src/lib/v2/app-questions";
 import { pickOption } from "../../src/lib/v2/app-questions";
-import { SUCCESS, answerFields, captchaVisible, collectFields, fill, labelled, readComboboxOptions, type ApplyOpts, type ApplyResult } from "./apply";
+import { SUCCESS, answerFields, captchaVisible, collectFields, fill, labelled, questionsFor, readComboboxOptions, type ApplyOpts, type ApplyResult, type Field } from "./apply";
 
 const WD = (id: string) => `[data-automation-id="${id}"]`;
 const AUTH_FORM = [WD("createAccountSubmitButton"), WD("signInSubmitButton"), WD("signInContent")].join(", ");
@@ -210,6 +210,8 @@ async function fillPrompt(page: Page, sel: string, value: string, label = ""): P
 }
 
 type AuthResult = { ok: true; created: boolean } | { ok: false; result: ApplyResult };
+/** Portals whose password was reset during this run (one reset per portal per run). */
+const RESETS_THIS_RUN = new Set<string>();
 
 /** Gets past the Create Account / Sign In step. */
 async function workdayAuth(page: Page, opts: ApplyOpts): Promise<AuthResult> {
@@ -232,15 +234,29 @@ async function workdayAuth(page: Page, opts: ApplyOpts): Promise<AuthResult> {
     await clickWd(page, "signInSubmitButton", "Sign In");
     await settle(page);
     await trace(page, "after sign-in click");
-    if (!(await visible(page, AUTH_FORM)) && ((await visible(page, NEXT)) || (await visible(page, WD("progressBarActiveStep"))))) return "ok";
-    if (!(await visible(page, AUTH_FORM))) {
-      await settle(page);
-      if (!(await visible(page, AUTH_FORM))) return "ok";
+    // Signed in = the flow moved past the "Create Account / Sign In" step. The sign-in page has a progress
+    // bar too (step 1 of N), and the form is hidden while Workday loads — neither means we're in. Checking
+    // the progress bar alone said "ok" too early, then "sign-in didn't stick", and a password reset followed.
+    const stepText = async () => ((await page.locator(WD("progressBarActiveStep")).first().textContent().catch(() => "")) ?? "").replace(/\s+/g, " ");
+    const signedIn = async () => !(await visible(page, AUTH_FORM)) && ((await visible(page, NEXT)) || (!!(await stepText()) && !/create account|sign in/i.test(await stepText())));
+    for (let i = 0; i < 6; i++) {
+      if (await signedIn()) return "ok";
+      if (await visible(page, AUTH_FORM)) break; // the form is back: read why
+      await page.waitForTimeout(2000);
     }
+    if (await signedIn()) return "ok";
     const t = `${await errorsOnPage(page)} ${await text(page)}`;
     if (/(verify|verification|activate|not (been )?(verified|activated))/i.test(t)) return "unverified";
-    if (/(incorrect|invalid|wrong|doesn.t match|locked)/i.test(t)) return "bad_password";
+    if (/(incorrect|invalid|wrong|doesn.t match|locked|not recognized|couldn.t sign you in|unable to sign in|check your (email|password))/i.test(t)) return "bad_password";
     return "unknown";
+  };
+  /** One password reset per portal per run: a reset email every attempt filled the inbox for nothing. */
+  const resetKey = `wd-reset:${host}`;
+  const resetAllowed = () => !RESETS_THIS_RUN.has(resetKey) && !!opts.emailLink;
+  const resetOnce = async () => {
+    if (!resetAllowed()) return false;
+    RESETS_THIS_RUN.add(resetKey);
+    return resetPassword();
   };
 
   /** Click the link Workday emails to confirm the account, then come back to the job. */
@@ -344,9 +360,19 @@ async function workdayAuth(page: Page, opts: ApplyOpts): Promise<AuthResult> {
           : { status: "needs_user", detail: `Your Workday account at ${host} isn't verified yet. Click the link in the email Workday sent to ${portal.email} (or connect Gmail on the Autopilot page so the agent does it), then Retry.` },
       };
     }
-    if (r === "bad_password" && (await resetPassword()) && (await signIn()) === "ok") return { ok: true, created: false };
+    if (r === "bad_password" && (await resetOnce()) && (await signIn()) === "ok") return { ok: true, created: false };
     if (r === "bad_password")
       return { ok: false, result: { status: "needs_user", detail: `Workday (${host}) rejected the saved password. Use "Forgot your password?" there and set it to the password shown under Portal logins, then click Retry.` } };
+    // Signed in before on this portal and the password wasn't refused: a slow page or a one-off glitch.
+    // Try once more, then leave it for the next run — no password reset for a sign-in that merely timed out.
+    if (r === "unknown") {
+      await page.goto(opts.url, { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
+      await page.waitForTimeout(2500);
+      await startApplication(page);
+      if ((await visible(page, NEXT)) || (await signIn()) === "ok") return { ok: true, created: false };
+      const why = (await errorsOnPage(page)) || "the page didn't move past Sign In";
+      return { ok: false, result: { status: "failed", detail: `Couldn't sign in to Workday (${host}) this time: ${why} — will retry next run` } };
+    }
   }
 
   // Create the account with the saved login.
@@ -369,7 +395,7 @@ async function workdayAuth(page: Page, opts: ApplyOpts): Promise<AuthResult> {
     if (/already (exists|in use|registered|been used)|account with this email/i.test(t)) {
       const r = await signIn();
       if (r === "ok") return { ok: true, created: false };
-      if (r === "bad_password" && (await resetPassword()) && (await signIn()) === "ok") return { ok: true, created: false };
+      if (r === "bad_password" && (await resetOnce()) && (await signIn()) === "ok") return { ok: true, created: false };
       if (r === "bad_password")
         return { ok: false, result: { status: "needs_user", detail: `You already have a Workday account at ${host} with a different password. Use "Forgot your password?" there and set it to the password under Portal logins, then click Retry.` } };
     }
@@ -390,11 +416,12 @@ async function workdayAuth(page: Page, opts: ApplyOpts): Promise<AuthResult> {
   }
   const r = await signIn();
   if (r === "ok") return { ok: true, created: false };
-  // Sign-in failed without saying why (seen on T-Mobile, Ciena, Northrop): usually an unverified account or a
-  // password that didn't stick. Try the verification email, then a password reset, before asking the user.
+  // Sign-in failed without saying why (seen on T-Mobile, Ciena, Northrop): usually an unverified account.
+  // Try the verification email. A password reset only when Workday actually refused the password —
+  // resetting on every unexplained failure sent a reset email per attempt and never helped.
   if (r !== "bad_password" && (await confirmByEmail(new Date(Date.now() - 3 * 86400_000), 12_000)) && (await signIn()) === "ok") return { ok: true, created: false };
-  if ((await resetPassword()) && (await signIn()) === "ok") return { ok: true, created: false };
-  const why = (await errorsOnPage(page)) || "the sign-in didn't go through and the reset email didn't arrive";
+  if (r === "bad_password" && (await resetOnce()) && (await signIn()) === "ok") return { ok: true, created: false };
+  const why = (await errorsOnPage(page)) || (r === "bad_password" ? "the saved password was refused" : "the page didn't move past Sign In (no error shown)");
   // Emails from Workday are often minutes late: with Gmail connected, try again next run before asking the user.
   return opts.emailLink
     ? { ok: false, result: { status: "failed", detail: `Couldn't sign in to Workday (${host}) yet: ${why} — will retry next run` } }
@@ -579,10 +606,20 @@ export async function applyWorkday(page: Page, db: SupabaseClient, opts: ApplyOp
     if (!(await visible(page, NEXT))) await startApplication(page);
 
     let lastStep = "";
+    /** The questions read on the current step, so a failure can show them in full (text + choices). */
+    let lastFields: Field[] = [];
     let sameStepTries = 0;
     let reloads = 0;
     let submittedClick = false;
-    for (let step = 0; step < 14; step++) {
+    /** Questions (normalised) whose answers Workday rejected — answered fresh by the AI on the next pass. */
+    const forced = new Set<string>();
+    const retriedSteps = new Set<string>();
+    const normLabel = (x: string) => x.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    const isForced = (f: { label: string }) => {
+      const l = normLabel(f.label);
+      return [...forced].some((r) => l.includes(r.slice(0, 40)) || r.includes(l.slice(0, 40)));
+    };
+    for (let step = 0; step < 16; step++) {
       await page.waitForTimeout(2500);
       let body = await text(page);
       // Workday's own transient error page: refresh like a person would (progress is saved per step).
@@ -626,8 +663,19 @@ export async function applyWorkday(page: Page, db: SupabaseClient, opts: ApplyOp
         const unanswered = [...errs.matchAll(/The field (.{2,700}?) is required and must have a value/g)]
           .map((m) => m[1].trim())
           .filter((l) => !answered.some((a) => a && (a.includes(norm(l).slice(0, 40)) || norm(l).includes(a.slice(0, 40)))));
+        // Questions we DID answer but Workday still calls empty: the answer didn't match a choice (a saved
+        // "Eligible / willing to obtain" on a clearance list) or didn't stick. Retry them once with the AI
+        // and the real options before giving up on this step.
+        const rejected = [...errs.matchAll(/The field (.{2,700}?) is required and must have a value/g)].map((m) => norm(m[1]).slice(0, 60)).filter((l) => l && !forced.has(l));
+        if (rejected.length && !retriedSteps.has(stepName)) {
+          retriedSteps.add(stepName);
+          rejected.forEach((l) => forced.add(l));
+          await trace(page, `retrying ${rejected.length} rejected answer(s) with the AI`);
+          sameStepTries = 0;
+          continue;
+        }
         if (unanswered.length) {
-          const pending: PendingQuestion[] = [...new Set(unanswered)].map((l) => ({ key: memoryKey(l), label: l, kind: "text", options: [], required: true }));
+          const pending: PendingQuestion[] = questionsFor(unanswered, lastFields);
           return {
             status: "needs_user",
             detail: `Waiting on your answer to ${pending.length} question${pending.length === 1 ? "" : "s"} (Workday "${stepName}") — answer once on this page and the agent reapplies`,
@@ -640,7 +688,18 @@ export async function applyWorkday(page: Page, db: SupabaseClient, opts: ApplyOp
           };
         }
         // Often a slow page or a resume still parsing: the run loop retries it (up to 3 tries) before it goes to the user.
-        return { status: "failed", detail: `Workday stopped at "${stepName}"${errs ? `: ${errs.slice(0, 300)}` : ""} — will retry next run`, answers: allAnswers, learned, aiCalls, usedPortalLogin: true, accountCreated };
+        const stuckOn = [...errs.matchAll(/The field (.{2,700}?) is required and must have a value/g)].map((m) => m[1].trim());
+        return {
+          status: "failed",
+          detail: `Workday stopped at "${stepName}"${errs ? `: ${errs.slice(0, 300)}` : ""} — will retry next run`,
+          answers: allAnswers,
+          learned,
+          aiCalls,
+          // After the last retry this lands in Needs you with the exact questions and their choices.
+          pending: stuckOn.length ? questionsFor(stuckOn, lastFields) : undefined,
+          usedPortalLogin: true,
+          accountCreated,
+        };
       }
 
       // Resume upload (My Experience). Workday parses it and pre-fills work history.
@@ -657,9 +716,10 @@ export async function applyWorkday(page: Page, db: SupabaseClient, opts: ApplyOp
       if (!isReview) {
         const fields = (await collectFields(page)).filter((f) => f.kind !== "file");
         await readComboboxOptions(page, fields);
+        lastFields = fields;
         if (process.env.APPLY_DEBUG_DIR)
           for (const f of fields) console.log(`[9to5]   wd field: ${f.kind} req=${f.required} filled=${f.filled} "${f.label.slice(0, 90)}" opts=${f.options.length}`);
-        const ans = await answerFields(db, fields, opts);
+        const ans = await answerFields(db, fields, forced.size ? { ...opts, forceAi: isForced } : opts);
         aiCalls += ans.aiCalls;
         if (ans.quota) return { status: "needs_user", detail: "AI quota used up today — it retries tomorrow", answers: allAnswers, aiCalls, accountCreated };
         learned.push(...ans.learned);
