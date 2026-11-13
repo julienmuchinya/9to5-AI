@@ -6,6 +6,7 @@ import { applyUrlFor } from "../../../agent/v2/apply";
 import { ROLE_CATALOG } from "./role-catalog";
 import { COMPANY_DAILY_CAP, DEFAULT_DAILY_CAP, DEFAULT_MIN_FIT, MAX_DAILY_APPLY_CAP } from "./priority";
 import { WORKDAY_BOARDS } from "./discovery/workday";
+import { familyOf, judgeRoute, learnRoutes } from "./learning";
 
 const nurse: MatchProfile = {
   skills: ["Patient care", "BLS", "Epic"],
@@ -100,5 +101,18 @@ describe("higher limits", () => {
     expect(MAX_DAILY_APPLY_CAP).toBe(500);
     expect(DEFAULT_MIN_FIT).toBe(55);
     expect(COMPANY_DAILY_CAP).toBe(15);
+  });
+});
+
+describe("sites that failed before get another chance", () => {
+  it("forgets misses older than 10 days, keeps recent ones, and gives new sites their own group", () => {
+    const now = Date.parse("2026-11-13T12:00:00Z");
+    const url = "https://job-boards.greenhouse.io/acme/jobs/1";
+    const old = Array.from({ length: 5 }, () => ({ apply_url: url, status: "failed", status_updated_at: "2026-10-20T00:00:00Z" }));
+    expect(judgeRoute(learnRoutes(old, now), url).skip).toBe(false);
+    const recent = old.map((r) => ({ ...r, status_updated_at: "2026-11-10T00:00:00Z" }));
+    expect(judgeRoute(learnRoutes(recent, now), url).skip).toBe(true);
+    expect(familyOf("https://lamons.applytojob.com/apply/x")).toBe("jazzhr");
+    expect(familyOf("https://jobs.jobvite.com/iboss/job/x")).toBe("jobvite");
   });
 });

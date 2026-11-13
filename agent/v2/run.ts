@@ -493,9 +493,9 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
     .order("created_at")
     .limit(400);
   // Every earlier application: what's taken, and what the agent has learned about which sites go through.
-  const existing: { job_id: string; apply_url: string | null; status: string; submitted_at: string | null }[] = [];
+  const existing: { job_id: string; apply_url: string | null; status: string; submitted_at: string | null; status_updated_at: string | null }[] = [];
   for (let from = 0; from < 10000; from += 1000) {
-    const { data } = await sb.from("applications").select("job_id,apply_url,status,submitted_at").eq("user_id", u.id).range(from, from + 999);
+    const { data } = await sb.from("applications").select("job_id,apply_url,status,submitted_at,status_updated_at").eq("user_id", u.id).range(from, from + 999);
     existing.push(...((data ?? []) as typeof existing));
     if (!data || data.length < 1000) break;
   }

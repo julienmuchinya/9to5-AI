@@ -10,7 +10,7 @@
  * (no time or AI spent on them), and (3) prefer another route to the same job when one exists.
  */
 
-export type Family = "greenhouse" | "lever" | "ashby" | "workday" | "workable" | "rippling" | "other";
+export type Family = "greenhouse" | "lever" | "ashby" | "workday" | "workable" | "rippling" | "jazzhr" | "jobvite" | "other";
 
 export function familyOf(url: string | null | undefined): Family {
   const u = (url ?? "").toLowerCase();
@@ -20,6 +20,8 @@ export function familyOf(url: string | null | undefined): Family {
   if (/myworkday(jobs|site)\.com/.test(u)) return "workday";
   if (/apply\.workable\.com/.test(u)) return "workable";
   if (/ats\.rippling\.com/.test(u)) return "rippling";
+  if (/applytojob\.com/.test(u)) return "jazzhr";
+  if (/jobs\.jobvite\.com/.test(u)) return "jobvite";
   return "other";
 }
 
@@ -47,13 +49,17 @@ export interface Learned {
   byFamily: Map<Family, RouteStats>;
 }
 
-/** Rows: the user's applications (apply_url, status, submitted_at). */
-export function learnRoutes(rows: { apply_url: string | null; status: string; submitted_at?: string | null }[]): Learned {
+/** Misses older than this stop counting, so a site that failed before the agent was fixed gets another chance. */
+export const MISS_MEMORY_DAYS = 10;
+
+/** Rows: the user's applications (apply_url, status, submitted_at, status_updated_at). */
+export function learnRoutes(rows: { apply_url: string | null; status: string; submitted_at?: string | null; status_updated_at?: string | null }[], now = Date.now()): Learned {
   const fam = new Map<Family, { tries: number; sent: number }>();
   const site = new Map<string, { tries: number; sent: number; family: Family }>();
   for (const r of rows) {
     const ok = Boolean(r.submitted_at) || SUCCESS.has(r.status);
     if (!ok && !MISS.has(r.status)) continue; // queued / closed: no verdict on the route
+    if (!ok && r.status_updated_at && now - Date.parse(r.status_updated_at) > MISS_MEMORY_DAYS * 86400_000) continue;
     const f = familyOf(r.apply_url);
     const s = siteOf(r.apply_url);
     const fe = fam.get(f) ?? { tries: 0, sent: 0 };
