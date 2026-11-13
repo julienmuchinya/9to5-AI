@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { freshness, planQueue, priorityScore, companyKey, ago } from "./priority";
+import { freshness, planQueue, priorityScore, companyKey, ago, COMPANY_DAILY_CAP } from "./priority";
 import { answerFromProfile, customStore, findSimilarAnswer, isJobSpecific, memoryKey, pickOption, questionFor, rememberAnswers } from "./app-questions";
 import { nextScheduledRun } from "./dispatch";
 import { knownValue, type Applicant, type Field } from "../../../agent/v2/apply";
@@ -28,16 +28,16 @@ describe("freshness priority", () => {
 
 describe("planQueue", () => {
   const mk = (company: string, fit: number, h: number) => ({ company, fit, postedAt: hoursAgo(h) });
-  it("caps each company at 10 per day and orders freshest-first", () => {
-    const items = [...Array.from({ length: 13 }, (_, i) => mk("Acme Inc", 80, i + 1)), mk("Beta", 60, 2), mk("Gamma", 95, 24 * 20)];
+  it("caps each company at COMPANY_DAILY_CAP per day and orders freshest-first", () => {
+    const items = [...Array.from({ length: COMPANY_DAILY_CAP + 3 }, (_, i) => mk("Acme Inc", 80, i + 1)), mk("Beta", 60, 2), mk("Gamma", 95, 24 * 20)];
     const { picked, skippedForCompanyCap } = planQueue(items, { now: NOW });
-    expect(picked.filter((x) => companyKey(x.company) === "acme")).toHaveLength(10);
+    expect(picked.filter((x) => companyKey(x.company) === "acme")).toHaveLength(COMPANY_DAILY_CAP);
     expect(skippedForCompanyCap).toHaveLength(3);
     expect(picked[0].company).toBe("Acme Inc");
     expect(picked.at(-1)?.company).toBe("Gamma"); // old posting goes last despite top fit
   });
   it("counts what was already sent today", () => {
-    const { picked } = planQueue([mk("Acme", 80, 1), mk("acme, inc.", 80, 2)], { appliedToday: { acme: 9 }, now: NOW });
+    const { picked } = planQueue([mk("Acme", 80, 1), mk("acme, inc.", 80, 2)], { appliedToday: { acme: COMPANY_DAILY_CAP - 1 }, now: NOW });
     expect(picked).toHaveLength(1);
   });
 });
@@ -122,10 +122,10 @@ describe("form filler (no AI)", () => {
 });
 
 describe("schedule", () => {
-  it("finds the next :17 of every third UTC hour", () => {
+  it("finds the next :17 of every second UTC hour", () => {
     expect(nextScheduledRun(new Date("2026-11-06T00:03:00Z")).toISOString()).toBe("2026-11-06T00:17:00.000Z");
-    expect(nextScheduledRun(new Date("2026-11-06T00:20:00Z")).toISOString()).toBe("2026-11-06T03:17:00.000Z");
-    expect(nextScheduledRun(new Date("2026-11-06T22:00:00Z")).toISOString()).toBe("2026-11-07T00:17:00.000Z");
+    expect(nextScheduledRun(new Date("2026-11-06T00:20:00Z")).toISOString()).toBe("2026-11-06T02:17:00.000Z");
+    expect(nextScheduledRun(new Date("2026-11-06T23:00:00Z")).toISOString()).toBe("2026-11-07T00:17:00.000Z");
   });
 });
 

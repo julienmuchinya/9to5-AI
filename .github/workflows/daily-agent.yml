@@ -2,8 +2,8 @@ name: 9to5 AI Agent
 
 on:
   schedule:
-    # Every 3 hours (UTC). GitHub may delay scheduled runs by a few minutes.
-    - cron: "17 */3 * * *"
+    # Every 2 hours (UTC); a run with jobs left starts the next one itself. GitHub may delay scheduled runs.
+    - cron: "17 */2 * * *"
   workflow_dispatch:
     inputs:
       discover:
@@ -35,9 +35,18 @@ concurrency:
 jobs:
   run-agent:
     runs-on: ubuntu-latest
-    timeout-minutes: 55
+    # Public repo: unlimited minutes, so runs go up to ~2.5 h. A private repo's run stops itself at 42 min.
+    timeout-minutes: 175
     steps:
       - uses: actions/checkout@v4
+
+      # Scheduled runs don't carry the repository in their event, so ask GitHub. Unknown counts as public
+      # (logs stay hidden, no form screenshots uploaded).
+      - name: Repo visibility
+        id: vis
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: echo "public=$(gh api repos/${{ github.repository }} --jq 'if .private then "false" else "true" end' 2>/dev/null || echo true)" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-node@v4
         with:
@@ -69,20 +78,22 @@ jobs:
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           GEMINI_MODEL: gemini-3.5-flash
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_REPO_PUBLIC: ${{ github.event.repository.private == false }}
+          GITHUB_REPO_PUBLIC: ${{ steps.vis.outputs.public }}
           DISCOVER: ${{ github.event.inputs.discover || 'true' }}
           APPLY: ${{ github.event.inputs.apply || 'true' }}
           APPLY_DRY_RUN: ${{ github.event.inputs.apply_dry_run || 'false' }}
           ONLY_USER: ${{ github.event.inputs.only_user }}
-          # Stop starting new applications after this many minutes (job timeout is 55).
-          RUN_BUDGET_MIN: "42"
+          # Stop starting new applications after this many minutes (job timeout is 175).
+          RUN_BUDGET_MIN: ${{ steps.vis.outputs.public == 'false' && '42' || '150' }}
+          # Applications filled at the same time (different sites).
+          APPLY_CONCURRENCY: ${{ steps.vis.outputs.public == 'false' && '4' || '6' }}
           # Screenshot + page text of every application that didn't go through (kept 3 days).
           # Private repo only: on a public repo anyone could download them (they show your filled-in forms).
-          APPLY_DEBUG_DIR: ${{ github.event.repository.private && 'debug' || '' }}
+          APPLY_DEBUG_DIR: ${{ steps.vis.outputs.public == 'false' && 'debug' || '' }}
         run: npx tsx agent/v2/run.ts
 
       - name: Keep evidence of applications that didn't go through
-        if: always() && github.event.repository.private
+        if: always() && steps.vis.outputs.public == 'false'
         uses: actions/upload-artifact@v4
         with:
           name: apply-debug

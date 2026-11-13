@@ -50,7 +50,7 @@ async function getJson<T>(url: string, timeoutMs = 30000): Promise<T | null> {
 const recent = (iso?: string) =>
   !iso || Date.now() - new Date(iso).getTime() < MAX_AGE_DAYS * 86400_000;
 
-/** Keep only STEM jobs located in (or remote-open to) the US. */
+/** Keep jobs located in (or remote-open to) the US whose title is technical or one a user asked for. */
 export function keepPosting(p: Posting): boolean {
   if (!isStemTitle(p.title)) return false;
   if (!recent(p.posted_at)) return false;
@@ -264,7 +264,7 @@ export async function fetchRemoteFeeds(): Promise<Posting[]> {
 
   const remotive = await getJson<{
     jobs: { id: number; title: string; company_name: string; url: string; candidate_required_location: string; salary: string; publication_date: string; description: string; job_type: string }[];
-  }>("https://remotive.com/api/remote-jobs?category=software-dev&limit=150");
+  }>("https://remotive.com/api/remote-jobs?limit=300");
   for (const j of remotive?.jobs ?? []) {
     const desc = stripHtml(j.description);
     const pay = parseSalary(j.salary || desc);
@@ -335,7 +335,7 @@ export async function fetchRemoteFeeds(): Promise<Posting[]> {
   for (const level of ["Entry Level", "Internship"]) {
     const muse = await getJson<{
       results: { id: number; name: string; company: { name: string }; refs: { landing_page: string }; locations: { name: string }[]; publication_date: string; contents: string }[];
-    }>(`https://www.themuse.com/api/public/jobs?category=Software%20Engineering&category=Data%20and%20Analytics&level=${encodeURIComponent(level)}&page=0`);
+    }>(`https://www.themuse.com/api/public/jobs?level=${encodeURIComponent(level)}&location=United%20States&page=0`);
     for (const j of muse?.results ?? []) {
       const locs = j.locations.map((l) => l.name);
       const desc = stripHtml(j.contents ?? "");

@@ -34,7 +34,7 @@ HOW TO ANSWER:
 - How did you hear: LinkedIn (or job board / company website) — never a referral or a named person.
 - Relationships, relatives at the company, outside business activities, non-compete / non-solicit, conflicts of interest, previously employed there, government employment → No / "None" / "Not to my knowledge".
 - Work authorization and sponsorship must match the facts (authorized_to_work_in_us, needs_visa_sponsorship). F-1 / CPT / OPT questions → No when the facts say no sponsorship is needed. Export-control / ITAR / "deemed export" → use saved_answers (visa_status / us_citizen); otherwise the option consistent with being authorized without sponsorship.
-- Skill / experience yes-no questions: Yes when the resume shows the skill or closely related work (be generous: transferable experience counts); otherwise answer Yes only if it's a common skill a software engineer at this level is expected to learn quickly, else No.
+- Skill / experience yes-no questions: Yes when the resume shows the skill or closely related work (be generous: transferable experience counts); otherwise answer Yes only if it's a common skill someone in this role at this level is expected to learn quickly, else No.
 - Skill / technology checklists ("select all that apply"): tick EVERY option that appears in facts.skills or the resume, not just one.
 - Questions about the applicant's own details (address, current/previous employer, job title, school, dates) come from the facts and resume ONLY — never copy the hiring company's name, address or this job's title into them.
 - Links ("GitHub / portfolio / website / work samples"): facts.links (github, else linkedin).

@@ -7,6 +7,7 @@ import { chatGenerate, FreeTierLimitError, type GeminiContent, type GeminiTool }
 import { freeTierSnapshot } from "@/lib/v2/freeTier";
 import { logEvent } from "@/lib/v2/log";
 import { dispatchAgentRun, machineStatus } from "@/lib/v2/dispatch";
+import { agentCanSubmit, AUTO_SUBMIT_OR } from "@/lib/v2/verify";
 import { ago, COMPANY_DAILY_CAP, freshness, MAX_DAILY_APPLY_CAP, MAX_POSTING_AGE_DAYS, priorityScore } from "@/lib/v2/priority";
 import { needsKind, NEEDS_LABEL } from "@/lib/v2/needs";
 import { customStore, findSimilarAnswer, memoryKey, type CustomAnswers, type PendingQuestion } from "@/lib/v2/app-questions";
@@ -16,8 +17,8 @@ import type { ParsedResume } from "@/lib/v2/resume";
 
 export const maxDuration = 60;
 
-/** Sites the agent submits to by itself. */
-const AUTO_ATS = ["greenhouse", "lever", "ashby", "workday", "workable"];
+/** Sites the agent submits to by itself (one shared check: verify.ts). */
+const AUTO_SITES = "Greenhouse, Lever, Ashby, Workday, Workable, Rippling, JazzHR and Jobvite";
 
 const TOOLS: GeminiTool[] = [
   {
@@ -41,7 +42,7 @@ const TOOLS: GeminiTool[] = [
         level: { type: "string", enum: ["internship", "new_grad", "entry", "mid", "senior"] },
         min_fit: { type: "integer" },
         verified_only: { type: "boolean" },
-        auto_submit_only: { type: "boolean", description: "Only jobs on sites the agent can submit to itself (Greenhouse, Lever, Ashby, Workday, Workable)" },
+        auto_submit_only: { type: "boolean", description: `Only jobs on sites the agent can submit to itself (${AUTO_SITES})` },
         not_applied_only: { type: "boolean", description: "Leave out jobs that already have an application" },
         limit: { type: "integer" },
       },
@@ -49,12 +50,13 @@ const TOOLS: GeminiTool[] = [
   },
   {
     name: "queue_applications",
-    description: `Queue applications for the agent to submit on its next run (freshest postings go first, max ${COMPANY_DAILY_CAP} per company per day). Pass job_ids from search_jobs, or a query (title or company words) to queue every matching verified job. Max 50 at once.`,
+    description: `Queue applications for the agent to submit on its next run (freshest postings go first, max ${COMPANY_DAILY_CAP} per company per day). Pass job_ids from search_jobs, a query (title or company words) to queue every matching verified job, or all_matches=true to queue EVERY verified match the agent can submit (up to 500).`,
     parameters: {
       type: "object",
       properties: {
         job_ids: { type: "array", items: { type: "string" } },
         query: { type: "string" },
+        all_matches: { type: "boolean", description: "Queue every verified match the agent can submit (\"apply to all my matches\")" },
         level: { type: "string", enum: ["internship", "new_grad", "entry", "mid", "senior"] },
         min_fit: { type: "integer" },
         limit: { type: "integer" },
@@ -158,7 +160,7 @@ const TOOLS: GeminiTool[] = [
       properties: {
         auto_submit_enabled: { type: "boolean" },
         paused: { type: "boolean" },
-        daily_apply_cap: { type: "integer", description: "0-300 applications per day (free AI quota and GitHub minutes are the real limits)" },
+        daily_apply_cap: { type: "integer", description: `0-${MAX_DAILY_APPLY_CAP} applications per day (the free AI quota is the real limit)` },
         min_fit_score: { type: "integer", description: "40-95" },
       },
     },
@@ -192,21 +194,23 @@ const TOOLS: GeminiTool[] = [
 ];
 
 const SYSTEM_BASE = `You are 9to5 AI, a friendly job-search agent working for the signed-in user.
-You find real STEM jobs that match their resume, verify employers, and submit applications for them.
+You find real jobs in ANY field (tech, healthcare, trades, energy, finance, sales, retail, admin…) that match their resume and target roles, verify employers, and submit applications for them.
 You can also help with career questions: resume tips, interview prep, what roles fit them, salary ranges, how the app works.
 
 How to behave:
 - Be helpful. Don't refuse normal requests. If something isn't possible yet, say exactly why and what the user can do (e.g. "upload your resume on Resume & profile").
 - Use tools to act or look things up; never claim you did something unless a tool result confirms it.
 - When asked about their resume, skills or preferences, call get_profile first.
-- When asked about jobs or applications, call search_jobs, list_applications or get_status. If there are 0 matched jobs, explain the agent searches every 3 hours, and offer run_agent_now.
+- When asked about jobs or applications, call search_jobs, list_applications or get_status. If there are 0 matched jobs, explain the agent searches every 2 hours, and offer run_agent_now.
 - "Look for new jobs" / "search for jobs" / "start applying" = run_agent_now (one run both searches and applies).
 - When the user names a KIND of job to go after ("go apply to oil field jobs", "look for offshore / natural gas / mining jobs"), call run_agent_now WITH focus_roles (concrete titles + the industry words). That job becomes the priority over everything else and is added to their target roles; say so. Then also call search_jobs with one of the titles: if matches exist, queue_applications them.
 - "Apply to <one company or a job you listed>" = search_jobs then queue_applications, then run_agent_now.
 - Retry / answer / mark / dismiss: call list_applications or search_jobs first so you act on the right rows, then the change tool, then say exactly what changed (counts, company names).
 - When the user answers a question the agent was waiting on (from needs_user rows), call answer_question with the question text as listed.
 - ONLY act on the user's LATEST message. Earlier messages are context: never repeat a change, queue or run from an earlier message (e.g. an old "cap of 20") unless the latest message asks for it again. A one-word message like "answer" or "why?" is a question — look things up, don't change settings.
-- The agent auto-submits verified jobs on Greenhouse, Lever, Ashby, Workday and Workable. SmartRecruiters and most other sites go to "Needs you" (SmartRecruiters blocks automated browsers with a CAPTCHA).
+- The agent auto-submits verified jobs on ${AUTO_SITES}. Jobs on other sites (SmartRecruiters, iCIMS, Taleo, company sites) show "Apply yourself" on the Jobs page; SmartRecruiters blocks automated browsers with a CAPTCHA.
+- "Apply to all my matches" / "submit everything" = queue_applications with all_matches=true, then run_agent_now.
+- To look for a new kind of job in any field, add it with update_preferences add_target_roles (any job title works) — or run_agent_now with focus_roles to make it the priority.
 - AI: Gemini first; when Gemini's daily quota is used, the agent and this chat switch to Groq automatically, so a Gemini limit does not stop applications.
 - "How well do I match X" / "what am I missing for X" → job_match_report. "Who should I follow up with" / "which applications went quiet" → follow_ups (give the note so they can copy it).
 - When asked why few applications are sent, call explain_last_run and answer from its numbers: the usual causes are the run's time budget / GitHub minutes, CAPTCHAs on Lever/Ashby, sites cooling down after a CAPTCHA, the per-company daily cap, Workday sign-ins, and questions waiting in "Needs you".
@@ -314,28 +318,30 @@ async function runTool(name: string, args: Args, sb: SupabaseClient, userId: str
     case "search_jobs":
     case "queue_applications":
     case "dismiss_jobs": {
-      const limit = Math.max(1, Math.min(name === "search_jobs" ? 25 : 50, Number(args.limit ?? (name === "search_jobs" ? 10 : 20))));
+      const allMatches = name === "queue_applications" && Boolean(args.all_matches);
+      const limit = allMatches ? 500 : Math.max(1, Math.min(name === "search_jobs" ? 25 : 50, Number(args.limit ?? (name === "search_jobs" ? 10 : 20))));
       let q = sb
         .from("jobs")
-        .select("id,title,company_name,fit_score,posting_id,url, job_postings!inner(level,locations,is_remote,ats,verification_status,salary_max,posted_at)")
+        .select("id,title,company_name,fit_score,posting_id,url, job_postings!inner(level,locations,is_remote,ats,apply_url,url,verification_status,salary_max,posted_at)")
         .eq("user_id", userId)
         .eq("dismissed", false)
         .order("fit_score", { ascending: false })
-        .limit(Math.min(300, limit * 4));
+        .limit(allMatches ? 1000 : Math.min(300, limit * 4));
       const ids = Array.isArray(args.job_ids) ? (args.job_ids as unknown[]).filter(uuid) : [];
       if (ids.length) q = q.in("id", ids as string[]);
       if (args.query) {
         const t = clean(String(args.query));
         if (t) q = q.or(`title.ilike.%${t}%,company_name.ilike.%${t}%`);
       }
+      if (name === "queue_applications" && !ids.length && !args.query && !allMatches) return { error: "Say which jobs: job_ids from search_jobs, a query, or all_matches=true" };
       if (name === "dismiss_jobs" && !ids.length && !args.query) return { error: "Say which jobs to dismiss (ids from search_jobs, or a company / title to match)" };
       if (args.level) q = q.eq("job_postings.level", String(args.level));
       if (args.min_fit) q = q.gte("fit_score", Number(args.min_fit));
       if (args.verified_only || name === "queue_applications") q = q.eq("job_postings.verification_status", "verified");
-      if (args.auto_submit_only) q = q.in("job_postings.ats", AUTO_ATS);
+      if (args.auto_submit_only || allMatches) q = q.or(AUTO_SUBMIT_OR, { referencedTable: "job_postings" });
       const { data, error } = await q;
       if (error) return { error: error.message };
-      type Row = { id: string; title: string; company_name: string; fit_score: number; posting_id: string; url: string; job_postings: { level: string; locations: string[]; is_remote: boolean; ats: string; verification_status: string; salary_max: number | null; posted_at: string | null } };
+      type Row = { id: string; title: string; company_name: string; fit_score: number; posting_id: string; url: string; job_postings: { level: string; locations: string[]; is_remote: boolean; ats: string; apply_url: string | null; url: string; verification_status: string; salary_max: number | null; posted_at: string | null } };
       let all = (data ?? []) as unknown as Row[];
       const { data: existing } = await sb.from("applications").select("job_id,status").eq("user_id", userId).in("job_id", all.map((r) => r.id));
       const applied = new Map((existing ?? []).map((e) => [e.job_id as string, e.status as string]));
@@ -355,7 +361,7 @@ async function runTool(name: string, args: Args, sb: SupabaseClient, userId: str
             location: r.job_postings.is_remote ? "Remote" : r.job_postings.locations.slice(0, 2).join("; "),
             pay_up_to: r.job_postings.salary_max,
             verification: r.job_postings.verification_status,
-            agent_can_submit: AUTO_ATS.includes(r.job_postings.ats),
+            agent_can_submit: agentCanSubmit(r.job_postings),
             application: applied.get(r.id) ?? null,
           })),
         };
@@ -366,11 +372,12 @@ async function runTool(name: string, args: Args, sb: SupabaseClient, userId: str
       }
       if (!rows.length) return { queued: 0, note: "No verified matching jobs without an application yet" };
       const { error: upErr } = await sb.from("applications").upsert(
-        rows.map((r) => ({ user_id: userId, job_id: r.id, posting_id: r.posting_id, apply_url: r.url, ats: r.job_postings.ats, status: "queued", requested_by: "chat" })),
+        (allMatches ? rows.filter((r) => agentCanSubmit(r.job_postings)) : rows).map((r) => ({ user_id: userId, job_id: r.id, posting_id: r.posting_id, apply_url: r.job_postings.apply_url || r.url, ats: r.job_postings.ats, status: "queued", requested_by: "chat" })),
         { onConflict: "user_id,job_id", ignoreDuplicates: true }
       );
       if (upErr) return { error: upErr.message };
-      return { queued: rows.length, jobs: rows.map((r) => `${r.title} — ${r.company_name}`), note: "They go out on the next run; offer run_agent_now to send them now." };
+      const sent = allMatches ? rows.filter((r) => agentCanSubmit(r.job_postings)) : rows;
+      return { queued: sent.length, jobs: sent.slice(0, 25).map((r) => `${r.title} — ${r.company_name}`), more: Math.max(0, sent.length - 25), note: "They go out on the next run; offer run_agent_now to send them now." };
     }
     case "list_applications": {
       const limit = Math.max(1, Math.min(40, Number(args.limit ?? 10)));
@@ -452,20 +459,20 @@ async function runTool(name: string, args: Args, sb: SupabaseClient, userId: str
       return error ? { error: error.message } : { updated: rows.length, action, applications: rows.map((r) => `${r.jobs?.title} — ${r.jobs?.company_name}`) };
     }
     case "job_match_report": {
-      let q = sb.from("jobs").select("id,title,company_name,fit_score,fit_reasons,url, job_postings!inner(description,ats,posted_at,salary_max,locations,is_remote)").eq("user_id", userId).order("fit_score", { ascending: false }).limit(5);
+      let q = sb.from("jobs").select("id,title,company_name,fit_score,fit_reasons,url, job_postings!inner(description,ats,apply_url,url,verification_status,posted_at,salary_max,locations,is_remote)").eq("user_id", userId).order("fit_score", { ascending: false }).limit(5);
       if (uuid(args.job_id)) q = q.eq("id", String(args.job_id));
       else if (args.query) {
         const t = clean(String(args.query));
         if (t) q = q.or(`title.ilike.%${t}%,company_name.ilike.%${t}%`);
       } else return { error: "Which job? Give a job id from search_jobs or a title / company" };
       const [{ data: jobs }, { data: prof }] = await Promise.all([q, sb.from("profiles").select("resume_parsed").eq("id", userId).maybeSingle()]);
-      type J = { id: string; title: string; company_name: string; fit_score: number; fit_reasons: string[] | null; url: string; job_postings: { description: string | null; ats: string; posted_at: string | null; salary_max: number | null; locations: string[]; is_remote: boolean } };
+      type J = { id: string; title: string; company_name: string; fit_score: number; fit_reasons: string[] | null; url: string; job_postings: { description: string | null; ats: string; apply_url: string | null; url: string; verification_status: string; posted_at: string | null; salary_max: number | null; locations: string[]; is_remote: boolean } };
       const j = (jobs ?? [])[0] as unknown as J | undefined;
       if (!j) return { error: "No matched job like that" };
       const parsed = (prof?.resume_parsed ?? null) as ParsedResume | null;
       const cover = jobSkillCoverage(parsed, `${j.title}\n${j.job_postings.description ?? ""}`);
       return {
-        job: { id: j.id, title: j.title, company: j.company_name, fit: j.fit_score, posted: ago(j.job_postings.posted_at), pay_up_to: j.job_postings.salary_max, location: j.job_postings.is_remote ? "Remote" : j.job_postings.locations.slice(0, 2).join("; "), link: j.url, agent_can_submit: AUTO_ATS.includes(j.job_postings.ats) },
+        job: { id: j.id, title: j.title, company: j.company_name, fit: j.fit_score, posted: ago(j.job_postings.posted_at), pay_up_to: j.job_postings.salary_max, location: j.job_postings.is_remote ? "Remote" : j.job_postings.locations.slice(0, 2).join("; "), link: j.url, agent_can_submit: agentCanSubmit(j.job_postings) },
         fit_reasons: j.fit_reasons ?? [],
         technologies_the_job_names: cover.asked,
         on_your_resume: cover.asked.filter((t) => !cover.missing.includes(t)),

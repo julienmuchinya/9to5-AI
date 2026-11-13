@@ -5,6 +5,8 @@ import { SubmitButton } from "@/components/submit-button";
 import { disconnectInbox, saveAutopilot, saveInbox } from "../actions";
 import { GMAIL_OAUTH_HOST, googleOAuthConfigured } from "@/lib/v2/gmail";
 
+import { COMPANY_DAILY_CAP, DEFAULT_DAILY_CAP, DEFAULT_MIN_FIT, MAX_DAILY_APPLY_CAP } from "@/lib/v2/priority";
+
 export const dynamic = "force-dynamic";
 
 const input = "mt-1.5 w-32 rounded-xl border border-[var(--border)] bg-[var(--background-2)] px-3 py-2 text-sm outline-none focus:border-[var(--accent)]";
@@ -50,13 +52,13 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
           <div className="grid gap-4 sm:grid-cols-2">
             <label className="block text-sm">
               Max applications per day
-              <input className={input} type="number" name="daily_apply_cap" min={0} max={300} defaultValue={s?.daily_apply_cap ?? 5} />
-              <span className="mt-1 block text-xs text-[var(--muted)]">0–100 in total. Never more than 10 per company per day, freshest postings first. The free AI quota is the real limit.</span>
+              <input className={input} type="number" name="daily_apply_cap" min={0} max={MAX_DAILY_APPLY_CAP} defaultValue={s?.daily_apply_cap ?? DEFAULT_DAILY_CAP} />
+              <span className="mt-1 block text-xs text-[var(--muted)]">{`0–${MAX_DAILY_APPLY_CAP} in total (start: ${DEFAULT_DAILY_CAP}). Never more than ${COMPANY_DAILY_CAP} per company per day, freshest postings first. The free AI quota is the real limit.`}</span>
             </label>
             <label className="block text-sm">
               Minimum fit score to auto-apply
-              <input className={input} type="number" name="min_fit_score" min={40} max={95} defaultValue={s?.min_fit_score ?? 65} />
-              <span className="mt-1 block text-xs text-[var(--muted)]">40–95. Higher = pickier.</span>
+              <input className={input} type="number" name="min_fit_score" min={40} max={95} defaultValue={s?.min_fit_score ?? DEFAULT_MIN_FIT} />
+              <span className="mt-1 block text-xs text-[var(--muted)]">{`40–95 (start: ${DEFAULT_MIN_FIT}). Lower = the agent applies to more of your matches; higher = pickier.`}</span>
             </label>
           </div>
         </Card>

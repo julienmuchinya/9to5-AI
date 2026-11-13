@@ -1,7 +1,8 @@
 import { requireUser } from "@/lib/v2/session";
 import { Badge, Card, EmptyState, PageHeader, TabLink, buttonCls } from "@/components/ui";
 import { ago, freshness, priorityScore } from "@/lib/v2/priority";
-import { dismissJob, queueJob } from "../actions";
+import { dismissJob, queueAllMatches, queueJob } from "../actions";
+import { agentCanSubmit, AUTO_SUBMIT_OR } from "@/lib/v2/verify";
 
 export const dynamic = "force-dynamic";
 
@@ -17,6 +18,8 @@ type Row = {
     locations: string[];
     is_remote: boolean;
     ats: string;
+    apply_url: string | null;
+    url: string;
     salary_min: number | null;
     salary_max: number | null;
     verification_status: string;
@@ -29,18 +32,18 @@ const LEVEL: Record<string, string> = { internship: "Internship", new_grad: "New
 const pay = (a: number | null, b: number | null) => (b ? `$${Math.round((a ?? b) / 1000)}k${a && a !== b ? `–$${Math.round(b / 1000)}k` : ""}` : null);
 const FRESH_VARIANT = { today: "success", "2d": "info", "3d": "info", week: "default", "2weeks": "default", older: "default", unknown: "default" } as const;
 
-export default async function JobsPage({ searchParams }: { searchParams: Promise<{ show?: string; q?: string; sort?: string }> }) {
-  const { show = "verified", q = "", sort = "priority" } = await searchParams;
+export default async function JobsPage({ searchParams }: { searchParams: Promise<{ show?: string; q?: string; sort?: string; queued?: string }> }) {
+  const { show = "verified", q = "", sort = "priority", queued } = await searchParams;
   const { supabase, user } = await requireUser();
   let query = supabase
     .from("jobs")
-    .select("id,title,company_name,url,fit_score,fit_reasons, job_postings!inner(level,locations,is_remote,ats,salary_min,salary_max,verification_status,verification_signals,posted_at)")
+    .select("id,title,company_name,url,fit_score,fit_reasons, job_postings!inner(level,locations,is_remote,ats,apply_url,url,salary_min,salary_max,verification_status,verification_signals,posted_at)")
     .eq("user_id", user.id)
     .eq("dismissed", false)
     .order("fit_score", { ascending: false })
     .limit(300);
   if (show === "verified" || show === "new") query = query.eq("job_postings.verification_status", "verified");
-  if (show === "auto") query = query.eq("job_postings.verification_status", "verified").in("job_postings.ats", ["greenhouse", "lever", "ashby"]);
+  if (show === "auto") query = query.eq("job_postings.verification_status", "verified").or(AUTO_SUBMIT_OR, { referencedTable: "job_postings" });
   if (show === "new") query = query.gte("job_postings.posted_at", new Date(Date.now() - 72 * 3600_000).toISOString());
   const term = q.replace(/[,()%*]/g, " ").trim();
   if (term) query = query.or(`title.ilike.%${term}%,company_name.ilike.%${term}%`);
@@ -57,6 +60,8 @@ export default async function JobsPage({ searchParams }: { searchParams: Promise
     )
     .slice(0, 120);
 
+  const ready = rows.filter((r) => !appBy.has(r.id) && agentCanSubmit(r.job_postings)).length;
+
   const qs = (o: Record<string, string>) => {
     const p = new URLSearchParams({ show, sort, ...(term ? { q: term } : {}), ...o });
     return `/jobs?${p.toString()}`;
@@ -69,6 +74,21 @@ export default async function JobsPage({ searchParams }: { searchParams: Promise
         title="Matched jobs"
         description="Found automatically from your resume. Ranked by priority: fit score plus a big boost for postings from the last 24 hours, then 2–3 days, then this week."
       />
+      {queued != null && (
+        <p className="mb-4 rounded-lg bg-emerald-900/30 p-3 text-sm text-emerald-300">
+          {Number(queued) > 0 ? `Queued ${queued} applications — a run is starting now and goes through them, freshest first.` : "Nothing new to queue: every match the agent can submit already has an application."}
+        </p>
+      )}
+      {ready > 0 && (
+        <Card className="mb-4 flex flex-wrap items-center justify-between gap-3 p-4">
+          <p className="text-sm">
+            <span className="font-medium">{ready} matches</span> on this page can be submitted by the agent and haven’t been applied to yet.
+          </p>
+          <form action={queueAllMatches}>
+            <button className={buttonCls("primary", "sm")}>Apply to all matches</button>
+          </form>
+        </Card>
+      )}
       <div className="mb-3 flex flex-wrap items-center gap-1.5">
         <TabLink href={qs({ show: "verified" })} active={show === "verified"}>Verified</TabLink>
         <TabLink href={qs({ show: "new" })} active={show === "new"}>🔥 Last 3 days</TabLink>
@@ -98,7 +118,7 @@ export default async function JobsPage({ searchParams }: { searchParams: Promise
         ))}
       </div>
       {rows.length === 0 ? (
-        <EmptyState message="No matches here yet. Upload your resume on the Profile page — the agent finds jobs on its next run (every 3 hours)." />
+        <EmptyState message="No matches here yet. Upload your resume on the Profile page — the agent finds jobs on its next run (every 2 hours)." />
       ) : (
         <div className="space-y-3">
           {rows.map((r) => {
@@ -125,7 +145,7 @@ export default async function JobsPage({ searchParams }: { searchParams: Promise
                         {v === "verified" ? "✓ Verified employer" : v === "review" ? "Needs review" : "Rejected"}
                       </Badge>
                       <Badge>{LEVEL[p.level] ?? p.level}</Badge>
-                      {["greenhouse", "lever", "ashby"].includes(p.ats) && <Badge variant="accent">Agent can submit</Badge>}
+                      {agentCanSubmit(p) ? <Badge variant="accent">Agent can submit</Badge> : <Badge>Apply yourself</Badge>}
                       {status && <Badge variant="warning">Application: {status.replace("_", " ")}</Badge>}
                     </div>
                     {r.fit_reasons?.length > 0 && <p className="mt-2 text-xs text-[var(--muted)]">{r.fit_reasons.join(" · ")}</p>}

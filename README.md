@@ -1,13 +1,13 @@
 # 9to5 AI
 
-A job-search agent: it finds fresh US job postings that match your resume, checks the employer is real, and fills in and submits applications for you. The **dashboard** (Next.js on Vercel) is where you upload your resume, set what jobs you want, chat with the agent and follow your applications; the **agent** runs on GitHub Actions every few hours, even when the dashboard is closed.
+A job-search agent for any field — tech, healthcare, trades, energy, finance, sales, retail and more: it finds fresh US job postings that match your resume and the roles you pick, checks the employer is real, and fills in and submits applications for you. The **dashboard** (Next.js on Vercel) is where you upload your resume, set what jobs you want, chat with the agent and follow your applications; the **agent** runs on GitHub Actions every few hours, even when the dashboard is closed.
 
 ## What it does
 
-- **Finds jobs** from curated new-grad / internship lists, company job boards (Greenhouse, Lever, Ashby), employers' Workday sites (including oil & gas, offshore, pipeline and mining employers) and remote-job feeds. Postings older than 2 weeks are skipped.
+- **Finds jobs** for every role you list (pick from a catalog by field or type any title): curated new-grad lists, company job boards (Greenhouse, Lever, Ashby), 60+ large employers' Workday sites across energy, healthcare, banking, retail, government and tech, and remote-job feeds. Postings older than 2 weeks are skipped.
 - **Checks them** for scam signs and unknown employers before anything is sent.
 - **Matches them** to your resume, levels, locations and pay floor; the role you last asked for in chat goes first.
-- **Applies** on Greenhouse, Lever, Ashby, Workday, Workable and Rippling — resume picked or lightly tailored per job (never invented), common questions answered from your profile. Anything it can't finish goes to **Needs you**.
+- **Applies** on Greenhouse, Lever, Ashby, Workday, Workable, Rippling, JazzHR and Jobvite (or "Apply to all matches" in one click) — resume picked or lightly tailored per job (never invented), common questions answered from your profile. Anything it can't finish goes to **Needs you**.
 - **Tracks replies** from your Gmail (received, interview, rejection) and sends a daily summary.
 
 ## Stack

@@ -164,3 +164,32 @@ export function atsFromUrl(url: string): { ats: Ats; board?: string } {
   }
   return { ats: "other" };
 }
+
+const STATE_NAMES: Record<string, string> = {
+  AL: "alabama", AK: "alaska", AZ: "arizona", AR: "arkansas", CA: "california", CO: "colorado", CT: "connecticut", DE: "delaware", FL: "florida", GA: "georgia",
+  HI: "hawaii", ID: "idaho", IL: "illinois", IN: "indiana", IA: "iowa", KS: "kansas", KY: "kentucky", LA: "louisiana", ME: "maine", MD: "maryland",
+  MA: "massachusetts", MI: "michigan", MN: "minnesota", MS: "mississippi", MO: "missouri", MT: "montana", NE: "nebraska", NV: "nevada", NH: "new hampshire", NJ: "new jersey",
+  NM: "new mexico", NY: "new york", NC: "north carolina", ND: "north dakota", OH: "ohio", OK: "oklahoma", OR: "oregon", PA: "pennsylvania", RI: "rhode island", SC: "south carolina",
+  SD: "south dakota", TN: "tennessee", TX: "texas", UT: "utah", VT: "vermont", VA: "virginia", WA: "washington", WV: "west virginia", WI: "wisconsin", WY: "wyoming",
+  DC: "district of columbia", PR: "puerto rico",
+};
+
+/** "GA" / "Georgia" / "georgia " → "GA"; anything else → null. */
+export function stateCode(s: string | null | undefined): string | null {
+  const t = (s ?? "").trim();
+  if (!t) return null;
+  if (STATE_NAMES[t.toUpperCase()]) return t.toUpperCase();
+  const hit = Object.entries(STATE_NAMES).find(([, n]) => n === t.toLowerCase());
+  return hit ? hit[0] : null;
+}
+
+/** A location in this state: "Houston, TX", "Texas", "US-TX-Houston", "Remote - Texas", "TX". */
+export function isInState(loc: string, state: string | null | undefined): boolean {
+  const code = stateCode(state);
+  if (!code || !loc) return false;
+  const name = STATE_NAMES[code];
+  // "Washington, DC" is the capital, not Washington state.
+  if (code === "WA" && /washington,?\s*(d\.?\s?c\.?|district)/i.test(loc)) return false;
+  const byCode = new RegExp(`(,\\s*${code}\\b|(^|[\\s(-])${code}(-|\\s*$|\\s*[,)])|\\bUS-${code}\\b)`);
+  return byCode.test(loc) || new RegExp(`\\b${name}\\b`, "i").test(loc);
+}

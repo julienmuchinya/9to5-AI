@@ -7,6 +7,7 @@ import { CommonQuestions } from "./common-questions";
 import { ResumeUpload } from "./resume-upload";
 import { SubmitButton } from "@/components/submit-button";
 import { suggestTitles } from "@/lib/v2/title-suggestions";
+import { ROLE_CATALOG } from "@/lib/v2/role-catalog";
 
 export const dynamic = "force-dynamic";
 
@@ -38,8 +39,10 @@ export default async function ProfilePage() {
   const { supabase, user } = await requireUser();
   const { data: p } = await supabase.from("profiles").select("*").eq("id", user.id).single();
   const levels: string[] = p?.job_levels ?? ["internship", "new_grad", "entry"];
-  const locs: string[] = p?.locations ?? ["remote_us", "GA"];
+  const locs: string[] = p?.locations ?? ["remote_us", "my_state"];
   const parsed = (p?.resume_parsed ?? {}) as { experience?: unknown[]; projects?: unknown[] };
+  const roleSet = new Set(((p?.target_roles ?? []) as string[]).map((r) => r.toLowerCase()));
+  const haveRole = (r: string) => roleSet.has(r.toLowerCase());
   const suggestions = await suggestTitles(supabase, { have: (p?.target_roles ?? []) as string[], minPay: 60000 }).catch(() => []);
 
   return (
@@ -93,8 +96,64 @@ export default async function ProfilePage() {
           </Section>
         </div>
 
-        <Section icon="5" title="What jobs to look for">
+        <div id="roles" className="scroll-mt-6" />
+        <Section icon="5" title="What jobs to look for" description="Any field works — tech, healthcare, trades, energy, finance, sales, retail… The agent searches for every role you list and applies to the matches.">
           <div className="space-y-4">
+            <label className="block text-sm">
+              Your target roles (comma separated, any job title)
+              <textarea className={input} name="target_roles" rows={2} defaultValue={(p?.target_roles ?? []).join(", ")} placeholder="Registered Nurse, Medical Assistant — or — Data Analyst, Business Analyst" />
+            </label>
+            <details className="rounded-xl border border-[var(--border)] p-3 text-sm" open={!(p?.target_roles ?? []).length}>
+              <summary className="cursor-pointer font-medium">Browse roles by field — tick to add</summary>
+              <div className="mt-3 grid gap-4 sm:grid-cols-2">
+                {ROLE_CATALOG.map((g) => (
+                  <div key={g.field}>
+                    <div className="text-xs font-medium text-[var(--muted)]">{g.field}</div>
+                    <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1.5">
+                      {g.roles.map((r) => {
+                        const have = haveRole(r);
+                        return (
+                          <label key={r} className={`flex items-center gap-2 ${have ? "text-[var(--muted)]" : ""}`}>
+                            <input type="checkbox" name="add_roles" value={r} disabled={have} defaultChecked={have} /> {r}
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </details>
+            <label className="block text-sm">
+              Focus right now — applied to before anything else, at any US location
+              <input className={input} name="focus_roles" defaultValue={((p?.focus_roles ?? []) as string[]).join(", ")} placeholder="Roustabout, Field Operator, oil and gas" />
+              <span className="mt-1 block text-xs text-[var(--muted)]">Also set when you tell the chat “go apply to … jobs”. Clear it to go back to normal.</span>
+            </label>
+            {suggestions.length > 0 && (
+              <details className="rounded-xl border border-[var(--border)] p-3 text-sm">
+                <summary className="cursor-pointer font-medium">More titles you could apply to — entry level, pay $60K+</summary>
+                <span className="mt-1 block text-xs text-[var(--muted)]">Tick any to add them to your target roles. A number means postings like it were seen in the last 2 weeks; “typical” ones are common entry-level roles.</span>
+                {(["tech", "field"] as const).map((kind) => {
+                  const group = suggestions.filter((s) => s.kind === kind && !haveRole(s.title));
+                  if (!group.length) return null;
+                  return (
+                    <div key={kind} className="mt-2">
+                      <div className="text-xs font-medium text-[var(--muted)]">{kind === "tech" ? "Tech & office" : "Field, plant & energy"}</div>
+                      <div className="mt-1 flex flex-wrap gap-x-4 gap-y-2">
+                        {group.map((s) => (
+                          <label key={s.title} className="flex items-center gap-2">
+                            <input type="checkbox" name="add_roles" value={s.title} /> {s.title}
+                            <span className="text-xs text-[var(--muted)]">
+                              {s.seen ? `${s.seen} seen` : "typical"}
+                              {s.payUpTo ? ` · up to $${Math.round(s.payUpTo / 1000)}K` : ""}
+                            </span>
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </details>
+            )}
             <div className="text-sm">
               Levels
               <div className="mt-2 flex flex-wrap gap-4">
@@ -116,6 +175,7 @@ export default async function ProfilePage() {
               <div className="mt-2 flex flex-wrap gap-4">
                 {[
                   ["remote_us", "Remote (US)"],
+                  ["my_state", `In my state${p?.state ? ` (${p.state})` : " (set State above)"}`],
                   ["GA", "Georgia / Atlanta"],
                   ["anywhere_us", "Anywhere in the US"],
                 ].map(([v, l]) => (
@@ -128,39 +188,7 @@ export default async function ProfilePage() {
                 </label>
               </div>
             </div>
-            <Field label="Minimum yearly pay for full-time roles (USD)" name="min_salary" value={p?.min_salary ?? 80000} type="number" />
-            <Field label="Target roles (comma separated)" name="target_roles" value={(p?.target_roles ?? []).join(", ")} placeholder="Software Engineer, Data Engineer" />
-            <label className="block text-sm">
-              Focus right now — applied to before anything else, at any US location
-              <input className={input} name="focus_roles" defaultValue={((p?.focus_roles ?? []) as string[]).join(", ")} placeholder="Roustabout, Field Operator, oil and gas" />
-              <span className="mt-1 block text-xs text-[var(--muted)]">Also set when you tell the chat “go apply to … jobs”. Clear it to go back to normal.</span>
-            </label>
-            {suggestions.length > 0 && (
-              <div className="text-sm">
-                More titles you could apply to — entry level, pay $60K+
-                <span className="mt-1 block text-xs text-[var(--muted)]">Tick any to add them to your target roles. A number means postings like it were seen in the last 2 weeks; “typical” ones are common entry-level roles.</span>
-                {(["tech", "field"] as const).map((kind) => {
-                  const group = suggestions.filter((s) => s.kind === kind);
-                  if (!group.length) return null;
-                  return (
-                    <div key={kind} className="mt-2">
-                      <div className="text-xs font-medium text-[var(--muted)]">{kind === "tech" ? "Tech & office" : "Field, plant & energy"}</div>
-                      <div className="mt-1 flex flex-wrap gap-x-4 gap-y-2">
-                        {group.map((s) => (
-                          <label key={s.title} className="flex items-center gap-2">
-                            <input type="checkbox" name="add_roles" value={s.title} /> {s.title}
-                            <span className="text-xs text-[var(--muted)]">
-                              {s.seen ? `${s.seen} seen` : "typical"}
-                              {s.payUpTo ? ` · up to $${Math.round(s.payUpTo / 1000)}K` : ""}
-                            </span>
-                          </label>
-                        ))}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
+            <Field label="Minimum yearly pay for full-time roles (USD; hourly pay is counted ×2080)" name="min_salary" value={p?.min_salary ?? 40000} type="number" />
             <label className="block text-sm">
               Skills (comma separated — from your resume, edit freely)
               <textarea className={input} name="skills" rows={3} defaultValue={(p?.skills ?? []).join(", ")} />

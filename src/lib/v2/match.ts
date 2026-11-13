@@ -1,4 +1,4 @@
-import { isGeorgia, isUsLocation, isUsRemote } from "./discovery/filters";
+import { isGeorgia, isInState, isUsLocation, isUsRemote } from "./discovery/filters";
 
 export interface MatchProfile {
   skills: string[];
@@ -12,6 +12,8 @@ export interface MatchProfile {
   excluded_companies: string[];
   /** Roles the user asked for most recently (chat): ranked first, any US location, any level but senior. */
   focus_roles?: string[];
+  /** The user's own state (profile), for the "In my state" location choice. */
+  home_state?: string | null;
 }
 
 export interface MatchPosting {
@@ -85,7 +87,7 @@ export function matchPosting(profile: MatchProfile, p: MatchPosting): MatchResul
 
   // Location.
   const locs = p.locations ?? [];
-  const wants = new Set(profile.locations?.length ? profile.locations : ["remote_us", "GA"]);
+  const wants = new Set(profile.locations?.length ? profile.locations : ["remote_us", "my_state"]);
   const anywhere = wants.has("anywhere_us") || (profile.relocation && (level === "internship" || level === "new_grad"));
   const remoteOk = p.is_remote && (isUsRemote(locs.join(" | ")) || locs.some(isUsLocation));
   const gaOk = locs.some(isGeorgia);
@@ -95,7 +97,11 @@ export function matchPosting(profile: MatchProfile, p: MatchPosting): MatchResul
     locationOk = true;
     reasons.push("Remote, open to US");
   }
-  if (wants.has("GA") && gaOk) {
+  if (wants.has("my_state") && locs.some((l) => isInState(l, profile.home_state))) {
+    locationOk = true;
+    reasons.push(`In your state (${profile.home_state})`);
+  }
+  if (!locationOk && wants.has("GA") && gaOk) {
     locationOk = true;
     reasons.push("Located in Georgia");
   }

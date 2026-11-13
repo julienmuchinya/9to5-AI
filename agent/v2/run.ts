@@ -18,7 +18,7 @@ import {
   fetchSimplify,
   type Posting,
 } from "../../src/lib/v2/discovery/sources";
-import { verifyPosting, canAutoSubmit } from "../../src/lib/v2/verify";
+import { verifyPosting, canAutoSubmit, AUTO_SUBMIT_OR } from "../../src/lib/v2/verify";
 import { isFocusTitle, matchPosting, type MatchProfile } from "../../src/lib/v2/match";
 import { bumpUsage, freeTierSnapshot, readUsage, SAFETY_RATIO, today } from "../../src/lib/v2/freeTier";
 import { aiAvailable } from "../../src/lib/v2/gemini";
@@ -33,13 +33,13 @@ import { openMailbox } from "./mailbox";
 import { answerWaitingQuestions } from "./backfill";
 import { resumeFocus } from "../../src/lib/v2/tracking";
 import { decryptSecret, encryptSecret, generatePortalPassword } from "../../src/lib/v2/vault";
-import { ageDays, COMPANY_DAILY_CAP, companyKey, MAX_DAILY_APPLY_CAP, MAX_POSTING_AGE_DAYS, planQueue, tooOld } from "../../src/lib/v2/priority";
+import { ageDays, COMPANY_DAILY_CAP, companyKey, DEFAULT_DAILY_CAP, DEFAULT_MIN_FIT, MAX_DAILY_APPLY_CAP, MAX_POSTING_AGE_DAYS, planQueue, tooOld } from "../../src/lib/v2/priority";
 import { familyOf, judgeRoute, learnRoutes, titleKey } from "../../src/lib/v2/learning";
 import { isAggregator, resolveDirectLink } from "../../src/lib/v2/discovery/resolve";
 import { domainAgeYears, employerDomain } from "../../src/lib/v2/company-age";
 import { EXTRA_BOARDS } from "../../src/lib/v2/discovery/extra-boards";
 import { fetchWorkdayBoard, WORKDAY_BOARDS } from "../../src/lib/v2/discovery/workday";
-import { setWantedRoles } from "../../src/lib/v2/discovery/filters";
+import { isStemTitle, setWantedRoles } from "../../src/lib/v2/discovery/filters";
 import { coverLetterPdf, writeCoverLetter } from "../../src/lib/v2/cover-letter";
 import { minutesPlan } from "../../src/lib/v2/minutes";
 import { sendRunDigest } from "./digest";
@@ -54,7 +54,8 @@ const log = (...a: unknown[]) => console.log("[9to5]", ...a);
  * titles, questions or error text (those stay in the app: Applications, System status, run summaries).
  * Set PUBLIC_LOGS=full to see everything anyway (e.g. while debugging on a fork).
  */
-if (env("GITHUB_REPO_PUBLIC") === "true" && env("PUBLIC_LOGS") !== "full") {
+// On GitHub Actions logs are hidden unless the repo is confirmed private (scheduled runs may not know).
+if (env("GITHUB_ACTIONS") === "true" && env("GITHUB_REPO_PUBLIC") !== "false" && env("PUBLIC_LOGS") !== "full") {
   const SAFE = /^\[9to5\] (scheduled|manual) run|^\[9to5\] (simplify|company boards|workday boards|job-board links|company age|saved \d+|done in|Skipping|work left|run time budget|AI is out|stop applying)|^\[9to5\] user [0-9a-f]{8}(:| skipped)/;
   const raw = console.log.bind(console);
   console.log = (...a: unknown[]) => {
@@ -167,19 +168,28 @@ const chunk = <T,>(a: T[], n: number) => Array.from({ length: Math.ceil(a.length
  * newest postings. Postings already saved aren't fetched again — they're only marked as still listed.
  */
 async function discoverWorkday(sb: SupabaseClient, roles: string[]): Promise<Posting[]> {
-  const queries = ["", ...roles.slice(0, 6)];
+  // Newest postings + up to 10 of the roles users asked for (focus first). Titles are checked before details are fetched.
+  const queries = ["", ...roles.slice(0, 10)];
   const { data: seen } = await sb.from("job_postings").select("source_key").eq("source", "workday").gte("last_seen_at", new Date(Date.now() - 3 * 86400_000).toISOString()).limit(5000);
   const known = new Set((seen ?? []).map((r) => r.source_key as string));
   const stillListed: string[] = [];
   const out: Posting[] = [];
-  for (const group of chunk(WORKDAY_BOARDS, 5)) {
+  // At most ~8 minutes here (env WORKDAY_DISCOVER_MIN), so searching never eats the applying time.
+  const deadline = Date.now() + Number(env("WORKDAY_DISCOVER_MIN", "8")) * 60_000;
+  let scanned = 0;
+  // Start at a different employer each hour, so a run cut short by the deadline doesn't always miss the same ones.
+  const start = Math.floor(Date.now() / 3600_000) % WORKDAY_BOARDS.length;
+  const boards = [...WORKDAY_BOARDS.slice(start), ...WORKDAY_BOARDS.slice(0, start)];
+  for (const group of chunk(boards, 10)) {
+    if (Date.now() > deadline) break;
+    scanned += group.length;
     const res = await Promise.all(
-      group.map((b) => fetchWorkdayBoard(b, queries, { maxAgeDays: MAX_POSTING_AGE_DAYS, skip: (k) => (known.has(k) ? (stillListed.push(k), true) : false) }))
+      group.map((b) => fetchWorkdayBoard(b, queries, { maxAgeDays: MAX_POSTING_AGE_DAYS, keepTitle: isStemTitle, skip: (k) => (known.has(k) ? (stillListed.push(k), true) : false) }))
     );
     for (const list of res) out.push(...list);
   }
   for (const part of chunk(stillListed, 300)) await sb.from("job_postings").update({ last_seen_at: new Date().toISOString(), active: true }).in("source_key", part);
-  log(`workday boards: ${WORKDAY_BOARDS.length} employers × ${queries.length} searches → ${out.length} new US postings (${stillListed.length} already saved)`);
+  log(`workday boards: ${scanned}/${WORKDAY_BOARDS.length} employers × ${queries.length} searches → ${out.length} new US postings (${stillListed.length} already saved)`);
   return out;
 }
 
@@ -351,13 +361,14 @@ function toMatchProfile(u: UserRow): MatchProfile {
     skills: [...new Set([...(u.skills ?? []), ...(u.resume_parsed?.skills ?? [])])],
     target_roles: u.target_roles?.length ? u.target_roles : (u.resume_parsed?.target_roles ?? []),
     job_levels: u.job_levels ?? ["internship", "new_grad", "entry"],
-    min_salary: u.min_salary ?? 80000,
-    locations: u.locations ?? ["remote_us", "GA"],
+    min_salary: u.min_salary ?? 40000,
+    locations: u.locations ?? ["remote_us", "my_state"],
     relocation: u.relocation,
     keywords_include: u.keywords_include ?? [],
     keywords_exclude: u.keywords_exclude ?? [],
     excluded_companies: u.excluded_companies ?? [],
     focus_roles: u.focus_roles ?? [],
+    home_state: u.state,
   };
 }
 
@@ -386,7 +397,8 @@ async function matchUser(
     .map((p) => ({ p, m: matchPosting(profile, { ...p, salary_min: p.salary_min ?? null, salary_max: p.salary_max ?? null, description: p.description ?? null, level: p.level }) }))
     .filter((x) => x.m.eligible && x.m.score >= 40)
     .sort((a, b) => b.m.score - a.m.score)
-    .slice(0, 300);
+    // Every good match is kept (was 300), so "apply to all" really means all.
+    .slice(0, Number(env("MATCH_LIMIT", "1000")));
   if (!matches.length) return 0;
   const rows = matches.map(({ p, m }) => ({
     user_id: u.id,
@@ -423,7 +435,7 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
   const result: Record<string, number> = {};
   const bump = (k: string) => (result[k] = (result[k] ?? 0) + 1);
   const dryRun = env("APPLY_DRY_RUN") === "true";
-  const cap = Math.max(0, Math.min(MAX_DAILY_CAP, s.daily_apply_cap ?? 5));
+  const cap = Math.max(0, Math.min(MAX_DAILY_CAP, s.daily_apply_cap ?? DEFAULT_DAILY_CAP));
   const startOfDay = `${today()}T00:00:00Z`;
 
   // Today's submissions for this user, overall and per company (max COMPANY_CAP per company per day).
@@ -491,7 +503,7 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
   const learned = learnRoutes(existing);
   const famLine = [...learned.byFamily].map(([f, v]) => `${f} ${v.sent}/${v.tries}`).join(", ");
   if (famLine) log(`  what works (sent/tried): ${famLine}`);
-  const minFit = s.min_fit_score ?? 65;
+  const minFit = s.min_fit_score ?? DEFAULT_MIN_FIT;
   // Wide pool (not just the 200 best fits, which crowded out new postings); freshness decides below.
   const { data: best } = await sb
     .from("jobs")
@@ -500,7 +512,7 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
     .eq("dismissed", false)
     .gte("fit_score", minFit)
     .eq("job_postings.verification_status", "verified")
-    .or(`ats.in.(greenhouse,lever,ashby${WORKDAY_ON ? ",workday" : ""}),apply_url.ilike.*apply.workable.com*,apply_url.ilike.*ats.rippling.com*`, { referencedTable: "job_postings" })
+    .or(WORKDAY_ON ? AUTO_SUBMIT_OR : AUTO_SUBMIT_OR.replace(",workday", ""), { referencedTable: "job_postings" })
     .order("created_at", { ascending: false })
     .limit(800);
 
@@ -530,7 +542,7 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
       .in("company_name", part)
       .eq("active", true)
       .eq("verification_status", "verified")
-      .or("ats.in.(greenhouse,lever,ashby),apply_url.ilike.*apply.workable.com*,apply_url.ilike.*ats.rippling.com*")
+      .or(AUTO_SUBMIT_OR.replace(",workday", ""))
       .limit(2000);
     for (const a of alts ?? []) {
       const url = a.apply_url || a.url;
@@ -729,7 +741,7 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
         ? "This site needs an account. The email and password to use are on this card and under Portal logins — create the account, then apply."
         : /smartrecruiters\.com/i.test(applyUrl)
           ? "SmartRecruiters shows a CAPTCHA to automated browsers, so the agent can't apply here — open this one and apply yourself"
-          : "The agent can submit Greenhouse, Lever, Ashby, Workday, Workable and Rippling jobs — open this one and apply yourself (no account needed unless the site asks)";
+          : "The agent can submit Greenhouse, Lever, Ashby, Workday, Workable, Rippling, JazzHR and Jobvite jobs — open this one and apply yourself (no account needed unless the site asks)";
       await save({ ...base, status: "needs_user", error: why });
       bump("needs_user");
       return "next";
@@ -880,7 +892,7 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
       await sb.from("application_accounts").update({ account_created: true, notes: `Used on the ${job.title} application` }).eq("user_id", u.id).eq("portal_host", host);
     // Back off from sites that push back, instead of retrying through them.
     if (!dryRun) {
-      if (/captcha/i.test(r.detail)) await coolDown(sb, key, 24, "CAPTCHA shown");
+      if (/captcha/i.test(r.detail)) await coolDown(sb, key, 12, "CAPTCHA shown");
       else if (/\b(429|403)\b|too many|rate limit|blocked|access denied/i.test(r.detail)) {
         await coolDown(sb, key, 24, r.detail.slice(0, 120));
         await coolDown(sb, host, 6, "rate limited");

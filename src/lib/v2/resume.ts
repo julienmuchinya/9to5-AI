@@ -30,10 +30,10 @@ summary,
 education [{school, degree, field, graduation, gpa}],
 experience [{title, company, location, start, end, bullets[]}],
 projects [{name, role, org, date, tech[], bullets[]}] (role = e.g. "Technical Specialist", org = e.g. the university, date = e.g. "Fall 2025"),
-skills[] (individual technologies/skills, e.g. "Python", "React", "AWS"),
+skills[] (individual skills, tools, technologies, licenses and certifications in any field, e.g. "Python", "Excel", "Phlebotomy", "Forklift", "QuickBooks", "CDL Class A"),
 skill_groups [{name, items[]}] (the skill categories exactly as grouped on the resume; [] if not grouped),
 certifications[], awards[],
-target_roles[] (3-5 job titles this person is best suited for, based ONLY on the resume).
+target_roles[] (3-5 job titles this person is best suited for, in whatever field the resume is in, based ONLY on the resume).
 In bullets, wrap every phrase that is bold on the resume in **double asterisks**.
 Copy text faithfully. Never invent or embellish anything. Use null for missing fields.`;
 

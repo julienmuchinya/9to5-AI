@@ -1,10 +1,10 @@
 /** Starting agent runs on GitHub Actions, and when the next scheduled one is. Server-only. */
 
-/** Matches the cron in .github/workflows/daily-agent.yml: minute 17 of every 3rd hour (UTC). */
+/** Matches the cron in .github/workflows/daily-agent.yml: minute 17 of every 2nd hour (UTC). */
 export function nextScheduledRun(now = new Date()): Date {
   const d = new Date(now);
   d.setUTCMinutes(17, 0, 0);
-  while (d <= now || d.getUTCHours() % 3 !== 0) d.setUTCHours(d.getUTCHours() + 1);
+  while (d <= now || d.getUTCHours() % 2 !== 0) d.setUTCHours(d.getUTCHours() + 1);
   return d;
 }
 

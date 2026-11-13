@@ -4,7 +4,8 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { requireUser } from "@/lib/v2/session";
 import { APP_QUESTIONS, customStore, findSimilarAnswer, type CustomAnswers, type PendingQuestion } from "@/lib/v2/app-questions";
-import { MAX_DAILY_APPLY_CAP } from "@/lib/v2/priority";
+import { DEFAULT_DAILY_CAP, DEFAULT_MIN_FIT, MAX_DAILY_APPLY_CAP } from "@/lib/v2/priority";
+import { agentCanSubmit } from "@/lib/v2/verify";
 
 const list = (v: FormDataEntryValue | null) =>
   String(v ?? "")
@@ -75,8 +76,8 @@ export async function saveAutopilot(form: FormData) {
       paused: form.get("paused") === "on",
       emergency_stop: false,
       mock_mode: false,
-      daily_apply_cap: Math.max(0, Math.min(MAX_DAILY_APPLY_CAP, Number(form.get("daily_apply_cap") || 5))),
-      min_fit_score: Math.max(40, Math.min(95, Number(form.get("min_fit_score") || 65))),
+      daily_apply_cap: Math.max(0, Math.min(MAX_DAILY_APPLY_CAP, Number(form.get("daily_apply_cap") || DEFAULT_DAILY_CAP))),
+      min_fit_score: Math.max(40, Math.min(95, Number(form.get("min_fit_score") || DEFAULT_MIN_FIT))),
       updated_at: new Date().toISOString(),
     }, { onConflict: "user_id" });
   if (error) throw new Error(`Couldn’t save autopilot settings: ${error.message}`);
@@ -97,6 +98,42 @@ export async function queueJob(jobId: string) {
   if (error) throw new Error(error.message);
   revalidatePath("/jobs");
   revalidatePath("/applications");
+}
+
+/**
+ * "Apply to all": queue every verified match the agent can submit that has no application yet, then
+ * start a run. Jobs on other sites stay on the Jobs page with an "Apply yourself" link.
+ */
+export async function queueAllMatches(): Promise<void> {
+  const { supabase, user } = await requireUser();
+  const [{ data: jobs }, { data: apps }] = await Promise.all([
+    supabase
+      .from("jobs")
+      .select("id,posting_id,url, job_postings!inner(ats,apply_url,url,verification_status)")
+      .eq("user_id", user.id)
+      .eq("dismissed", false)
+      .eq("job_postings.verification_status", "verified")
+      .limit(1000),
+    supabase.from("applications").select("job_id").eq("user_id", user.id),
+  ]);
+  const taken = new Set((apps ?? []).map((a) => a.job_id as string));
+  type J = { id: string; posting_id: string; url: string; job_postings: { ats: string | null; apply_url: string | null; url: string; verification_status: string } };
+  const rows = ((jobs ?? []) as unknown as J[]).filter((j) => !taken.has(j.id) && agentCanSubmit(j.job_postings));
+  for (let i = 0; i < rows.length; i += 200) {
+    const { error } = await supabase.from("applications").upsert(
+      rows.slice(i, i + 200).map((j) => ({ user_id: user.id, job_id: j.id, posting_id: j.posting_id, apply_url: j.job_postings.apply_url || j.url, ats: j.job_postings.ats, status: "queued", requested_by: "user" })),
+      { onConflict: "user_id,job_id", ignoreDuplicates: true }
+    );
+    if (error) throw new Error(error.message);
+  }
+  if (rows.length) {
+    const { dispatchAgentRun, machineStatus } = await import("@/lib/v2/dispatch");
+    if ((await machineStatus()).state === "idle") await dispatchAgentRun(user.id);
+  }
+  revalidatePath("/jobs");
+  revalidatePath("/applications");
+  revalidatePath("/dashboard");
+  redirect(`/jobs?queued=${rows.length}`);
 }
 
 /** "Run now" button: starts an agent run for this user only. */

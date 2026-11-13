@@ -6,7 +6,7 @@ import type { Posting } from "./sources";
  * (the same calls the career page makes; no key). Used for the roles the user asks for — oil & gas,
  * offshore, pipelines, mining, utilities — which aren't on the tech boards (Greenhouse / Lever / Ashby).
  * The agent applies on Workday itself. A board that stops answering just returns nothing.
- * Checked Nov 2026: every entry below answered 200.
+ * Checked Nov 2026: every entry below answered 200 (61 employers).
  */
 export interface WorkdayBoard {
   company: string;
@@ -15,7 +15,7 @@ export interface WorkdayBoard {
   tenant: string;
   site: string;
   /** Searched on every run with an empty query (newest first), not only for the user's roles. */
-  sector: "energy" | "mining" | "utilities" | "industrial";
+  sector: "energy" | "mining" | "utilities" | "industrial" | "retail" | "finance" | "healthcare" | "government" | "tech" | "services";
 }
 
 export const WORKDAY_BOARDS: WorkdayBoard[] = [
@@ -39,6 +39,48 @@ export const WORKDAY_BOARDS: WorkdayBoard[] = [
   { company: "KBR", host: "kbr.wd5", tenant: "kbr", site: "KBR_Careers", sector: "industrial" },
   { company: "Dow", host: "dow.wd1", tenant: "dow", site: "ExternalCareers", sector: "industrial" },
   { company: "Waste Connections", host: "wasteconnections.wd1", tenant: "wasteconnections", site: "Careers", sector: "utilities" },
+  // Every other field: retail, banking & insurance, healthcare, government contractors, tech, services.
+  { company: "Target", host: "target.wd5", tenant: "target", site: "targetcareers", sector: "retail" },
+  { company: "Lowe's", host: "lowes.wd5", tenant: "lowes", site: "LWS_External_CS", sector: "retail" },
+  { company: "The Home Depot", host: "homedepot.wd5", tenant: "homedepot", site: "CareerDepot", sector: "retail" },
+  { company: "Nike", host: "nike.wd1", tenant: "nike", site: "nke", sector: "retail" },
+  { company: "Bank of America", host: "ghr.wd1", tenant: "ghr", site: "Lateral-US", sector: "finance" },
+  { company: "Wells Fargo", host: "wf.wd1", tenant: "wf", site: "WellsFargoJobs", sector: "finance" },
+  { company: "Capital One", host: "capitalone.wd12", tenant: "capitalone", site: "Capital_One", sector: "finance" },
+  { company: "U.S. Bank", host: "usbank.wd1", tenant: "usbank", site: "US_Bank_Careers", sector: "finance" },
+  { company: "PNC", host: "pnc.wd5", tenant: "pnc", site: "External", sector: "finance" },
+  { company: "Truist", host: "truist.wd1", tenant: "truist", site: "Careers", sector: "finance" },
+  { company: "State Street", host: "statestreet.wd1", tenant: "statestreet", site: "Global", sector: "finance" },
+  { company: "Mastercard", host: "mastercard.wd1", tenant: "mastercard", site: "CorporateCareers", sector: "finance" },
+  { company: "PayPal", host: "paypal.wd1", tenant: "paypal", site: "jobs", sector: "finance" },
+  { company: "Travelers", host: "travelers.wd5", tenant: "travelers", site: "External", sector: "finance" },
+  { company: "Allstate", host: "allstate.wd5", tenant: "allstate", site: "allstate_careers", sector: "finance" },
+  { company: "GEICO", host: "geico.wd1", tenant: "geico", site: "External", sector: "finance" },
+  { company: "PwC", host: "pwc.wd3", tenant: "pwc", site: "US_Experienced_Careers", sector: "finance" },
+  { company: "CVS Health", host: "cvshealth.wd1", tenant: "cvshealth", site: "CVS_Health_Careers", sector: "healthcare" },
+  { company: "Humana", host: "humana.wd5", tenant: "humana", site: "Humana_External_Career_Site", sector: "healthcare" },
+  { company: "Cigna", host: "cigna.wd5", tenant: "cigna", site: "cignacareers", sector: "healthcare" },
+  { company: "Elevance Health", host: "elevancehealth.wd1", tenant: "elevancehealth", site: "ANT", sector: "healthcare" },
+  { company: "Centene", host: "centene.wd5", tenant: "centene", site: "Centene_External", sector: "healthcare" },
+  { company: "Pfizer", host: "pfizer.wd1", tenant: "pfizer", site: "PfizerCareers", sector: "healthcare" },
+  { company: "Abbott", host: "abbott.wd5", tenant: "abbott", site: "abbottcareers", sector: "healthcare" },
+  { company: "Medtronic", host: "medtronic.wd1", tenant: "medtronic", site: "MedtronicCareers", sector: "healthcare" },
+  { company: "GE HealthCare", host: "gehc.wd5", tenant: "gehc", site: "GEHC_ExternalSite", sector: "healthcare" },
+  { company: "Cardinal Health", host: "cardinalhealth.wd1", tenant: "cardinalhealth", site: "EXT", sector: "healthcare" },
+  { company: "Labcorp", host: "labcorp.wd1", tenant: "labcorp", site: "External", sector: "healthcare" },
+  { company: "Boeing", host: "boeing.wd1", tenant: "boeing", site: "EXTERNAL_CAREERS", sector: "industrial" },
+  { company: "3M", host: "3m.wd1", tenant: "3m", site: "Search", sector: "industrial" },
+  { company: "Leidos", host: "leidos.wd5", tenant: "leidos", site: "External", sector: "government" },
+  { company: "GDIT", host: "gdit.wd5", tenant: "gdit", site: "External_Career_Site", sector: "government" },
+  { company: "CACI", host: "caci.wd1", tenant: "caci", site: "External", sector: "government" },
+  { company: "Salesforce", host: "salesforce.wd12", tenant: "salesforce", site: "External_Career_Site", sector: "tech" },
+  { company: "NVIDIA", host: "nvidia.wd5", tenant: "nvidia", site: "NVIDIAExternalCareerSite", sector: "tech" },
+  { company: "Intel", host: "intel.wd1", tenant: "intel", site: "External", sector: "tech" },
+  { company: "Adobe", host: "adobe.wd5", tenant: "adobe", site: "external_experienced", sector: "tech" },
+  { company: "Verizon", host: "verizon.wd12", tenant: "verizon", site: "verizon-careers", sector: "tech" },
+  { company: "T-Mobile", host: "tmobile.wd1", tenant: "tmobile", site: "External", sector: "tech" },
+  { company: "JLL", host: "jll.wd1", tenant: "jll", site: "jllcareers", sector: "services" },
+  { company: "Disney", host: "disney.wd5", tenant: "disney", site: "disneycareer", sector: "services" },
 ];
 
 const UA = { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36" };
@@ -110,21 +152,31 @@ export const workdayKey = (b: WorkdayBoard, path: string) => `workday:${b.tenant
 export async function fetchWorkdayBoard(
   b: WorkdayBoard,
   queries: string[],
-  opts: { maxAgeDays: number; perQuery?: number; skip?: (key: string) => boolean }
+  opts: { maxAgeDays: number; perQuery?: number; skip?: (key: string) => boolean; keepTitle?: (title: string) => boolean }
 ): Promise<Posting[]> {
   const rows = new Map<string, ListRow>();
-  for (const q of queries) {
-    for (const r of await listJobs(b, q, opts.perQuery ?? 20)) {
+  // All searches on one board at once (each is one small request).
+  const lists = await Promise.all(queries.map((q) => listJobs(b, q, opts.perQuery ?? 20)));
+  for (const list of lists) {
+    for (const r of list) {
       const d = postedDaysAgo(r.postedOn);
       if (d != null && d > opts.maxAgeDays) continue;
+      if (opts.keepTitle && !opts.keepTitle(r.title)) continue;
       if (!rows.has(r.externalPath)) rows.set(r.externalPath, r);
     }
   }
   const out: Posting[] = [];
-  for (const r of rows.values()) {
+  const todo = [...rows.values()].filter((r) => !opts.skip?.(workdayKey(b, r.externalPath)));
+  // Details 6 at a time per board.
+  const details = new Map<string, Awaited<ReturnType<typeof jobDetail>>>();
+  for (let i = 0; i < todo.length; i += 6) {
+    const part = todo.slice(i, i + 6);
+    const got = await Promise.all(part.map((r) => jobDetail(b, r.externalPath)));
+    part.forEach((r, j) => details.set(r.externalPath, got[j]));
+  }
+  for (const r of todo) {
     const key = workdayKey(b, r.externalPath);
-    if (opts.skip?.(key)) continue;
-    const info = await jobDetail(b, r.externalPath);
+    const info = details.get(r.externalPath);
     if (!info || info.canApply === false) continue;
     const country = info.jobRequisitionLocation?.country?.alpha2Code ?? "";
     const countryName = info.country?.descriptor ?? info.jobRequisitionLocation?.country?.descriptor ?? "";

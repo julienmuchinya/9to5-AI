@@ -108,7 +108,16 @@ export async function verifyCompanyDomain(domain?: string): Promise<boolean | un
 export const AUTO_SUBMIT_ATS = new Set(["greenhouse", "lever", "ashby"]);
 /** Sites whose plain application form the agent fills, whatever the posting's ats label says. */
 // Rippling: guest form, no account, no CAPTCHA (checked Nov 2026).
-export const AUTO_SUBMIT_HOSTS = ["apply.workable.com", "ats.rippling.com"];
+// JazzHR (applytojob.com) and Jobvite: guest forms, dry-run tested on live postings (Nov 2026) — 15–21 fields filled.
+export const AUTO_SUBMIT_HOSTS = ["apply.workable.com", "ats.rippling.com", "applytojob.com", "jobs.jobvite.com"];
+/** PostgREST filter: postings on a site the agent submits to (used by the agent's candidate query). */
+export const AUTO_SUBMIT_OR = `ats.in.(greenhouse,lever,ashby,workday),${AUTO_SUBMIT_HOSTS.map((h) => `apply_url.ilike.*${h}*`).join(",")}`;
+/** Same, by site — what the app shows as "Agent can submit". Workday included (sign-in is automated). */
+export function agentCanSubmit(p: { ats?: string | null; verification_status?: string | null; apply_url?: string | null; url?: string | null }): boolean {
+  if (p.verification_status !== "verified") return false;
+  if (/myworkday(jobs|site)\.com/i.test(p.apply_url || p.url || "") || p.ats === "workday") return true;
+  return canAutoSubmit({ ...p, url: p.url ?? undefined });
+}
 export function canAutoSubmit(p: { ats?: string | null; verification_status?: string | null; apply_url?: string | null; url?: string }): boolean {
   if (p.verification_status !== "verified") return false;
   const host = domainOf(p.apply_url || p.url) ?? "";

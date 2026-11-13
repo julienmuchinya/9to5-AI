@@ -17,7 +17,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
   const { welcome } = await searchParams;
   const db = serviceClient();
   const [{ data: p }, { data: s }, { count: matched }, { count: verified }, apps, { data: runs }, { data: sq }, { data: lastGlobal }, { count: recentErrors }, ai] = await Promise.all([
-    supabase.from("profiles").select("first_name,resume_path,resume_parsed,phone,work_authorized_us,sponsorship_needed").eq("id", user.id).maybeSingle(),
+    supabase.from("profiles").select("first_name,resume_path,resume_parsed,phone,work_authorized_us,sponsorship_needed,target_roles").eq("id", user.id).maybeSingle(),
     supabase.from("autopilot_settings").select("auto_submit_enabled,paused,daily_apply_cap").eq("user_id", user.id).maybeSingle(),
     supabase.from("jobs").select("id", { count: "exact", head: true }).eq("user_id", user.id).eq("dismissed", false),
     supabase
@@ -49,6 +49,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
     { done: hasQ, label: "Set 3 security questions (password recovery)", href: "/account" },
     { done: Boolean(p?.resume_path) && parsed, label: p?.resume_path && !parsed ? "Your resume is saved but not read yet — click “Read it again”" : "Upload your resume", href: "/profile" },
     { done: Boolean(p?.first_name && p?.phone), label: "Add your contact details", href: "/profile" },
+    { done: Boolean((p?.target_roles as string[] | null)?.length), label: "Pick the kinds of jobs you want (any field)", href: "/profile#roles" },
     { done: p?.work_authorized_us != null && p?.sponsorship_needed != null, label: "Answer work authorization & sponsorship", href: "/profile" },
     { done: Boolean(s?.auto_submit_enabled), label: "Turn on auto-submit (optional)", href: "/settings" },
   ];
@@ -59,7 +60,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
       <PageHeader
         eyebrow="Dashboard"
         title={`Welcome${p?.first_name ? `, ${p.first_name}` : ""}`}
-        description="Your agent finds STEM jobs that fit your resume, checks the employer is real, and applies for you."
+        description="Your agent finds jobs in your field that fit your resume, checks the employer is real, and applies for you."
         action={
           <div className="flex items-center gap-3">
             <Button href="/chat" variant="secondary">
@@ -110,7 +111,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
         <Card className="flex flex-col">
           <h2 className="mb-3 font-semibold">Autopilot</h2>
           <div className="flex flex-wrap gap-2">
-            <Badge variant={s?.paused ? "danger" : "success"}>{s?.paused ? "Paused" : "Runs every 3 hours"}</Badge>
+            <Badge variant={s?.paused ? "danger" : "success"}>{s?.paused ? "Paused" : "Runs every 2 hours"}</Badge>
             <Badge variant={s?.auto_submit_enabled ? "success" : "default"}>Auto-submit {s?.auto_submit_enabled ? `on · max ${s?.daily_apply_cap}/day` : "off"}</Badge>
           </div>
           <p className="mt-3 text-sm text-[var(--muted)]">
@@ -138,7 +139,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
             <p className="text-sm text-[var(--muted)]">
               No runs for your account yet.{" "}
               {parsed ? "Your resume is ready, so the next run picks you up" : "Once your resume is read, the next run picks you up"}
-              {lastGlobal?.started_at ? ` (last agent run: ${t.dateTime(lastGlobal.started_at)}; runs about every 3 hours).` : "."}
+              {lastGlobal?.started_at ? ` (last agent run: ${t.dateTime(lastGlobal.started_at)}; runs about every 2 hours).` : "."}
             </p>
           ) : (
             <ul className="space-y-1 text-sm">
