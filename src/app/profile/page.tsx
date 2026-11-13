@@ -6,6 +6,7 @@ import { PageHeader, Section, inputCls } from "@/components/ui";
 import { CommonQuestions } from "./common-questions";
 import { ResumeUpload } from "./resume-upload";
 import { SubmitButton } from "@/components/submit-button";
+import { suggestTitles } from "@/lib/v2/title-suggestions";
 
 export const dynamic = "force-dynamic";
 
@@ -39,6 +40,7 @@ export default async function ProfilePage() {
   const levels: string[] = p?.job_levels ?? ["internship", "new_grad", "entry"];
   const locs: string[] = p?.locations ?? ["remote_us", "GA"];
   const parsed = (p?.resume_parsed ?? {}) as { experience?: unknown[]; projects?: unknown[] };
+  const suggestions = await suggestTitles(supabase, { have: (p?.target_roles ?? []) as string[], minPay: 60000 }).catch(() => []);
 
   return (
     <div className="max-w-4xl">
@@ -68,7 +70,7 @@ export default async function ProfilePage() {
             <Field label="Last name" name="last_name" value={p?.last_name} />
             <Field label="Email for applications" name="job_email" value={p?.job_email ?? user.email} type="email" />
             <Field label="Phone" name="phone" value={p?.phone} />
-            <Field label="City" name="city" value={p?.city} placeholder="Kennesaw" />
+            <Field label="City" name="city" value={p?.city} placeholder="Atlanta" />
             <Field label="State" name="state" value={p?.state} placeholder="GA" />
             <Field label="LinkedIn URL" name="linkedin_url" value={p?.linkedin_url} />
             <Field label="GitHub URL" name="github_url" value={p?.github_url} />
@@ -128,6 +130,37 @@ export default async function ProfilePage() {
             </div>
             <Field label="Minimum yearly pay for full-time roles (USD)" name="min_salary" value={p?.min_salary ?? 80000} type="number" />
             <Field label="Target roles (comma separated)" name="target_roles" value={(p?.target_roles ?? []).join(", ")} placeholder="Software Engineer, Data Engineer" />
+            <label className="block text-sm">
+              Focus right now — applied to before anything else, at any US location
+              <input className={input} name="focus_roles" defaultValue={((p?.focus_roles ?? []) as string[]).join(", ")} placeholder="Roustabout, Field Operator, oil and gas" />
+              <span className="mt-1 block text-xs text-[var(--muted)]">Also set when you tell the chat “go apply to … jobs”. Clear it to go back to normal.</span>
+            </label>
+            {suggestions.length > 0 && (
+              <div className="text-sm">
+                More titles you could apply to — entry level, pay $60K+
+                <span className="mt-1 block text-xs text-[var(--muted)]">Tick any to add them to your target roles. A number means postings like it were seen in the last 2 weeks; “typical” ones are common entry-level roles.</span>
+                {(["tech", "field"] as const).map((kind) => {
+                  const group = suggestions.filter((s) => s.kind === kind);
+                  if (!group.length) return null;
+                  return (
+                    <div key={kind} className="mt-2">
+                      <div className="text-xs font-medium text-[var(--muted)]">{kind === "tech" ? "Tech & office" : "Field, plant & energy"}</div>
+                      <div className="mt-1 flex flex-wrap gap-x-4 gap-y-2">
+                        {group.map((s) => (
+                          <label key={s.title} className="flex items-center gap-2">
+                            <input type="checkbox" name="add_roles" value={s.title} /> {s.title}
+                            <span className="text-xs text-[var(--muted)]">
+                              {s.seen ? `${s.seen} seen` : "typical"}
+                              {s.payUpTo ? ` · up to $${Math.round(s.payUpTo / 1000)}K` : ""}
+                            </span>
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
             <label className="block text-sm">
               Skills (comma separated — from your resume, edit freely)
               <textarea className={input} name="skills" rows={3} defaultValue={(p?.skills ?? []).join(", ")} />

@@ -26,9 +26,10 @@ export async function saveProfile(form: FormData) {
     const v = text(form.get(`aq_${q.key}`));
     if (v) answers[q.key] = v.slice(0, 300);
   }
-  const { error } = await supabase
-    .from("profiles")
-    .upsert({
+  // Titles ticked under "More titles you could apply to" join the target roles.
+  const roles = list(form.get("target_roles"));
+  for (const r of form.getAll("add_roles").map(String)) if (!roles.some((x) => x.toLowerCase() === r.toLowerCase())) roles.push(r);
+  const row = {
       application_answers: answers,
       id: user.id,
       first_name: first,
@@ -46,7 +47,7 @@ export async function saveProfile(form: FormData) {
       work_authorized_us: tri(form.get("work_authorized_us")),
       sponsorship_needed: tri(form.get("sponsorship_needed")),
       relocation: form.get("relocation") === "on",
-      target_roles: list(form.get("target_roles")),
+      target_roles: roles,
       skills: list(form.get("skills")),
       job_levels: form.getAll("job_levels").map(String),
       locations: form.getAll("locations").map(String),
@@ -55,7 +56,10 @@ export async function saveProfile(form: FormData) {
       keywords_exclude: list(form.get("keywords_exclude")),
       excluded_companies: list(form.get("excluded_companies")),
       updated_at: new Date().toISOString(),
-    }, { onConflict: "id" });
+  };
+  let { error } = await supabase.from("profiles").upsert({ ...row, focus_roles: list(form.get("focus_roles")) }, { onConflict: "id" });
+  // Database without migration 008 (no focus_roles column): save everything else.
+  if (error && (error.code === "42703" || /focus_roles/.test(error.message))) ({ error } = await supabase.from("profiles").upsert(row, { onConflict: "id" }));
   if (error) throw new Error(`Couldn’t save your profile: ${error.message}`);
   revalidatePath("/profile");
   revalidatePath("/dashboard");

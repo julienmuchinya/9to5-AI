@@ -11,6 +11,7 @@ import {
   stripHtml,
   type JobLevel,
 } from "./filters";
+import { MAX_POSTING_AGE_DAYS } from "../priority";
 
 export interface Posting {
   source: string;
@@ -32,7 +33,8 @@ export interface Posting {
 }
 
 const UA = { "User-Agent": "9to5-ai-job-agent (personal job search; contact via GitHub)" };
-const MAX_AGE_DAYS = 45;
+/** Postings older than this aren't saved at all (same limit the agent applies with). */
+const MAX_AGE_DAYS = MAX_POSTING_AGE_DAYS;
 const DESC_MAX = 3500;
 
 async function getJson<T>(url: string, timeoutMs = 30000): Promise<T | null> {

@@ -5,7 +5,7 @@
 CREATE TABLE profiles (
   id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
   full_name TEXT,
-  school TEXT DEFAULT 'Example State University',
+  school TEXT DEFAULT NULL,
   job_email TEXT,
   phone TEXT,
   linkedin_url TEXT,

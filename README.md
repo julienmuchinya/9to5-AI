@@ -1,66 +1,48 @@
 # 9to5 AI
 
-Cloud-based AI job application agent for tech internships and junior roles. The **dashboard** is your control panel; the **9to5 AI agent** runs on a daily schedule (GitHub Actions) even when the dashboard is closed.
+A job-search agent: it finds fresh US job postings that match your resume, checks the employer is real, and fills in and submits applications for you. The **dashboard** (Next.js on Vercel) is where you upload your resume, set what jobs you want, chat with the agent and follow your applications; the **agent** runs on GitHub Actions every few hours, even when the dashboard is closed.
 
-## Features
+## What it does
 
-- Job alert ingestion (Gmail) and company watchlist
-- Job fit, company trust, and scam detection engines
-- Resume Library (15 templates) and Cover Letter Library
-- Evidence Bank — truth-bound claims only
-- AI cache to minimize Gemini usage
-- Budget guard ($0 default), spam guard, emergency stop
-- Auto-apply **OFF by default** until you enable it
-- Mock mode for testing without API keys
+- **Finds jobs** from curated new-grad / internship lists, company job boards (Greenhouse, Lever, Ashby), employers' Workday sites (including oil & gas, offshore, pipeline and mining employers) and remote-job feeds. Postings older than 2 weeks are skipped.
+- **Checks them** for scam signs and unknown employers before anything is sent.
+- **Matches them** to your resume, levels, locations and pay floor; the role you last asked for in chat goes first.
+- **Applies** on Greenhouse, Lever, Ashby, Workday, Workable and Rippling — resume picked or lightly tailored per job (never invented), common questions answered from your profile. Anything it can't finish goes to **Needs you**.
+- **Tracks replies** from your Gmail (received, interview, rejection) and sends a daily summary.
 
 ## Stack
 
-- Next.js App Router, TypeScript, Tailwind CSS
-- Supabase (database, optional auth)
-- Gemini API (optional; mock mode available)
-- Gmail API OAuth
-- GitHub Actions daily runner
+Next.js (App Router) · TypeScript · Tailwind · Supabase (Postgres + auth + storage) · Playwright · Gemini with a free Groq/OpenRouter fallback · GitHub Actions.
 
-## Quick start
+## Setup
 
 ```bash
 npm install
-cp .env.example .env.local
-# Set NEXT_PUBLIC_MOCK_MODE=true for local testing
+cp .env.example .env.local   # fill in your own keys — never commit this file
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) → Dashboard → Setup checklist.
+1. Create a Supabase project and run the SQL files in `supabase/migrations/` in order.
+2. Add the keys from `.env.example` to `.env.local` (dashboard) and to the repo's **GitHub Actions secrets** (agent).
+3. Deploy the dashboard (e.g. Vercel) and sign in.
 
-### Run agent locally (mock)
-
-```bash
-npm run agent:mock
-```
-
-Or trigger from **Agent Logs** → Run agent now.
-
-### Supabase
-
-1. Create a Supabase project (free tier).
-2. Run `supabase/migrations/001_initial_schema.sql` in the SQL editor.
-3. Add `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY` to `.env.local`.
-
-### GitHub Actions
-
-Add secrets from `.env.example`, then enable `.github/workflows/daily-agent.yml` (runs daily 12:00 UTC).
+Run the agent locally: `npm run agent` (or `npm run agent:dry` to fill forms without submitting).
 
 ## Project structure
 
 ```
-src/app/          Dashboard pages
-src/lib/engines/  Scoring and safety engines
-src/lib/mock/     Mock data for demo mode
-agent/            Cloud agent pipeline
-supabase/         SQL migrations
-.github/          Daily agent workflow
+src/app/                 Dashboard pages and API routes (chat, resume, Google connect)
+src/lib/v2/              Matching, priorities, verification, AI, resumes, questions
+src/lib/v2/discovery/    Job sources and filters
+agent/v2/                The agent: discover → match → apply → inbox → summary
+supabase/migrations/     Database schema
+.github/workflows/       Agent schedule
 ```
+
+## Safety
+
+Auto-submit is off until you turn it on. Daily caps, per-company caps, site cooldowns after a CAPTCHA, and free-tier guards for AI and GitHub minutes all apply. On a public repo the agent's logs show only counts — no companies, questions or personal details.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+All rights reserved — see [LICENSE](LICENSE). The code is public for viewing only; no copying or reuse without permission.

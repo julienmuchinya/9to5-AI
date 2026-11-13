@@ -10,6 +10,8 @@ export interface MatchProfile {
   keywords_include: string[];
   keywords_exclude: string[];
   excluded_companies: string[];
+  /** Roles the user asked for most recently (chat): ranked first, any US location, any level but senior. */
+  focus_roles?: string[];
 }
 
 export interface MatchPosting {
@@ -39,6 +41,23 @@ function hasTerm(haystack: string, term: string): boolean {
   return new RegExp(`(^|\\s)${esc}(\\s|$)`).test(haystack);
 }
 
+/**
+ * Is this posting one of the focus roles? A title role ("Roustabout", "Field Operator") must be in the
+ * title; an industry ("oil and gas", "offshore") may also be in the start of the description.
+ */
+export function isFocusTitle(title: string, roles: string[] | null | undefined, description = ""): boolean {
+  if (!roles?.length) return false;
+  const t = norm(title);
+  const d = norm(`${title} ${description.slice(0, 800)}`);
+  return roles.some((r) => {
+    const words = norm(r).split(" ").filter((w) => w.length > 2 && !STOP.has(w) && !/^(jobs?|roles?|level|entry|positions?|work)$/.test(w));
+    if (!words.length) return false;
+    if (words.every((w) => t.includes(w))) return true;
+    return INDUSTRY.test(r) && words.every((w) => d.includes(w));
+  });
+}
+const INDUSTRY = /\b(oil|gas|petroleum|offshore|energy|mining|mineral|pipeline|refinery|drilling|utilit|renewable|solar|wind)/i;
+
 export function matchPosting(profile: MatchProfile, p: MatchPosting): MatchResult {
   const reasons: string[] = [];
   const title = norm(p.title);
@@ -47,6 +66,7 @@ export function matchPosting(profile: MatchProfile, p: MatchPosting): MatchResul
   const levels = new Set(profile.job_levels?.length ? profile.job_levels : ["internship", "new_grad", "entry"]);
   const minSalary = profile.min_salary ?? 0;
   const salaryTop = p.salary_max ?? p.salary_min ?? null;
+  const focus = isFocusTitle(p.title, profile.focus_roles, p.description ?? "");
 
   if (profile.excluded_companies?.some((c) => norm(c) === norm(p.company_name)))
     return { eligible: false, score: 0, reasons: ["Company excluded"] };
@@ -56,6 +76,8 @@ export function matchPosting(profile: MatchProfile, p: MatchPosting): MatchResul
   // Level + pay: internships ignore pay; full-time roles must meet the minimum when pay is listed.
   const paysEnough = salaryTop != null && salaryTop >= minSalary;
   let levelOk = levels.has(level);
+  // A role the user just asked for: field / offshore postings rarely say "entry level", so take anything short of senior.
+  if (focus && level !== "senior") levelOk = true;
   if (!levelOk && (level === "entry" || level === "mid") && paysEnough) levelOk = true;
   if (!levelOk) return { eligible: false, score: 0, reasons: [`Level "${level}" not in your preferences`] };
   if (level !== "internship" && salaryTop != null && minSalary && salaryTop < minSalary)
@@ -81,6 +103,11 @@ export function matchPosting(profile: MatchProfile, p: MatchPosting): MatchResul
     locationOk = true;
     reasons.push("US location (you're open to relocating)");
   }
+  // Rigs, plants and fields are where they are: for the role the user asked for, any US location goes.
+  if (!locationOk && focus && usOk) {
+    locationOk = true;
+    reasons.push("US location (the role you asked for)");
+  }
   if (!locationOk) return { eligible: false, score: 0, reasons: ["Location doesn't match your preferences"] };
 
   // Fit score.
@@ -99,7 +126,10 @@ export function matchPosting(profile: MatchProfile, p: MatchPosting): MatchResul
     const hit = words.filter(inTitle).length / words.length;
     roleScore = Math.max(roleScore, hit);
   }
-  if (roleScore >= 0.5) reasons.push("Title matches your target roles");
+  if (focus) {
+    roleScore = 1;
+    reasons.push("The role you asked for");
+  } else if (roleScore >= 0.5) reasons.push("Title matches your target roles");
 
   // Seniority in the title vs the levels you want.
   const wantsEarly = [...levels].some((l) => l === "internship" || l === "new_grad" || l === "entry");
@@ -112,7 +142,8 @@ export function matchPosting(profile: MatchProfile, p: MatchPosting): MatchResul
     reasons.push("Title looks senior");
   } else if (earlyTitle && wantsEarly) titleAdj += 8;
   // Engineering roles only: sales, recruiting, support-desk and similar titles rank far down.
-  if (/\b(sales|account executive|recruit\w*|marketing|customer success|technician|nurse|counsel|attorney|accountant|teacher|driver)\b/.test(title)) {
+  // …unless it's a title the user asked for ("Field Service Technician").
+  if (roleScore < 0.5 && /\b(sales|account executive|recruit\w*|marketing|customer success|technician|nurse|counsel|attorney|accountant|teacher|driver)\b/.test(title)) {
     titleAdj -= 30;
     reasons.push("Not an engineering title");
   }
@@ -126,5 +157,7 @@ export function matchPosting(profile: MatchProfile, p: MatchPosting): MatchResul
     reasons.push(`Pays up to $${Math.round((salaryTop ?? 0) / 1000)}k`);
   }
   if (gaOk || remoteOk) score += 5;
+  // Skills on a software resume rarely appear in a field posting: the role match carries it.
+  if (focus) score += 20;
   return { eligible: true, score: Math.round(Math.max(0, Math.min(100, score))), reasons };
 }

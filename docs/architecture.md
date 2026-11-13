@@ -9,8 +9,8 @@
 | Component | Location | Role |
 |-----------|----------|------|
 | Dashboard | `src/app/` | Setup, libraries, review, logs |
-| Shared engines | `src/lib/engines/` | Fit, trust, scam, decision, resume/CL match |
-| Cloud agent | `agent/run.ts`, `agent/pipeline.ts` | Daily automation |
+| Matching & safety | `src/lib/v2/` | Fit, priority, verification, AI, resumes |
+| Cloud agent | `agent/v2/run.ts` | Discover, match, apply, inbox |
 | Database | `supabase/migrations/` | Postgres + RLS |
 | CI runner | `.github/workflows/daily-agent.yml` | Cron schedule |
 

@@ -170,8 +170,24 @@ const TOOLS: GeminiTool[] = [
   },
   {
     name: "run_agent_now",
-    description: "Start an agent run right away instead of waiting for the schedule: it searches for new postings, then applies to the queue and the freshest matches.",
-    parameters: { type: "object", properties: {} },
+    description:
+      "Start an agent run right away instead of waiting for the schedule: it searches for new postings, then applies to the queue and the freshest matches. When the user names a kind of job to go after (\"go apply to oil field jobs\", \"look for offshore roles\"), pass focus_roles: those become the focus (applied to before anything else, any US location) and are added to their target roles.",
+    parameters: {
+      type: "object",
+      properties: {
+        focus_roles: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Concrete job titles plus the industry, 2-8 items. E.g. oil & gas / offshore → [\"Roustabout\", \"Floorhand\", \"Field Operator\", \"Lease Operator\", \"Pipeline Operator\", \"Petroleum Engineer\", \"oil and gas\", \"offshore\"]",
+        },
+      },
+    },
+  },
+  {
+    name: "set_focus",
+    description: "Make some roles the agent's focus without starting a run (or clear the focus with an empty list). Focus roles go first on every run and are added to target roles.",
+    parameters: { type: "object", properties: { focus_roles: { type: "array", items: { type: "string" } } }, required: ["focus_roles"] },
   },
 ];
 
@@ -184,7 +200,9 @@ How to behave:
 - Use tools to act or look things up; never claim you did something unless a tool result confirms it.
 - When asked about their resume, skills or preferences, call get_profile first.
 - When asked about jobs or applications, call search_jobs, list_applications or get_status. If there are 0 matched jobs, explain the agent searches every 3 hours, and offer run_agent_now.
-- "Look for new jobs" / "search for jobs" / "start applying" = run_agent_now (one run both searches and applies). "Apply to X" = search_jobs then queue_applications, then offer run_agent_now so it goes out now instead of on the schedule.
+- "Look for new jobs" / "search for jobs" / "start applying" = run_agent_now (one run both searches and applies).
+- When the user names a KIND of job to go after ("go apply to oil field jobs", "look for offshore / natural gas / mining jobs"), call run_agent_now WITH focus_roles (concrete titles + the industry words). That job becomes the priority over everything else and is added to their target roles; say so. Then also call search_jobs with one of the titles: if matches exist, queue_applications them.
+- "Apply to <one company or a job you listed>" = search_jobs then queue_applications, then run_agent_now.
 - Retry / answer / mark / dismiss: call list_applications or search_jobs first so you act on the right rows, then the change tool, then say exactly what changed (counts, company names).
 - When the user answers a question the agent was waiting on (from needs_user rows), call answer_question with the question text as listed.
 - ONLY act on the user's LATEST message. Earlier messages are context: never repeat a change, queue or run from an earlier message (e.g. an old "cap of 20") unless the latest message asks for it again. A one-word message like "answer" or "why?" is a question — look things up, don't change settings.
@@ -192,6 +210,7 @@ How to behave:
 - AI: Gemini first; when Gemini's daily quota is used, the agent and this chat switch to Groq automatically, so a Gemini limit does not stop applications.
 - "How well do I match X" / "what am I missing for X" → job_match_report. "Who should I follow up with" / "which applications went quiet" → follow_ups (give the note so they can copy it).
 - When asked why few applications are sent, call explain_last_run and answer from its numbers: the usual causes are the run's time budget / GitHub minutes, CAPTCHAs on Lever/Ashby, sites cooling down after a CAPTCHA, the per-company daily cap, Workday sign-ins, and questions waiting in "Needs you".
+- The agent also searches oil & gas, offshore drilling, pipeline, refinery and mining employers' Workday sites (Transocean, Noble, Chevron, Shell, ConocoPhillips, Baker Hughes, Marathon Petroleum, ONEOK, Williams…) for the focus roles.
 - The agent applies to the freshest postings first (last 24h, then 2-3 days, then this week), skips postings older than ${MAX_POSTING_AGE_DAYS} days, and sends at most ${COMPANY_DAILY_CAP} applications per company per day.
 - Answers to common application questions (visa, EEO, start date, salary…) come from Resume & profile → Common questions; suggest filling those when applications land in "Needs you".
 - Never invent facts about the user, their experience or a job. Keep replies short and concrete (counts, company names). Use plain text, short lists are fine.`;
@@ -515,10 +534,15 @@ async function runTool(name: string, args: Args, sb: SupabaseClient, userId: str
       const { error } = await sb.from("autopilot_settings").upsert({ user_id: userId, ...patch }, { onConflict: "user_id" });
       return error ? { error: error.message } : { updated: patch };
     }
+    case "set_focus":
+      return setFocus(sb, userId, (args.focus_roles as string[]) ?? []);
     case "run_agent_now": {
+      const roles = Array.isArray(args.focus_roles) ? (args.focus_roles as string[]) : [];
+      const focus = roles.length ? await setFocus(sb, userId, roles) : null;
       const machine = await machineStatus();
-      if (machine.state !== "idle") return { started: false, note: `A run is already ${machine.state} (since ${machine.since}). Queued jobs are picked up by it.` };
-      return dispatchAgentRun(userId);
+      if (machine.state !== "idle")
+        return { started: false, focus, note: `A run is already ${machine.state} (since ${machine.since}). ${focus ? "The focus applies from the next run; " : ""}Queued jobs are picked up by it.` };
+      return { ...(await dispatchAgentRun(userId)), focus };
     }
   }
   if (name === "get_profile") {
@@ -548,6 +572,28 @@ async function runTool(name: string, args: Args, sb: SupabaseClient, userId: str
     };
   }
   return { error: `Unknown tool ${name}` };
+}
+
+/**
+ * The roles the user just asked for become the focus (applied to first, next runs) and join the target
+ * roles, newest first. Works without migration 008 too: then only the target roles change.
+ */
+async function setFocus(sb: SupabaseClient, userId: string, raw: string[]): Promise<Record<string, unknown>> {
+  const roles = [...new Set(raw.map((r) => String(r).replace(/\s+/g, " ").trim().slice(0, 60)).filter(Boolean))].slice(0, 10);
+  const { data: p } = await sb.from("profiles").select("target_roles").eq("id", userId).maybeSingle();
+  const old = (p?.target_roles ?? []) as string[];
+  const target = [...roles, ...old.filter((r) => !roles.some((x) => x.toLowerCase() === r.toLowerCase()))].slice(0, 40);
+  const now = new Date().toISOString();
+  let { error } = await sb.from("profiles").update({ focus_roles: roles, target_roles: target, updated_at: now }).eq("id", userId);
+  let focusSaved = true;
+  if (error && (error.code === "42703" || /focus_roles/.test(error.message))) {
+    focusSaved = false;
+    ({ error } = await sb.from("profiles").update({ target_roles: target, updated_at: now }).eq("id", userId));
+  }
+  if (error) return { error: error.message };
+  return roles.length
+    ? { focus_roles: roles, added_to_target_roles: roles.filter((r) => !old.some((x) => x.toLowerCase() === r.toLowerCase())), ...(focusSaved ? {} : { note: "Saved as target roles; run migration 008 so they also go first" }) }
+    : { focus_cleared: true };
 }
 
 // ── Conversations ────────────────────────────────────────────────────────

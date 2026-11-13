@@ -49,7 +49,7 @@ export function priorityScore(fit: number, postedAt: string | null | undefined, 
 }
 
 /** Postings older than this are skipped by the agent (not worth the time or AI). Override with MAX_POSTING_AGE_DAYS. */
-export const MAX_POSTING_AGE_DAYS = Number(process.env.MAX_POSTING_AGE_DAYS ?? 21);
+export const MAX_POSTING_AGE_DAYS = Number(process.env.MAX_POSTING_AGE_DAYS ?? 14);
 
 /** Days since posting, or null when unknown. */
 export function ageDays(postedAt: string | null | undefined, now = Date.now()): number | null {
@@ -79,7 +79,12 @@ export interface Candidate {
   userRequested?: boolean;
   /** Learned route bonus (how often this site/ATS goes through), see learning.ts. */
   routeBonus?: number;
+  /** Matches a role the user asked for most recently (chat "focus") — goes before everything else. */
+  focus?: boolean;
 }
+
+/** Priority added for the role the user just asked for: more than any freshness or fit difference. */
+export const FOCUS_BONUS = 100;
 
 /**
  * Orders candidates by priority and drops the ones over the per-company daily cap.
@@ -93,7 +98,7 @@ export function planQueue<T extends Candidate>(
   const now = opts.now ?? Date.now();
   const used: Record<string, number> = { ...(opts.appliedToday ?? {}) };
   const sorted = items
-    .map((x, i) => ({ x, i, s: priorityScore(x.fit, x.postedAt, now) + (x.userRequested ? 15 : 0) + (x.routeBonus ?? 0) }))
+    .map((x, i) => ({ x, i, s: priorityScore(x.fit, x.postedAt, now) + (x.userRequested ? 15 : 0) + (x.routeBonus ?? 0) + (x.focus ? FOCUS_BONUS : 0) }))
     .sort((a, b) => b.s - a.s || a.i - b.i)
     .map((o) => o.x);
   const picked: T[] = [];

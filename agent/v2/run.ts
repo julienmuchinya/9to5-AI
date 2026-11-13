@@ -19,7 +19,7 @@ import {
   type Posting,
 } from "../../src/lib/v2/discovery/sources";
 import { verifyPosting, canAutoSubmit } from "../../src/lib/v2/verify";
-import { matchPosting, type MatchProfile } from "../../src/lib/v2/match";
+import { isFocusTitle, matchPosting, type MatchProfile } from "../../src/lib/v2/match";
 import { bumpUsage, freeTierSnapshot, readUsage, SAFETY_RATIO, today } from "../../src/lib/v2/freeTier";
 import { aiAvailable } from "../../src/lib/v2/gemini";
 import { fallbackConfigured } from "../../src/lib/v2/fallback-ai";
@@ -38,6 +38,8 @@ import { familyOf, judgeRoute, learnRoutes, titleKey } from "../../src/lib/v2/le
 import { isAggregator, resolveDirectLink } from "../../src/lib/v2/discovery/resolve";
 import { domainAgeYears, employerDomain } from "../../src/lib/v2/company-age";
 import { EXTRA_BOARDS } from "../../src/lib/v2/discovery/extra-boards";
+import { fetchWorkdayBoard, WORKDAY_BOARDS } from "../../src/lib/v2/discovery/workday";
+import { setWantedRoles } from "../../src/lib/v2/discovery/filters";
 import { coverLetterPdf, writeCoverLetter } from "../../src/lib/v2/cover-letter";
 import { minutesPlan } from "../../src/lib/v2/minutes";
 import { sendRunDigest } from "./digest";
@@ -46,6 +48,23 @@ import { customStore, memoryKey, rememberAnswers, type AppAnswers, type CustomAn
 const startedAt = Date.now();
 const env = (k: string, d = "") => process.env[k] ?? d;
 const log = (...a: unknown[]) => console.log("[9to5]", ...a);
+
+/**
+ * Public repo: anyone can read the Actions logs, so only counts are printed — no company names, job
+ * titles, questions or error text (those stay in the app: Applications, System status, run summaries).
+ * Set PUBLIC_LOGS=full to see everything anyway (e.g. while debugging on a fork).
+ */
+if (env("GITHUB_REPO_PUBLIC") === "true" && env("PUBLIC_LOGS") !== "full") {
+  const SAFE = /^\[9to5\] (scheduled|manual) run|^\[9to5\] (simplify|company boards|workday boards|job-board links|company age|saved \d+|done in|Skipping|work left|run time budget|AI is out|stop applying)|^\[9to5\] user [0-9a-f]{8}(:| skipped)/;
+  const raw = console.log.bind(console);
+  console.log = (...a: unknown[]) => {
+    const line = a.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join(" ");
+    if (SAFE.test(line)) raw(line.replace(/(company age: .*?checked).*/, "$1"));
+  };
+  const rawErr = console.error.bind(console);
+  console.error = (...a: unknown[]) => rawErr("[9to5] error (details hidden on a public repo — see System status in the app)", a[0] instanceof Error ? a[0].name : "");
+  console.warn = () => {};
+}
 
 function db(): SupabaseClient {
   const url = env("NEXT_PUBLIC_SUPABASE_URL");
@@ -143,9 +162,30 @@ async function portalLogin(sb: SupabaseClient, userId: string, url: string): Pro
 const chunk = <T,>(a: T[], n: number) => Array.from({ length: Math.ceil(a.length / n) }, (_, i) => a.slice(i * n, i * n + n));
 
 // ── 1+2. Discover and verify ──────────────────────────────────────────────
-async function discover(sb: SupabaseClient): Promise<(Posting & { id: string; verification_status: string; verification_score: number })[]> {
-  const [interns, newGrad, remote] = await Promise.all([fetchSimplify("internships"), fetchSimplify("new_grad"), fetchRemoteFeeds()]);
-  log(`simplify internships=${interns.length} new_grad=${newGrad.length} remote_feeds=${remote.length}`);
+/**
+ * Employers' Workday sites searched for the roles users asked for (focus first), plus each board's
+ * newest postings. Postings already saved aren't fetched again — they're only marked as still listed.
+ */
+async function discoverWorkday(sb: SupabaseClient, roles: string[]): Promise<Posting[]> {
+  const queries = ["", ...roles.slice(0, 6)];
+  const { data: seen } = await sb.from("job_postings").select("source_key").eq("source", "workday").gte("last_seen_at", new Date(Date.now() - 3 * 86400_000).toISOString()).limit(5000);
+  const known = new Set((seen ?? []).map((r) => r.source_key as string));
+  const stillListed: string[] = [];
+  const out: Posting[] = [];
+  for (const group of chunk(WORKDAY_BOARDS, 5)) {
+    const res = await Promise.all(
+      group.map((b) => fetchWorkdayBoard(b, queries, { maxAgeDays: MAX_POSTING_AGE_DAYS, skip: (k) => (known.has(k) ? (stillListed.push(k), true) : false) }))
+    );
+    for (const list of res) out.push(...list);
+  }
+  for (const part of chunk(stillListed, 300)) await sb.from("job_postings").update({ last_seen_at: new Date().toISOString(), active: true }).in("source_key", part);
+  log(`workday boards: ${WORKDAY_BOARDS.length} employers × ${queries.length} searches → ${out.length} new US postings (${stillListed.length} already saved)`);
+  return out;
+}
+
+async function discover(sb: SupabaseClient, roles: string[]): Promise<(Posting & { id: string; verification_status: string; verification_score: number })[]> {
+  const [interns, newGrad, remote, workday] = await Promise.all([fetchSimplify("internships"), fetchSimplify("new_grad"), fetchRemoteFeeds(), discoverWorkday(sb, roles)]);
+  log(`simplify internships=${interns.length} new_grad=${newGrad.length} remote_feeds=${remote.length} workday=${workday.length}`);
 
   // Companies discovered automatically from the curated lists; scan a rotating slice of their boards each run.
   const simplifyAll = [...interns, ...newGrad];
@@ -177,7 +217,7 @@ async function discover(sb: SupabaseClient): Promise<(Posting & { id: string; ve
   log(`company boards: ${slice.length}/${boards.length} scanned this run → ${boardPostings.length} STEM US postings`);
 
   const all = new Map<string, Posting>();
-  for (const p of [...simplifyAll, ...boardPostings, ...remote]) if (!all.has(p.source_key)) all.set(p.source_key, p);
+  for (const p of [...workday, ...simplifyAll, ...boardPostings, ...remote]) if (!all.has(p.source_key)) all.set(p.source_key, p);
   const postings = [...all.values()];
 
   // Job-board links → the employer's real application page when the board shows it (The Muse etc.),
@@ -277,6 +317,8 @@ interface UserRow {
   relocation: boolean | null;
   skills: string[] | null;
   target_roles: string[] | null;
+  /** Roles asked for most recently in chat (migration 008; missing on older databases). */
+  focus_roles?: string[] | null;
   job_levels: string[] | null;
   min_salary: number | null;
   locations: string[] | null;
@@ -315,6 +357,7 @@ function toMatchProfile(u: UserRow): MatchProfile {
     keywords_include: u.keywords_include ?? [],
     keywords_exclude: u.keywords_exclude ?? [],
     excluded_companies: u.excluded_companies ?? [],
+    focus_roles: u.focus_roles ?? [],
   };
 }
 
@@ -461,9 +504,10 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
     .order("created_at", { ascending: false })
     .limit(800);
 
-  type Item = { appId?: string; job: JobRow; company: string; fit: number; postedAt: string | null; userRequested: boolean; routeBonus: number };
+  type Item = { appId?: string; job: JobRow; company: string; fit: number; postedAt: string | null; userRequested: boolean; routeBonus: number; focus: boolean };
+  const isFocus = (j: JobRow) => isFocusTitle(j.title, u.focus_roles, j.job_postings.description ?? "");
   const items: Item[] = [];
-  const queuedInfo = new Map((queued ?? []).map((q) => [q.job_id as string, { id: q.id as string, byUser: q.requested_by === "user" }]));
+  const queuedInfo = new Map((queued ?? []).map((q) => [q.job_id as string, { id: q.id as string, byUser: q.requested_by === "user" || q.requested_by === "chat" }]));
   const queuedJobs: JobRow[] = [];
   for (const part of chunk([...queuedInfo.keys()], 100)) {
     const { data: qJobs } = await sb.from("jobs").select(JOB_COLS).in("id", part);
@@ -518,7 +562,7 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
       if (!dryRun) await sb.from("applications").update({ status: "needs_user", error: `The agent stopped trying this site (${verdict.reason}) — open it and apply yourself` }).eq("id", info.id);
       continue;
     }
-    items.push({ appId: info.id, job: j, company: j.company_name, fit: j.fit_score ?? 50, postedAt: j.job_postings.posted_at, userRequested: info.byUser, routeBonus: judgeRoute(learned, j.job_postings.apply_url || j.job_postings.url).bonus });
+    items.push({ appId: info.id, job: j, company: j.company_name, fit: j.fit_score ?? 50, postedAt: j.job_postings.posted_at, userRequested: info.byUser, routeBonus: judgeRoute(learned, j.job_postings.apply_url || j.job_postings.url).bonus, focus: isFocus(j) });
   }
   if (staleClosed) {
     result.stale_skipped = staleClosed;
@@ -531,7 +575,7 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
       bump("route_skipped");
       continue;
     }
-    items.push({ job: j, company: j.company_name, fit: j.fit_score ?? 50, postedAt: j.job_postings.posted_at, userRequested: false, routeBonus: verdict.bonus });
+    items.push({ job: j, company: j.company_name, fit: j.fit_score ?? 50, postedAt: j.job_postings.posted_at, userRequested: false, routeBonus: verdict.bonus, focus: isFocus(j) });
   }
 
   // The same job often appears as two postings (curated list + company board): apply once.
@@ -545,6 +589,11 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
   if (items.length !== unique.length) log(`  ${items.length - unique.length} duplicate posting(s) of the same job skipped`);
   // Freshest + best-fitting first; at most COMPANY_CAP per company per day.
   const { picked, skippedForCompanyCap } = planQueue(unique, { appliedToday: perCompanyToday, perCompany: COMPANY_CAP });
+  const focusCount = picked.filter((x) => x.focus).length;
+  if (u.focus_roles?.length) {
+    log(`  focus (${u.focus_roles.join(", ")}): ${focusCount} matching job(s) go first`);
+    result.focus_jobs = focusCount;
+  }
   for (const x of skippedForCompanyCap) {
     bump("company_daily_cap");
     if (x.appId && !dryRun)
@@ -918,11 +967,15 @@ async function main() {
     .eq("status", "running")
     .lt("started_at", new Date(Date.now() - 90 * 60_000).toISOString());
 
-  const fresh = env("DISCOVER", "true") === "false" ? [] : await discover(sb);
-
   let usersQ = sb.from("profiles").select("*");
   if (env("ONLY_USER")) usersQ = usersQ.eq("id", env("ONLY_USER"));
   const [{ data: users }, { data: settings }] = await Promise.all([usersQ, sb.from("autopilot_settings").select("*")]);
+  // Roles everyone asked for: kept by the discovery filter and searched on employers' Workday sites (focus first).
+  const all = (users ?? []) as UserRow[];
+  const focusRoles = all.flatMap((u) => u.focus_roles ?? []);
+  const roles = [...new Set([...focusRoles, ...all.flatMap((u) => u.target_roles ?? [])].map((r) => r.trim()).filter(Boolean))];
+  setWantedRoles(roles);
+  const fresh = env("DISCOVER", "true") === "false" ? [] : await discover(sb, roles);
   const settingsBy = new Map((settings ?? []).map((s) => [s.user_id as string, s as Settings]));
 
   let browser: import("playwright").Browser | null = null;

@@ -13,14 +13,36 @@ const STEM = new RegExp(
     "aerospace", "chemical", "biomedical", "civil engineer", "industrial engineer", "manufacturing engineer",
     "quantitative", "quant\\b", "actuar", "statistic", "bioinformatics", "mathemat", "physicist", "physics",
     "analytics", "business intelligence", "\\bbi\\b", "scientist", "technologist", "computational",
+    // Energy, offshore, mining and plant roles (oil & gas, pipelines, refineries, utilities).
+    "petroleum", "drill(er|ing)?\\b", "roustabout", "roughneck", "floorhand", "derrickhand", "motorman", "offshore", "subsea",
+    "well ?site", "completions?\\b", "reservoir", "geolog", "geophysic", "mud logger", "pipeline", "refinery", "lng\\b",
+    "natural gas", "oil (and|&) gas", "oil ?field", "frac\\b", "wireline", "coiled tubing", "lease operator",
+    "(field|plant|process|production|pipeline|terminal|control room|compressor|swd) operator", "field service",
+    "\\bhse\\b", "instrument", "electrician", "technician", "mechanic", "welder", "\\bi&e\\b", "mining", "\\bmine\\b", "metallurg", "surveyor",
   ].join("|"),
   "i"
 );
+
+/**
+ * Roles the users asked for, so postings with those titles are kept even when they don't look like
+ * engineering (the discovery filter is otherwise STEM-only). Set once per run by the agent.
+ */
+let wantedRoles: string[][] = [];
+export function setWantedRoles(roles: string[]) {
+  wantedRoles = [...new Set(roles.map((r) => r.toLowerCase().trim()).filter(Boolean))]
+    .map((r) => r.split(/[^a-z0-9+#&]+/).filter((w) => w.length > 2 && !/^(and|the|for|jobs?|roles?|level|entry)$/.test(w)))
+    .filter((w) => w.length);
+}
+/** Every meaningful word of one wanted role appears in the title. */
+export function isWantedTitle(title: string): boolean {
+  const t = title.toLowerCase();
+  return wantedRoles.some((words) => words.every((w) => t.includes(w)));
+}
 const NOT_STEM =
   /\b(sales|account executive|account manager|recruit|talent|marketing|customer success|people partner|human resources|\bhr\b|legal|counsel|paralegal|attorney|copywriter|social media|executive assistant|office manager|nurse|barista|driver|warehouse)\b/i;
 
 export function isStemTitle(title: string): boolean {
-  return STEM.test(title) && !NOT_STEM.test(title);
+  return (STEM.test(title) && !NOT_STEM.test(title)) || isWantedTitle(title);
 }
 
 export function detectLevel(title: string, extra = ""): JobLevel {

@@ -18,12 +18,12 @@ const me: Applicant = {
   answers: { address: "12 Example Lane", zip: "30301" },
   skills: ["Python", "Java", "JavaScript", "React", "Node.js", "AWS"],
   experience: [
-    { title: "Junior Data Engineer", company: "Acme Labs", start: "January 2026", end: "Present", location: "Remote", bullets: ["Improved accuracy"] },
+    { title: "Junior Data Engineer", company: "Acme Labs", start: "January 2025", end: "Present", location: "Remote", bullets: ["Improved accuracy"] },
     { title: "Software Engineer", company: "Widget Co", start: "Jan 2023", end: "Dec 2025" },
   ],
   education: [
     { school: "Example State University", degree: "Bachelor’s Degree", field: "Software Engineering", graduation: "Dec 2026" },
-    { school: "Example State University", degree: "Master’s Degree", field: "Electrical and Computer Engineering", graduation: "Dec 2029" },
+    { school: "Example State University", degree: "Master’s Degree", field: "Electrical and Computer Engineering", graduation: "Dec 2028" },
   ],
 };
 const field = (label: string, extra: Partial<Field> = {}): Field => ({ id: "f1", label, kind: "text", required: true, options: [], ...extra });
@@ -34,7 +34,7 @@ describe("Employment / Education blocks come from the resume", () => {
     expect(e("Company name*", 0)).toBe("Acme Labs");
     expect(e("Title*", 0)).toBe("Junior Data Engineer");
     expect(e("Start date month*", 0, "combobox")).toBe("January");
-    expect(e("Start date year*", 0)).toBe("2026");
+    expect(e("Start date year*", 0)).toBe("2025");
     // Current job: end date left empty, "Current role" ticked (a future end date made Greenhouse reject the form).
     expect(e("End date year*", 0)).toBe(SKIP);
     expect(e("Current role", 0, "checkbox")).toBe("yes");

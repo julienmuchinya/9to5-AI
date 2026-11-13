@@ -42,3 +42,9 @@ next-env.d.ts
 # supabase cli local state
 supabase/.temp/
 .diag/
+
+# local tool config (Supabase MCP link, Claude Code settings) — never commit
+.mcp.json
+.claude/
+# agent debug output (screenshots of filled forms)
+debug/

@@ -2,7 +2,7 @@ INSERT INTO profiles (id, full_name, school, job_email, location_preference, rel
 VALUES (
   '00000000-0000-4000-8000-000000000001',
   'Your Name',
-  'Example State University',
+  'Your University',
   'jobs@your-job-search-account.com',
   'us_nationwide',
   true,
