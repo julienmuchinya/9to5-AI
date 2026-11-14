@@ -25,12 +25,11 @@ const NAV = [
   { href: "/chat", label: "Chat with agent", icon: "chat" },
   { href: "/jobs", label: "Matched jobs", icon: "jobs" },
   { href: "/applications", label: "Applications", icon: "applications" },
-  { href: "/accounts", label: "Portal logins", icon: "accounts" },
+  { href: "/profile", label: "Profile & job types", icon: "profile" },
   { href: "/resumes", label: "Resumes", icon: "resumes" },
-  { href: "/profile", label: "Profile & answers", icon: "profile" },
-  { href: "/settings", label: "Autopilot & inbox", icon: "settings" },
-  { href: "/usage", label: "Free-tier usage", icon: "usage" },
+  { href: "/settings", label: "Settings", icon: "settings" },
   { href: "/account", label: "Account & security", icon: "account" },
+  // Portal logins live under Settings, free-tier usage under System status (pages still open by link).
   { href: "/status", label: "System status", icon: "status" },
 ];
 

@@ -104,11 +104,13 @@ export default async function ProfilePage() {
               <textarea className={input} name="target_roles" rows={2} defaultValue={(p?.target_roles ?? []).join(", ")} placeholder="Registered Nurse, Medical Assistant — or — Data Analyst, Business Analyst" />
             </label>
             <details className="rounded-xl border border-[var(--border)] p-3 text-sm" open={!(p?.target_roles ?? []).length}>
-              <summary className="cursor-pointer font-medium">Browse roles by field — tick to add</summary>
+              <summary className="cursor-pointer font-medium">Browse roles by field — tick a whole field or single titles</summary>
               <div className="mt-3 grid gap-4 sm:grid-cols-2">
                 {ROLE_CATALOG.map((g) => (
                   <div key={g.field}>
-                    <div className="text-xs font-medium text-[var(--muted)]">{g.field}</div>
+                    <label className="flex items-center gap-2 text-xs font-medium text-[var(--muted)]">
+                      <input type="checkbox" name="add_fields" value={g.field} disabled={g.roles.every(haveRole)} defaultChecked={g.roles.every(haveRole)} /> {g.field} — all
+                    </label>
                     <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1.5">
                       {g.roles.map((r) => {
                         const have = haveRole(r);

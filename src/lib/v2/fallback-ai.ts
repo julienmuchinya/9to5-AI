@@ -185,9 +185,11 @@ export async function fallbackJson(db: SupabaseClient, prompt: string, userId?: 
 export async function fallbackChat(
   db: SupabaseClient,
   messages: ChatMessage[],
-  opts: { userId?: string; maxTokens?: number; json?: boolean; tools?: ChatTool[] } = {}
+  opts: { userId?: string; maxTokens?: number; json?: boolean; tools?: ChatTool[]; deadline?: number } = {}
 ): Promise<ChatMessage> {
   const userId = opts.userId;
+  /** Chat (a 60-second web request) passes a deadline: never sleep or wait past it. */
+  const timeLeft = () => (opts.deadline ? opts.deadline - Date.now() : Infinity);
   const maxTokens = opts.maxTokens ?? 2000;
   const need = estimateTokens(JSON.stringify(messages) + (opts.tools ? JSON.stringify(opts.tools) : "")) + maxTokens;
   let detail = "no backup AI configured (set GROQ_API_KEY or OPENROUTER_API_KEY)";
@@ -231,6 +233,10 @@ export async function fallbackChat(
       for (let attempt = 0; attempt < 2; attempt++) {
         const wait = Math.max(Math.max(0, (blockedUntil.get(k) ?? 0) - Date.now()), tokenWait(k, need, p.tpm));
         if (wait > 65_000) break; // this model is out for longer than a minute — try the next one
+        if (wait > timeLeft() - 8_000) {
+          detail = `${p.name}/${m.id}: busy for ${Math.round(wait / 1000)} s — no time left to wait`;
+          break;
+        }
         if (wait) await sleep(wait);
         window.set(k, [...(window.get(k) ?? []), { at: Date.now(), tokens: need }]);
 
@@ -248,7 +254,7 @@ export async function fallbackChat(
               ...(m.extra ?? {}),
               messages,
             }),
-            signal: AbortSignal.timeout(55_000),
+            signal: AbortSignal.timeout(Math.max(3_000, Math.min(55_000, timeLeft() - 2_000))),
           });
         } catch (e) {
           detail = `${p.name} network: ${(e as Error).message}`;

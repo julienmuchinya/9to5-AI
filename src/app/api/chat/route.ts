@@ -3,221 +3,21 @@ import { randomUUID } from "crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { apiUser, serviceClient } from "@/lib/v2/session";
 import { changeNotAsked } from "@/lib/v2/chat-guard";
-import { chatGenerate, FreeTierLimitError, type GeminiContent, type GeminiTool } from "@/lib/v2/gemini";
+import { chatGenerate, FreeTierLimitError, type GeminiContent } from "@/lib/v2/gemini";
 import { freeTierSnapshot } from "@/lib/v2/freeTier";
 import { logEvent } from "@/lib/v2/log";
 import { dispatchAgentRun, machineStatus } from "@/lib/v2/dispatch";
 import { agentCanSubmit, AUTO_SUBMIT_OR } from "@/lib/v2/verify";
-import { ago, COMPANY_DAILY_CAP, freshness, MAX_DAILY_APPLY_CAP, MAX_POSTING_AGE_DAYS, priorityScore } from "@/lib/v2/priority";
+import { ago, COMPANY_DAILY_CAP, freshness, MAX_DAILY_APPLY_CAP, priorityScore } from "@/lib/v2/priority";
 import { needsKind, NEEDS_LABEL } from "@/lib/v2/needs";
 import { customStore, findSimilarAnswer, memoryKey, type CustomAnswers, type PendingQuestion } from "@/lib/v2/app-questions";
 import { jobSkillCoverage } from "@/lib/v2/resume-library";
 import { expectedChanges, expectedLookups } from "./intent";
+import { compact, summarizeActions, SYSTEM_BASE, TOOLS } from "./tools";
+import { fieldMatcher } from "@/lib/v2/fields";
 import type { ParsedResume } from "@/lib/v2/resume";
 
 export const maxDuration = 60;
-
-/** Sites the agent submits to by itself (one shared check: verify.ts). */
-const AUTO_SITES = "Greenhouse, Lever, Ashby, Workday, Workable, Rippling, JazzHR and Jobvite";
-
-const TOOLS: GeminiTool[] = [
-  {
-    name: "get_status",
-    description: "Current agent status: matched jobs, applications by status, autopilot settings, last run, whether a run is going on now, free-tier usage.",
-    parameters: { type: "object", properties: {} },
-  },
-  {
-    name: "explain_last_run",
-    description:
-      "Why few applications went through: what the last finished run did and what blocked it (time budget, GitHub minutes, CAPTCHAs, sites cooling down, per-company cap, Workday sign-ins, questions waiting on the user). Call this when the user asks why applications are low.",
-    parameters: { type: "object", properties: {} },
-  },
-  {
-    name: "search_jobs",
-    description: "Search the user's matched jobs, freshest and best-fitting first. Returns id, title, company, fit score, when posted, verification, location, pay.",
-    parameters: {
-      type: "object",
-      properties: {
-        query: { type: "string", description: "Words to find in the title or company, e.g. 'backend', 'data', 'Stripe'" },
-        level: { type: "string", enum: ["internship", "new_grad", "entry", "mid", "senior"] },
-        min_fit: { type: "integer" },
-        verified_only: { type: "boolean" },
-        auto_submit_only: { type: "boolean", description: `Only jobs on sites the agent can submit to itself (${AUTO_SITES})` },
-        not_applied_only: { type: "boolean", description: "Leave out jobs that already have an application" },
-        limit: { type: "integer" },
-      },
-    },
-  },
-  {
-    name: "queue_applications",
-    description: `Queue applications for the agent to submit on its next run (freshest postings go first, max ${COMPANY_DAILY_CAP} per company per day). Pass job_ids from search_jobs, a query (title or company words) to queue every matching verified job, or all_matches=true to queue EVERY verified match the agent can submit (up to 500).`,
-    parameters: {
-      type: "object",
-      properties: {
-        job_ids: { type: "array", items: { type: "string" } },
-        query: { type: "string" },
-        all_matches: { type: "boolean", description: "Queue every verified match the agent can submit (\"apply to all my matches\")" },
-        level: { type: "string", enum: ["internship", "new_grad", "entry", "mid", "senior"] },
-        min_fit: { type: "integer" },
-        limit: { type: "integer" },
-      },
-    },
-  },
-  {
-    name: "list_applications",
-    description:
-      "The user's applications, newest first, filtered by status. 'needs_user' rows include why the agent stopped and any questions waiting for an answer. Use it before retrying, answering, marking or explaining.",
-    parameters: {
-      type: "object",
-      properties: {
-        status: { type: "string", enum: ["queued", "needs_user", "failed", "submitted", "received", "under_review", "screening", "interview", "offer", "rejected", "withdrawn", "closed", "all"] },
-        company: { type: "string", description: "Only this company (partial name is fine)" },
-        limit: { type: "integer", description: "Default 10, max 40" },
-      },
-    },
-  },
-  {
-    name: "retry_applications",
-    description: "Put applications back in the queue so the agent tries them again on its next run. Pass ids from list_applications, a company name, or all_of a status ('needs_user', 'failed', 'closed').",
-    parameters: {
-      type: "object",
-      properties: {
-        ids: { type: "array", items: { type: "string" } },
-        company: { type: "string" },
-        all_of: { type: "string", enum: ["needs_user", "failed", "closed"] },
-      },
-    },
-  },
-  {
-    name: "answer_question",
-    description:
-      "Save the user's answer to an application question the agent couldn't answer (from list_applications status needs_user). The answer is remembered for every form that asks it, and the waiting applications go back in the queue.",
-    parameters: {
-      type: "object",
-      properties: {
-        question: { type: "string", description: "The question text exactly as listed" },
-        answer: { type: "string" },
-      },
-      required: ["question", "answer"],
-    },
-  },
-  {
-    name: "update_applications",
-    description: "Change applications the user handled themselves: mark as applied (they submitted it), interview, offer, rejected, withdrawn, or delete. Pass ids from list_applications or a company name.",
-    parameters: {
-      type: "object",
-      properties: {
-        ids: { type: "array", items: { type: "string" } },
-        company: { type: "string" },
-        action: { type: "string", enum: ["applied", "interview", "offer", "rejected", "withdrawn", "delete"] },
-      },
-      required: ["action"],
-    },
-  },
-  {
-    name: "dismiss_jobs",
-    description: "Hide matched jobs the user isn't interested in (ids from search_jobs, or a query such as a company name) so the agent never applies to them.",
-    parameters: {
-      type: "object",
-      properties: { job_ids: { type: "array", items: { type: "string" } }, query: { type: "string" } },
-    },
-  },
-  {
-    name: "job_match_report",
-    description:
-      "How well the user's resume matches one job: the technologies the posting names, which ones the resume has and lacks, the fit reasons, and whether the agent would send the original resume (≥80% coverage) or a tailored one. Pass a job id from search_jobs, or a query (title / company).",
-    parameters: { type: "object", properties: { job_id: { type: "string" }, query: { type: "string" } } },
-  },
-  {
-    name: "follow_ups",
-    description: "Applications that went quiet: submitted or received more than N days ago (default 10) with no reply since. Returns company, title, days waiting, link, and a short follow-up note the user can send.",
-    parameters: { type: "object", properties: { days: { type: "integer" }, limit: { type: "integer" } } },
-  },
-  {
-    name: "update_preferences",
-    description: "Change what jobs the agent looks for.",
-    parameters: {
-      type: "object",
-      properties: {
-        add_target_roles: { type: "array", items: { type: "string" } },
-        remove_target_roles: { type: "array", items: { type: "string" } },
-        job_levels: { type: "array", items: { type: "string", enum: ["internship", "new_grad", "entry", "mid", "senior"] } },
-        min_salary: { type: "integer", description: "Minimum yearly pay in USD for full-time roles" },
-        locations: { type: "array", items: { type: "string", enum: ["remote_us", "GA", "anywhere_us"] } },
-        relocation: { type: "boolean" },
-        add_keywords_include: { type: "array", items: { type: "string" } },
-        add_keywords_exclude: { type: "array", items: { type: "string" } },
-        add_excluded_companies: { type: "array", items: { type: "string" } },
-        add_skills: { type: "array", items: { type: "string" } },
-      },
-    },
-  },
-  {
-    name: "set_autopilot",
-    description: "Turn automatic submission on/off, pause or resume the agent, or change the daily cap / minimum fit score.",
-    parameters: {
-      type: "object",
-      properties: {
-        auto_submit_enabled: { type: "boolean" },
-        paused: { type: "boolean" },
-        daily_apply_cap: { type: "integer", description: `0-${MAX_DAILY_APPLY_CAP} applications per day (the free AI quota is the real limit)` },
-        min_fit_score: { type: "integer", description: "40-95" },
-      },
-    },
-  },
-  {
-    name: "get_profile",
-    description: "What the agent knows about the user: resume summary, skills, experience, education, job preferences, and what's missing.",
-    parameters: { type: "object", properties: {} },
-  },
-  {
-    name: "run_agent_now",
-    description:
-      "Start an agent run right away instead of waiting for the schedule: it searches for new postings, then applies to the queue and the freshest matches. When the user names a kind of job to go after (\"go apply to oil field jobs\", \"look for offshore roles\"), pass focus_roles: those become the focus (applied to before anything else, any US location) and are added to their target roles.",
-    parameters: {
-      type: "object",
-      properties: {
-        focus_roles: {
-          type: "array",
-          items: { type: "string" },
-          description:
-            "Concrete job titles plus the industry, 2-8 items. E.g. oil & gas / offshore → [\"Roustabout\", \"Floorhand\", \"Field Operator\", \"Lease Operator\", \"Pipeline Operator\", \"Petroleum Engineer\", \"oil and gas\", \"offshore\"]",
-        },
-      },
-    },
-  },
-  {
-    name: "set_focus",
-    description: "Make some roles the agent's focus without starting a run (or clear the focus with an empty list). Focus roles go first on every run and are added to target roles.",
-    parameters: { type: "object", properties: { focus_roles: { type: "array", items: { type: "string" } } }, required: ["focus_roles"] },
-  },
-];
-
-const SYSTEM_BASE = `You are 9to5 AI, a friendly job-search agent working for the signed-in user.
-You find real jobs in ANY field (tech, healthcare, trades, energy, finance, sales, retail, admin…) that match their resume and target roles, verify employers, and submit applications for them.
-You can also help with career questions: resume tips, interview prep, what roles fit them, salary ranges, how the app works.
-
-How to behave:
-- Be helpful. Don't refuse normal requests. If something isn't possible yet, say exactly why and what the user can do (e.g. "upload your resume on Resume & profile").
-- Use tools to act or look things up; never claim you did something unless a tool result confirms it.
-- When asked about their resume, skills or preferences, call get_profile first.
-- When asked about jobs or applications, call search_jobs, list_applications or get_status. If there are 0 matched jobs, explain the agent searches every 2 hours, and offer run_agent_now.
-- "Look for new jobs" / "search for jobs" / "start applying" = run_agent_now (one run both searches and applies).
-- When the user names a KIND of job to go after ("go apply to oil field jobs", "look for offshore / natural gas / mining jobs"), call run_agent_now WITH focus_roles (concrete titles + the industry words). That job becomes the priority over everything else and is added to their target roles; say so. Then also call search_jobs with one of the titles: if matches exist, queue_applications them.
-- "Apply to <one company or a job you listed>" = search_jobs then queue_applications, then run_agent_now.
-- Retry / answer / mark / dismiss: call list_applications or search_jobs first so you act on the right rows, then the change tool, then say exactly what changed (counts, company names).
-- When the user answers a question the agent was waiting on (from needs_user rows), call answer_question with the question text as listed.
-- ONLY act on the user's LATEST message. Earlier messages are context: never repeat a change, queue or run from an earlier message (e.g. an old "cap of 20") unless the latest message asks for it again. A one-word message like "answer" or "why?" is a question — look things up, don't change settings.
-- The agent auto-submits verified jobs on ${AUTO_SITES}. Jobs on other sites (SmartRecruiters, iCIMS, Taleo, company sites) show "Apply yourself" on the Jobs page; SmartRecruiters blocks automated browsers with a CAPTCHA.
-- "Apply to all my matches" / "submit everything" = queue_applications with all_matches=true, then run_agent_now.
-- To look for a new kind of job in any field, add it with update_preferences add_target_roles (any job title works) — or run_agent_now with focus_roles to make it the priority.
-- AI: Gemini first; when Gemini's daily quota is used, the agent and this chat switch to Groq automatically, so a Gemini limit does not stop applications.
-- "How well do I match X" / "what am I missing for X" → job_match_report. "Who should I follow up with" / "which applications went quiet" → follow_ups (give the note so they can copy it).
-- When asked why few applications are sent, call explain_last_run and answer from its numbers: the usual causes are the run's time budget / GitHub minutes, CAPTCHAs on Lever/Ashby, sites cooling down after a CAPTCHA, the per-company daily cap, Workday sign-ins, and questions waiting in "Needs you".
-- The agent also searches oil & gas, offshore drilling, pipeline, refinery and mining employers' Workday sites (Transocean, Noble, Chevron, Shell, ConocoPhillips, Baker Hughes, Marathon Petroleum, ONEOK, Williams…) for the focus roles.
-- The agent applies to the freshest postings first (last 24h, then 2-3 days, then this week), skips postings older than ${MAX_POSTING_AGE_DAYS} days, and sends at most ${COMPANY_DAILY_CAP} applications per company per day.
-- Answers to common application questions (visa, EEO, start date, salary…) come from Resume & profile → Common questions; suggest filling those when applications land in "Needs you".
-- Never invent facts about the user, their experience or a job. Keep replies short and concrete (counts, company names). Use plain text, short lists are fine.`;
 
 async function systemFor(sb: SupabaseClient, userId: string): Promise<string> {
   const [{ data: p }, { count }] = await Promise.all([
@@ -275,7 +75,8 @@ async function runTool(name: string, args: Args, sb: SupabaseClient, userId: str
         applications: byStatus,
         autopilot: settings,
         last_run: run,
-        agent_right_now: machine.state === "idle" ? "idle" : `${machine.state} since ${machine.since}`,
+        your_run_right_now: machine.state === "idle" ? "idle" : `${machine.state} since ${machine.since}`,
+        scheduled_run_right_now: machine.scheduled.state === "idle" ? "idle" : `${machine.scheduled.state} since ${machine.scheduled.since} (runs alongside yours; they never send the same job twice)`,
         next_scheduled_run: machine.nextScheduled,
         gemini_today: `${free.gemini.used}/${free.gemini.limit}${free.gemini.allowed ? "" : " (used up; the agent uses Groq instead, so applying continues)"}`,
       };
@@ -381,7 +182,8 @@ async function runTool(name: string, args: Args, sb: SupabaseClient, userId: str
     }
     case "list_applications": {
       const limit = Math.max(1, Math.min(40, Number(args.limit ?? 10)));
-      let q = sb.from("applications").select(APP_COLS).eq("user_id", userId).order("status_updated_at", { ascending: false, nullsFirst: false }).limit(300);
+      const inField = args.field ? fieldMatcher(String(args.field)) : null;
+      let q = sb.from("applications").select(APP_COLS).eq("user_id", userId).order("status_updated_at", { ascending: false, nullsFirst: false }).limit(inField ? 3000 : 300);
       const status = String(args.status ?? "all");
       if (status !== "all") q = q.eq("status", status);
       const { data, error } = await q;
@@ -389,8 +191,13 @@ async function runTool(name: string, args: Args, sb: SupabaseClient, userId: str
       let rows = (data ?? []) as unknown as AppRow[];
       const company = args.company ? clean(String(args.company)).toLowerCase() : "";
       if (company) rows = rows.filter((r) => (r.jobs?.company_name ?? "").toLowerCase().includes(company));
+      if (args.field && !inField) return { error: `Don't know the field "${String(args.field)}" — try oil and gas, healthcare, finance, retail, tech, trades or government, or search by company` };
+      if (inField) rows = rows.filter((r) => inField(r.jobs?.title ?? "", r.jobs?.company_name ?? ""));
+      const byStatus: Record<string, number> = {};
+      for (const r of rows) byStatus[r.status] = (byStatus[r.status] ?? 0) + 1;
       return {
         total: rows.length,
+        by_status: byStatus,
         applications: rows.slice(0, limit).map((r) => ({
           id: r.id,
           company: r.jobs?.company_name,
@@ -548,7 +355,7 @@ async function runTool(name: string, args: Args, sb: SupabaseClient, userId: str
       const focus = roles.length ? await setFocus(sb, userId, roles) : null;
       const machine = await machineStatus();
       if (machine.state !== "idle")
-        return { started: false, focus, note: `A run is already ${machine.state} (since ${machine.since}). ${focus ? "The focus applies from the next run; " : ""}Queued jobs are picked up by it.` };
+        return { started: false, focus, note: `Your own run is already ${machine.state} (since ${machine.since}) — it picks up what you just asked for.${focus ? " The focus is saved." : ""}` };
       return { ...(await dispatchAgentRun(userId)), focus };
     }
   }
@@ -695,12 +502,17 @@ export async function POST(req: Request) {
   const actions: { tool: string; args: Args; result: Record<string, unknown> }[] = [];
   let reply = "";
   const t0 = Date.now();
+  // Vercel stops this request at 60 s; without a reply saved the user saw nothing at all. Stop starting
+  // new AI rounds well before that, and answer from what the tools already returned.
+  const deadline = t0 + 50_000;
+  const timeLeft = () => deadline - Date.now();
   try {
     const system = await systemFor(supabase, user.id);
     /** Up to `max` model turns; each tool call runs here. Returns the model's plain reply, or "" if it kept calling tools. */
     const rounds = async (max: number): Promise<string> => {
       for (let round = 0; round < max; round++) {
-        const { parts, text: out } = await chatGenerate(admin, { contents, system, tools: TOOLS, userId: user.id, prefer: "backup" });
+        if (timeLeft() < 12_000) return "";
+        const { parts, text: out } = await chatGenerate(admin, { contents, system, tools: TOOLS, userId: user.id, prefer: "backup", deadline });
         const calls = parts.filter((p) => p.functionCall);
         if (!calls.length) return out.trim();
         contents.push({ role: "model", parts });
@@ -717,7 +529,7 @@ export async function POST(req: Request) {
           }
           if (result.error) await logEvent(admin, { user_id: user.id, area: "chat", level: "warn", message: `Tool ${name} failed: ${String(result.error)}` });
           actions.push({ tool: name, args: args ?? {}, result });
-          responses.push({ functionResponse: { ...(id ? { id } : {}), name, response: result } });
+          responses.push({ functionResponse: { ...(id ? { id } : {}), name, response: compact(result) } });
         }
         contents.push({ role: "user", parts: responses });
       }
@@ -725,6 +537,7 @@ export async function POST(req: Request) {
     };
     /** Send the model back to do what it skipped: a change it only talked about, or a lookup it guessed at. */
     const insist = async (nudge: string) => {
+      if (timeLeft() < 20_000) return;
       contents.push({ role: "model", parts: [{ text: reply || "…" }] });
       contents.push({ role: "user", parts: [{ text: nudge }] });
       reply = await rounds(2);
@@ -737,15 +550,23 @@ export async function POST(req: Request) {
     // Data questions are answered from tool results only: it once named a company and "30 days" from memory.
     const lookups = expectedLookups(text);
     if (lookups.length && !actions.length) await insist(`Don't answer from memory: call ${lookups.join(" or ")} first and answer only from what it returns.`);
-    if (!reply && actions.length) {
+    if (!reply && actions.length && timeLeft() > 12_000) {
       // Still calling tools — ask for a plain answer from what it found.
       contents.push({ role: "user", parts: [{ text: "Now answer me in plain words using what the tools returned. Don't call more tools." }] });
-      const { text: final } = await chatGenerate(admin, { contents, system, userId: user.id, prefer: "backup" });
+      const { text: final } = await chatGenerate(admin, { contents, system, userId: user.id, prefer: "backup", deadline }).catch(() => ({ text: "" }));
       reply = final.trim();
     }
+    if (!reply && actions.length) reply = summarizeActions(actions);
     if (!reply) reply = "Sorry, I couldn't work that out. Try rephrasing?";
   } catch (e) {
     const msg = (e as Error).message;
+    if (actions.some((a) => !a.result.error)) {
+      // The AI ran out of time or quota mid-way: still tell the user what was looked up and done.
+      reply = summarizeActions(actions);
+      await logEvent(admin, { user_id: user.id, area: "chat", level: "warn", message: `Chat AI stopped mid-reply (${msg.slice(0, 160)}); answered from tool results` });
+      await store({ user_id: user.id, role: "assistant", content: reply, actions });
+      return NextResponse.json({ reply, actions, conversation_id: legacy ? LEGACY : conversationId });
+    }
     await logEvent(admin, { user_id: user.id, area: "chat", level: "error", message: `Chat failed: ${msg}`, meta: { ms: Date.now() - t0 } });
     reply =
       e instanceof FreeTierLimitError

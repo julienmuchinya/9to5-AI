@@ -33,7 +33,8 @@ import { openMailbox } from "./mailbox";
 import { answerWaitingQuestions } from "./backfill";
 import { resumeFocus } from "../../src/lib/v2/tracking";
 import { decryptSecret, encryptSecret, generatePortalPassword } from "../../src/lib/v2/vault";
-import { ageDays, COMPANY_DAILY_CAP, companyKey, DEFAULT_DAILY_CAP, DEFAULT_MIN_FIT, MAX_DAILY_APPLY_CAP, MAX_POSTING_AGE_DAYS, planQueue, tooOld } from "../../src/lib/v2/priority";
+import { freshWeight, readTuning, TUNING_LIMITS, type Tuning } from "../../src/lib/v2/tuning";
+import { ageDays, companyKey, DEFAULT_DAILY_CAP, DEFAULT_MIN_FIT, MAX_DAILY_APPLY_CAP, planQueue, tooOld } from "../../src/lib/v2/priority";
 import { familyOf, judgeRoute, learnRoutes, titleKey } from "../../src/lib/v2/learning";
 import { isAggregator, resolveDirectLink } from "../../src/lib/v2/discovery/resolve";
 import { domainAgeYears, employerDomain } from "../../src/lib/v2/company-age";
@@ -56,7 +57,7 @@ const log = (...a: unknown[]) => console.log("[9to5]", ...a);
  */
 // On GitHub Actions logs are hidden unless the repo is confirmed private (scheduled runs may not know).
 if (env("GITHUB_ACTIONS") === "true" && env("GITHUB_REPO_PUBLIC") !== "false" && env("PUBLIC_LOGS") !== "full") {
-  const SAFE = /^\[9to5\] (scheduled|manual) run|^\[9to5\] (simplify|company boards|workday boards|job-board links|company age|saved \d+|done in|Skipping|work left|run time budget|AI is out|stop applying)|^\[9to5\] user [0-9a-f]{8}(:| skipped)/;
+  const SAFE = /^\[9to5\] (scheduled|manual) run|^\[9to5\] your own run|^\[9to5\] (simplify|company boards|workday boards|job-board links|company age|saved \d+|done in|Skipping|work left|run time budget|AI is out|stop applying)|^\[9to5\] user [0-9a-f]{8}(:| skipped)/;
   const raw = console.log.bind(console);
   console.log = (...a: unknown[]) => {
     const line = a.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join(" ");
@@ -99,7 +100,6 @@ const ACCOUNT_SITES = /(myworkdayjobs\.com|myworkdaysite\.com|icims\.com|taleo\.
 const PACE_MIN_S = Number(env("PACE_MIN_S", "2"));
 const PACE_MAX_S = Number(env("PACE_MAX_S", "6"));
 const ATS_DAILY_CAP = Number(env("ATS_DAILY_CAP", "150")); // per ATS host, all users combined
-const COMPANY_CAP = Number(env("COMPANY_DAILY_CAP", String(COMPANY_DAILY_CAP))); // per company, per user, per day
 const MAX_DAILY_CAP = MAX_DAILY_APPLY_CAP;
 /** Workday portals: sign in / create the account with the saved login, then apply (set WORKDAY=false to turn off). */
 const WORKDAY_ON = env("WORKDAY", "true") !== "false";
@@ -107,6 +107,13 @@ const WORKDAY_ON = env("WORKDAY", "true") !== "false";
 let RUN_BUDGET_MS = Number(env("RUN_BUDGET_MIN", "40")) * 60_000;
 /** Started with "Run now" / Run workflow (not the schedule). */
 const MANUAL = env("GITHUB_EVENT_NAME") === "workflow_dispatch";
+/**
+ * "user" = started for one person (Run now, chat): it runs in its own lane next to the scheduled runs
+ * (separate GitHub concurrency group) and works that person's own requests first. "auto" = the schedule.
+ */
+const RUN_MODE: "user" | "auto" = env("ONLY_USER") ? "user" : "auto";
+/** applications.applying_until exists (migration 010): runs claim a job before applying, so two runs never send the same one. */
+let CLAIMS = false;
 /** Resume already covers this share of the job's words → skip AI rewording (saves one AI call). */
 const TAILOR_SKIP_SCORE = Number(env("TAILOR_SKIP_SCORE", "0.7"));
 /** The resume already has this share of the technologies the job names → send the original PDF untouched. */
@@ -162,6 +169,28 @@ async function portalLogin(sb: SupabaseClient, userId: string, url: string): Pro
 
 const chunk = <T,>(a: T[], n: number) => Array.from({ length: Math.ceil(a.length / n) }, (_, i) => a.slice(i * n, i * n + n));
 
+/**
+ * Claims one job for this run for 20 minutes (applications.applying_until), so the scheduled run and a
+ * "Run now" run never fill the same form twice. Already-sent applications can't be claimed.
+ */
+async function claimJob(sb: SupabaseClient, base: { user_id: string; job_id: string } & Record<string, unknown>): Promise<boolean> {
+  await sb.from("applications").upsert({ ...base, status: "queued" }, { onConflict: "user_id,job_id", ignoreDuplicates: true });
+  const now = new Date().toISOString();
+  const { data, error } = await sb
+    .from("applications")
+    .update({ applying_until: new Date(Date.now() + 20 * 60_000).toISOString() })
+    .eq("user_id", base.user_id)
+    .eq("job_id", base.job_id)
+    .in("status", ["queued", "failed", "needs_user"])
+    .or(`applying_until.is.null,applying_until.lt.${now}`)
+    .select("id");
+  if (error) {
+    log(`  claim failed (${error.message.slice(0, 80)}) — applying anyway`);
+    return true;
+  }
+  return (data?.length ?? 0) > 0;
+}
+
 // ── 1+2. Discover and verify ──────────────────────────────────────────────
 /**
  * Employers' Workday sites searched for the roles users asked for (focus first), plus each board's
@@ -184,7 +213,7 @@ async function discoverWorkday(sb: SupabaseClient, roles: string[]): Promise<Pos
     if (Date.now() > deadline) break;
     scanned += group.length;
     const res = await Promise.all(
-      group.map((b) => fetchWorkdayBoard(b, queries, { maxAgeDays: MAX_POSTING_AGE_DAYS, keepTitle: isStemTitle, skip: (k) => (known.has(k) ? (stillListed.push(k), true) : false) }))
+      group.map((b) => fetchWorkdayBoard(b, queries, { maxAgeDays: TUNING_LIMITS.max_age_days[1], keepTitle: isStemTitle, skip: (k) => (known.has(k) ? (stillListed.push(k), true) : false) }))
     );
     for (const list of res) out.push(...list);
   }
@@ -354,6 +383,8 @@ interface Settings {
   auto_submit_enabled: boolean | null;
   daily_apply_cap: number | null;
   min_fit_score: number | null;
+  /** Settings → How the agent picks jobs (migration 010). */
+  tuning?: unknown;
 }
 
 function toMatchProfile(u: UserRow): MatchProfile {
@@ -436,6 +467,9 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
   const bump = (k: string) => (result[k] = (result[k] ?? 0) + 1);
   const dryRun = env("APPLY_DRY_RUN") === "true";
   const cap = Math.max(0, Math.min(MAX_DAILY_CAP, s.daily_apply_cap ?? DEFAULT_DAILY_CAP));
+  const tune: Tuning = readTuning(s.tuning);
+  const COMPANY_CAP = Number(env("COMPANY_DAILY_CAP", "")) || tune.company_cap;
+  const old = (postedAt: string | null) => tooOld(postedAt, tune.max_age_days);
   const startOfDay = `${today()}T00:00:00Z`;
 
   // Today's submissions for this user, overall and per company (max COMPANY_CAP per company per day).
@@ -487,7 +521,7 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
   // Queued jobs, plus earlier attempts that crashed (up to 3 tries) — otherwise a bad run loses them for good.
   const { data: queued } = await sb
     .from("applications")
-    .select("id,job_id,requested_by")
+    .select("id,job_id,requested_by,created_at")
     .eq("user_id", u.id)
     .or(env("APPLY_ONLY_COMPANY") ? "status.in.(queued,failed,needs_user)" : "status.eq.queued,and(status.eq.failed,or(attempts.is.null,attempts.lt.3))")
     .order("created_at")
@@ -519,7 +553,7 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
   type Item = { appId?: string; job: JobRow; company: string; fit: number; postedAt: string | null; userRequested: boolean; routeBonus: number; focus: boolean };
   const isFocus = (j: JobRow) => isFocusTitle(j.title, u.focus_roles, j.job_postings.description ?? "");
   const items: Item[] = [];
-  const queuedInfo = new Map((queued ?? []).map((q) => [q.job_id as string, { id: q.id as string, byUser: q.requested_by === "user" || q.requested_by === "chat" }]));
+  const queuedInfo = new Map((queued ?? []).map((q) => [q.job_id as string, { id: q.id as string, byUser: q.requested_by === "user" || q.requested_by === "chat", at: q.created_at as string }]));
   const queuedJobs: JobRow[] = [];
   for (const part of chunk([...queuedInfo.keys()], 100)) {
     const { data: qJobs } = await sb.from("jobs").select(JOB_COLS).in("id", part);
@@ -555,11 +589,14 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
   for (const j of queuedJobs) {
     const info = queuedInfo.get(j.id)!;
     // Old postings the agent queued itself: close them instead of spending a run on them.
-    if (!info.byUser && tooOld(j.job_postings.posted_at)) {
+    if (!info.byUser && old(j.job_postings.posted_at)) {
       staleClosed++;
-      if (!dryRun) await sb.from("applications").update({ status: "closed", error: `Skipped: posted ${Math.round(ageDays(j.job_postings.posted_at) ?? 0)} days ago (older than ${MAX_POSTING_AGE_DAYS}) — fresh postings first` }).eq("id", info.id);
+      if (!dryRun) await sb.from("applications").update({ status: "closed", error: `Skipped: posted ${Math.round(ageDays(j.job_postings.posted_at) ?? 0)} days ago (older than ${tune.max_age_days}) — fresh postings first` }).eq("id", info.id);
       continue;
     }
+    // Without claims (no migration 010) the two lanes split the work: a "Run now" run takes what you asked
+    // for, and the scheduled run leaves your fresh requests (under 2 hours old) to it.
+    if (!CLAIMS && RUN_MODE === "auto" && info.byUser && Date.now() - Date.parse(info.at) < 2 * 3600_000) continue;
     if (needsAlt(j)) {
       const alt = altFor.get(`${companyKey(j.company_name)}|${titleKey(j.title)}`);
       if (alt) {
@@ -578,10 +615,12 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
   }
   if (staleClosed) {
     result.stale_skipped = staleClosed;
-    log(`  closed ${staleClosed} queued posting(s) older than ${MAX_POSTING_AGE_DAYS} days`);
+    log(`  closed ${staleClosed} queued posting(s) older than ${tune.max_age_days} days`);
   }
   for (const j of (best ?? []) as unknown as JobRow[]) {
-    if (taken.has(j.id) || tooOld(j.job_postings.posted_at)) continue;
+    if (taken.has(j.id) || old(j.job_postings.posted_at)) continue;
+    // A "Run now" run without claims sticks to your requests and focus roles (the schedule does the rest).
+    if (!CLAIMS && RUN_MODE === "user" && !isFocus(j)) continue;
     const verdict = judgeRoute(learned, j.job_postings.apply_url || j.job_postings.url);
     if (verdict.skip) {
       bump("route_skipped");
@@ -600,7 +639,7 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
   });
   if (items.length !== unique.length) log(`  ${items.length - unique.length} duplicate posting(s) of the same job skipped`);
   // Freshest + best-fitting first; at most COMPANY_CAP per company per day.
-  const { picked, skippedForCompanyCap } = planQueue(unique, { appliedToday: perCompanyToday, perCompany: COMPANY_CAP });
+  const { picked, skippedForCompanyCap } = planQueue(unique, { appliedToday: perCompanyToday, perCompany: COMPANY_CAP, freshWeight: freshWeight(tune.order), focusFirst: tune.focus_first, mineFirst: tune.mine_first });
   const focusCount = picked.filter((x) => x.focus).length;
   if (u.focus_roles?.length) {
     log(`  focus (${u.focus_roles.join(", ")}): ${focusCount} matching job(s) go first`);
@@ -699,7 +738,7 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
       : undefined;
   const save = async (row: Record<string, unknown>) => {
     if (dryRun) return; // dry runs never change the user's applications
-    const { error } = await sb.from("applications").upsert({ ...row, status_updated_at: new Date().toISOString() }, { onConflict: "user_id,job_id" });
+    const { error } = await sb.from("applications").upsert({ ...row, ...(CLAIMS ? { applying_until: null } : {}), status_updated_at: new Date().toISOString() }, { onConflict: "user_id,job_id" });
     if (error) log(`application save error: ${error.message}`);
   };
 
@@ -755,6 +794,11 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
     }
     if ((hostCount[host] ?? 0) >= ATS_DAILY_CAP) {
       bump("site_daily_cap");
+      return "next";
+    }
+    // The other lane (scheduled vs. "Run now") may be on this job right now: claim it first.
+    if (CLAIMS && !dryRun && !(await claimJob(sb, base))) {
+      bump("other_run_has_it");
       return "next";
     }
     if (submittedThisRun > 0 && !dryRun) {
@@ -987,6 +1031,8 @@ async function main() {
   const focusRoles = all.flatMap((u) => u.focus_roles ?? []);
   const roles = [...new Set([...focusRoles, ...all.flatMap((u) => u.target_roles ?? [])].map((r) => r.trim()).filter(Boolean))];
   setWantedRoles(roles);
+  CLAIMS = !(await sb.from("applications").select("applying_until").limit(1)).error;
+  log(`${RUN_MODE === "user" ? "your own run (Run now / chat)" : "scheduled run"} — ${CLAIMS ? "runs claim each job, so they never overlap" : "run migration 010 to let both kinds of run share the queue"}`);
   const fresh = env("DISCOVER", "true") === "false" ? [] : await discover(sb, roles);
   const settingsBy = new Map((settings ?? []).map((s) => [s.user_id as string, s as Settings]));
 

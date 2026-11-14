@@ -115,6 +115,9 @@ export async function sendRunDigest(
   if (process.env.DIGEST === "false") return "skipped";
   if (!(await digestDue(sb, u.id, opts.manual))) return "skipped";
   if (!u.inbox_email || !u.inbox_password_enc || !isGoogleConnected(u)) return "no_gmail";
+  // Google told us at connect time that sending wasn't allowed (migration 010): don't try, don't warn every run.
+  const scopes = (u as { inbox_scopes?: string | null }).inbox_scopes;
+  if (scopes != null && !/gmail\.send/.test(scopes)) return "no_permission";
 
   const windowStart = opts.manual ? opts.since : new Date(Date.now() - 24 * 3600_000);
   const [{ data: sentRows }, { data: needRows }, { count: queued }] = await Promise.all([
@@ -154,7 +157,12 @@ export async function sendRunDigest(
   } catch (e) {
     if (e instanceof GmailScopeError) {
       opts.log("  summary email not sent: reconnect Google once to allow sending");
-      await sb.from("agent_logs").insert({ user_id: u.id, level: "warn", message: e.message, metadata: { area: "digest" } });
+      // Remember it (when the column exists) so later runs skip quietly; otherwise warn at most once a day.
+      const { error: saveErr } = await sb.from("profiles").update({ inbox_scopes: "gmail.readonly" }).eq("id", u.id);
+      if (saveErr) {
+        const { count } = await sb.from("agent_logs").select("id", { count: "exact", head: true }).eq("user_id", u.id).eq("metadata->>area", "digest").gte("created_at", new Date(Date.now() - 24 * 3600_000).toISOString());
+        if (!count) await sb.from("agent_logs").insert({ user_id: u.id, level: "warn", message: e.message, metadata: { area: "digest" } });
+      }
       return "no_permission";
     }
     opts.log(`  summary email failed: ${(e as Error).message.slice(0, 160)}`);

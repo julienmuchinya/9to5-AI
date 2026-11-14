@@ -26,14 +26,12 @@ export async function GET(req: NextRequest) {
   try {
     const { refreshToken, email, scope } = await exchangeGoogleCode(code, origin);
     if (!/gmail\.readonly/.test(scope)) return back("Please tick the box that lets 9to5 AI read your Gmail, then connect again.");
-    const { error } = await auth.supabase
-      .from("profiles")
-      .upsert(
-        { id: auth.user.id, inbox_email: email, inbox_host: GMAIL_OAUTH_HOST, inbox_password_enc: encryptSecret(refreshToken), inbox_error: null, inbox_last_scan_at: null },
-        { onConflict: "id" }
-      );
+    const row = { id: auth.user.id, inbox_email: email, inbox_host: GMAIL_OAUTH_HOST, inbox_password_enc: encryptSecret(refreshToken), inbox_error: null, inbox_last_scan_at: null };
+    // What Google allowed (migration 010 column); older databases save the connection without it.
+    let { error } = await auth.supabase.from("profiles").upsert({ ...row, inbox_scopes: scope }, { onConflict: "id" });
+    if (error && (error.code === "42703" || error.code === "PGRST204" || /inbox_scopes/.test(error.message))) ({ error } = await auth.supabase.from("profiles").upsert(row, { onConflict: "id" }));
     if (error) return back(`Couldn’t save the connection: ${error.message}`);
-    return back("ok");
+    return back(/gmail\.send/.test(scope) ? "ok" : "ok-nosend");
   } catch (e) {
     return back((e as Error).message.slice(0, 250));
   }

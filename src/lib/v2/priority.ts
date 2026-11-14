@@ -95,13 +95,26 @@ export const FOCUS_BONUS = 100;
  */
 export function planQueue<T extends Candidate>(
   items: T[],
-  opts: { appliedToday?: Record<string, number>; perCompany?: number; now?: number } = {}
+  opts: {
+    appliedToday?: Record<string, number>;
+    perCompany?: number;
+    now?: number;
+    /** Weight of the freshness bonus (Settings → order: newest first 1.6, balanced 1, best fit first 0.25). */
+    freshWeight?: number;
+    /** Focus roles before everything (default on). */
+    focusFirst?: boolean;
+    /** Jobs the user queued themselves before the agent's picks (default on; off = a small nudge only). */
+    mineFirst?: boolean;
+  } = {}
 ): { picked: T[]; skippedForCompanyCap: T[] } {
   const per = opts.perCompany ?? COMPANY_DAILY_CAP;
   const now = opts.now ?? Date.now();
+  const fw = opts.freshWeight ?? 1;
+  const mine = opts.mineFirst === false ? 15 : opts.mineFirst ? 60 : 15;
+  const focus = opts.focusFirst === false ? 10 : FOCUS_BONUS;
   const used: Record<string, number> = { ...(opts.appliedToday ?? {}) };
   const sorted = items
-    .map((x, i) => ({ x, i, s: priorityScore(x.fit, x.postedAt, now) + (x.userRequested ? 15 : 0) + (x.routeBonus ?? 0) + (x.focus ? FOCUS_BONUS : 0) }))
+    .map((x, i) => ({ x, i, s: x.fit + freshness(x.postedAt, now).bonus * fw + (x.userRequested ? mine : 0) + (x.routeBonus ?? 0) + (x.focus ? focus : 0) }))
     .sort((a, b) => b.s - a.s || a.i - b.i)
     .map((o) => o.x);
   const picked: T[] = [];

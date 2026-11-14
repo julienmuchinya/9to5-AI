@@ -1229,7 +1229,7 @@ async function fillAndSubmit(
     // Some sites (Greenhouse especially) email a security code after Submit and wait for it.
     const code = await enterEmailCode(page, opts.emailCode && ((since: Date) => opts.emailCode!(since, opts.company)), submittedAt);
     if (code === "no_inbox")
-      return { status: "needs_user", detail: "The site emailed you a security code. Connect your Gmail on the Autopilot page so the agent can enter it next time — or finish this one yourself.", answers: labelled(fields, answers), learned, usedPortalLogin, aiCalls };
+      return { status: "needs_user", detail: "The site emailed you a security code. Connect your Gmail on the Settings page so the agent can enter it next time — or finish this one yourself.", answers: labelled(fields, answers), learned, usedPortalLogin, aiCalls };
     if (code === "not_found")
       return { status: "needs_user", detail: "The site emailed a security code but it didn't arrive in time — open the application and enter it yourself.", answers: labelled(fields, answers), learned, usedPortalLogin, aiCalls };
 

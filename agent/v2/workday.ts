@@ -357,7 +357,7 @@ async function workdayAuth(page: Page, opts: ApplyOpts): Promise<AuthResult> {
         // With Gmail connected the agent looks again next run (the email is often late); after 3 tries it comes to the user.
         result: opts.emailLink
           ? { status: "failed", detail: `Workday account at ${host} isn't verified yet and the verification email hasn't been found in ${portal.email} — will retry next run` }
-          : { status: "needs_user", detail: `Your Workday account at ${host} isn't verified yet. Click the link in the email Workday sent to ${portal.email} (or connect Gmail on the Autopilot page so the agent does it), then Retry.` },
+          : { status: "needs_user", detail: `Your Workday account at ${host} isn't verified yet. Click the link in the email Workday sent to ${portal.email} (or connect Gmail on the Settings page so the agent does it), then Retry.` },
       };
     }
     if (r === "bad_password" && (await resetOnce()) && (await signIn()) === "ok") return { ok: true, created: false };
@@ -405,7 +405,7 @@ async function workdayAuth(page: Page, opts: ApplyOpts): Promise<AuthResult> {
           ok: false,
           result: opts.emailLink
             ? { status: "failed", detail: `Workday (${host}) account created; its verification email hadn't arrived yet — the agent clicks it on the next run`, accountCreated: true }
-            : { status: "needs_user", detail: `Workday (${host}) emailed you a link to verify the new account. Connect Gmail on the Autopilot page so the agent can click it — or click it yourself, then Retry.`, accountCreated: true },
+            : { status: "needs_user", detail: `Workday (${host}) emailed you a link to verify the new account. Connect Gmail on the Settings page so the agent can click it — or click it yourself, then Retry.`, accountCreated: true },
         };
       const r = await signIn();
       if (r === "ok") return { ok: true, created: true };

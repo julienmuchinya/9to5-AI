@@ -5,7 +5,10 @@ import { SubmitButton } from "@/components/submit-button";
 import { disconnectInbox, saveAutopilot, saveInbox } from "../actions";
 import { GMAIL_OAUTH_HOST, googleOAuthConfigured } from "@/lib/v2/gmail";
 
-import { COMPANY_DAILY_CAP, DEFAULT_DAILY_CAP, DEFAULT_MIN_FIT, MAX_DAILY_APPLY_CAP } from "@/lib/v2/priority";
+import { DEFAULT_DAILY_CAP, DEFAULT_MIN_FIT, MAX_DAILY_APPLY_CAP } from "@/lib/v2/priority";
+import { readTuning, TUNING_LIMITS } from "@/lib/v2/tuning";
+import { AUTO_SITES } from "@/app/api/chat/tools";
+import Link from "next/link";
 
 export const dynamic = "force-dynamic";
 
@@ -17,7 +20,10 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
   const { inbox: inboxMsg } = await searchParams;
   const google = googleOAuthConfigured();
   const { data: s } = await supabase.from("autopilot_settings").select("*").eq("user_id", user.id).single();
-  const { data: p } = await supabase.from("profiles").select("resume_path,work_authorized_us,sponsorship_needed,phone,first_name,last_name,job_email,inbox_email,inbox_host,inbox_last_scan_at,inbox_error").eq("id", user.id).single();
+  const { data: p } = await supabase.from("profiles").select("*").eq("id", user.id).single();
+  const tune = readTuning(s?.tuning);
+  /** null = not known yet (connected before this was recorded). */
+  const canSend: boolean | null = p?.inbox_scopes == null ? null : /gmail\.send/.test(String(p.inbox_scopes));
   const missing = [
     !p?.resume_path && "upload your resume",
     (!p?.first_name || !p?.last_name) && "add your first and last name",
@@ -28,7 +34,7 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
 
   return (
     <div className="max-w-2xl">
-      <PageHeader title="Autopilot & inbox" description="Control what the agent does on its own." />
+      <PageHeader title="Settings" description="What the agent does on its own, how it picks jobs, and your Gmail." />
       <form action={saveAutopilot} className="space-y-6">
         <Card>
           <label className="flex items-start gap-3">
@@ -36,7 +42,7 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
             <span>
               <span className="font-medium">Auto-submit applications</span>
               <span className="mt-1 block text-sm text-[var(--muted)]">
-                The agent submits applications for you on Greenhouse, Lever and Ashby job forms — only for{" "}
+                The agent submits applications for you on {AUTO_SITES} job forms — only for{" "}
                 <b>verified employers</b>, using only facts from your resume and profile. If a form shows a CAPTCHA or asks something it
                 can’t answer truthfully, it hands that job to you under Applications → Needs you.
               </span>
@@ -53,13 +59,48 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
             <label className="block text-sm">
               Max applications per day
               <input className={input} type="number" name="daily_apply_cap" min={0} max={MAX_DAILY_APPLY_CAP} defaultValue={s?.daily_apply_cap ?? DEFAULT_DAILY_CAP} />
-              <span className="mt-1 block text-xs text-[var(--muted)]">{`0–${MAX_DAILY_APPLY_CAP} in total (start: ${DEFAULT_DAILY_CAP}). Never more than ${COMPANY_DAILY_CAP} per company per day, freshest postings first. The free AI quota is the real limit.`}</span>
+              <span className="mt-1 block text-xs text-[var(--muted)]">{`0–${MAX_DAILY_APPLY_CAP} in total (start: ${DEFAULT_DAILY_CAP}). The free AI quota is the real limit.`}</span>
             </label>
             <label className="block text-sm">
               Minimum fit score to auto-apply
               <input className={input} type="number" name="min_fit_score" min={40} max={95} defaultValue={s?.min_fit_score ?? DEFAULT_MIN_FIT} />
               <span className="mt-1 block text-xs text-[var(--muted)]">{`40–95 (start: ${DEFAULT_MIN_FIT}). Lower = the agent applies to more of your matches; higher = pickier.`}</span>
             </label>
+          </div>
+        </Card>
+        <Card>
+          <h2 className="font-semibold">How the agent picks jobs</h2>
+          <p className="mb-4 mt-1 text-sm text-[var(--muted)]">Applies to every run — scheduled ones and the ones you start yourself.</p>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <label className="block text-sm">
+              Order of the queue
+              <select className={`${input} w-full`} name="order" defaultValue={tune.order}>
+                <option value="fresh">Newest postings first</option>
+                <option value="balanced">Balanced: fit + how new</option>
+                <option value="fit">Best fit first</option>
+              </select>
+              <span className="mt-1 block text-xs text-[var(--muted)]">New postings get the most replies; best fit sends your strongest matches first.</span>
+            </label>
+            <label className="block text-sm">
+              Skip postings older than (days)
+              <input className={input} type="number" name="max_age_days" min={TUNING_LIMITS.max_age_days[0]} max={TUNING_LIMITS.max_age_days[1]} defaultValue={tune.max_age_days} />
+              <span className="mt-1 block text-xs text-[var(--muted)]">{`${TUNING_LIMITS.max_age_days[0]}–${TUNING_LIMITS.max_age_days[1]}. Jobs you ask for yourself are never skipped for age.`}</span>
+            </label>
+            <label className="block text-sm">
+              Most applications to one company per day
+              <input className={input} type="number" name="company_cap" min={TUNING_LIMITS.company_cap[0]} max={TUNING_LIMITS.company_cap[1]} defaultValue={tune.company_cap} />
+              <span className="mt-1 block text-xs text-[var(--muted)]">{`${TUNING_LIMITS.company_cap[0]}–${TUNING_LIMITS.company_cap[1]}. The rest wait for the next day.`}</span>
+            </label>
+            <div className="space-y-2 text-sm">
+              <label className="flex items-start gap-2">
+                <input type="checkbox" name="mine_first" defaultChecked={tune.mine_first} className="mt-1" />
+                <span>Jobs I queue myself go first <span className="block text-xs text-[var(--muted)]">Apply button, “Apply to all”, chat</span></span>
+              </label>
+              <label className="flex items-start gap-2">
+                <input type="checkbox" name="focus_first" defaultChecked={tune.focus_first} className="mt-1" />
+                <span>My focus roles go before everything <span className="block text-xs text-[var(--muted)]">Set on <Link href="/profile#roles" className="text-[var(--accent)] hover:underline">Profile</Link> or by telling the chat “go apply to … jobs”</span></span>
+              </label>
+            </div>
           </div>
         </Card>
         <Card>
@@ -78,13 +119,17 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
         <span id="inbox" className="block scroll-mt-6" />
         <h2 className="mb-1 font-semibold">Connect your Gmail (free)</h2>
         <p className="mb-4 text-sm text-[var(--muted)]">
-          Every run, the agent reads recent emails (read-only) and moves applications to “Under consideration”, “Interview”, “Offer” or
-          “Rejected”. While applying it also reads the <b>verification codes</b> sites email you, so it can finish those applications. It never
-          sends, deletes or marks mail as read.
+          Every run, the agent reads recent emails and moves applications to “Under consideration”, “Interview”, “Offer” or “Rejected”.
+          While applying it also reads the <b>verification codes</b> sites email you, so it can finish those applications. If you allow
+          sending, it emails <b>you</b> a short daily summary — it never emails anyone else, and never deletes or marks mail as read.
         </p>
         {inboxMsg && (
           <p className={`mb-3 rounded-lg p-2 text-sm ${inboxMsg === "ok" ? "bg-emerald-900/30 text-emerald-300" : "bg-red-900/30 text-red-300"}`}>
-            {inboxMsg === "ok" ? "Connected — the agent can now read your confirmation emails and codes." : inboxMsg}
+            {inboxMsg === "ok"
+              ? "Connected — the agent can read your confirmation emails and codes, and send you the daily summary."
+              : inboxMsg === "ok-nosend"
+                ? "Connected for reading — codes and replies work. The daily summary email is off because sending wasn’t allowed; connect again and tick “Send email on your behalf” if you want it."
+                : inboxMsg}
           </p>
         )}
         {p?.inbox_email && p?.job_email && p.inbox_email.toLowerCase() !== p.job_email.toLowerCase() && (
@@ -98,6 +143,23 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
               Connected{p.inbox_host === GMAIL_OAUTH_HOST ? " with Google" : " with an app password"}: <b>{p.inbox_email}</b>
               {p.inbox_last_scan_at ? ` · last checked ${t.dateTime(p.inbox_last_scan_at)}` : " · first check on the next agent run"}
             </p>
+            {p.inbox_host === GMAIL_OAUTH_HOST && (
+              <p className="text-xs text-[var(--muted)]">
+                Reading replies and codes: <span className="text-emerald-400">on</span> · Daily summary email:{" "}
+                {canSend === false ? (
+                  <>
+                    <span className="text-amber-300">off — Google didn’t allow sending</span>.{" "}
+                    <a href="/api/google/connect" className="text-[var(--accent)] hover:underline">
+                      Connect again and tick “Send email”
+                    </a>
+                  </>
+                ) : canSend ? (
+                  <span className="text-emerald-400">on</span>
+                ) : (
+                  <span>checked on the next run</span>
+                )}
+              </p>
+            )}
             <form action={disconnectInbox}>
               <button className={buttonCls("secondary", "sm")}>Disconnect inbox</button>
             </form>
@@ -159,6 +221,16 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
             </details>
           </div>
         )}
+      </Card>
+
+      <Card className="mt-8">
+        <h2 className="mb-1 font-semibold">Portal logins</h2>
+        <p className="text-sm text-[var(--muted)]">
+          Sites like Workday need an account. The agent creates one login per company site and keeps the password encrypted.{" "}
+          <Link href="/accounts" className="text-[var(--accent)] hover:underline">
+            See your portal logins →
+          </Link>
+        </p>
       </Card>
     </div>
   );

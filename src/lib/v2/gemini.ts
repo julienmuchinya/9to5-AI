@@ -234,9 +234,10 @@ export function toChatMessages(contents: GeminiContent[], system?: string): Chat
  * is configured, the same conversation goes to Groq in OpenAI format. Returns Gemini-shaped parts.
  */
 /** One chat turn through the backup (Groq / OpenRouter) models, in Gemini's part format. */
-async function backupGenerate(db: SupabaseClient, opts: { contents: GeminiContent[]; system?: string; tools?: GeminiTool[]; userId?: string }): Promise<{ parts: GeminiPart[]; text: string; via: "backup" }> {
+async function backupGenerate(db: SupabaseClient, opts: { contents: GeminiContent[]; system?: string; tools?: GeminiTool[]; userId?: string; deadline?: number }): Promise<{ parts: GeminiPart[]; text: string; via: "backup" }> {
   const msg: ChatMessage = await fallbackChat(db, toChatMessages(opts.contents, opts.system), {
     userId: opts.userId,
+    deadline: opts.deadline,
     maxTokens: 1200,
     tools: opts.tools?.map((t) => ({ type: "function" as const, function: { name: t.name, description: t.description, parameters: t.parameters } })),
   });
@@ -258,10 +259,31 @@ async function backupGenerate(db: SupabaseClient, opts: { contents: GeminiConten
  * A chat turn with tools. Gemini first, backup on quota/outage — or, with `prefer: "backup"`, the fast backup
  * first (the chat page: Gemini's free tier is paced to ~6 s between calls, so a 4-tool reply took over a minute).
  */
+/**
+ * Gemini's thinking models reject earlier tool calls that carry no thought signature — the case when the
+ * backup AI made them and Gemini takes over mid-reply (it answered 400 and the chat failed). Such calls and
+ * their results are passed as plain text instead.
+ */
+export function forGemini(contents: GeminiContent[]): GeminiContent[] {
+  if (!contents.some((c) => c.parts.some((p) => p.functionCall && !p.thoughtSignature))) return contents;
+  return contents.map((c) => ({
+    role: c.role,
+    parts: c.parts.map((p) =>
+      p.functionCall
+        ? { text: `(called ${p.functionCall.name} ${JSON.stringify(p.functionCall.args ?? {})})` }
+        : p.functionResponse
+          ? { text: `(result of ${p.functionResponse.name}: ${JSON.stringify(p.functionResponse.response).slice(0, 6000)})` }
+          : p
+    ),
+  }));
+}
+
 export async function chatGenerate(
   db: SupabaseClient,
-  opts: { contents: GeminiContent[]; system?: string; tools?: GeminiTool[]; userId?: string; prefer?: "gemini" | "backup" }
+  opts: { contents: GeminiContent[]; system?: string; tools?: GeminiTool[]; userId?: string; prefer?: "gemini" | "backup"; deadline?: number }
 ): Promise<{ parts: GeminiPart[]; text: string; via: "gemini" | "backup" }> {
+  // Gemini is paced (~6 s between calls) and can be slow: skip it when the caller is out of time.
+  const geminiTime = () => !opts.deadline || opts.deadline - Date.now() > 15_000;
   if (opts.prefer === "backup" && fallbackConfigured()) {
     try {
       return await backupGenerate(db, opts);
@@ -269,8 +291,9 @@ export async function chatGenerate(
       // the backup is out of quota or down: Gemini below
     }
   }
+  if (!geminiTime()) throw new Error("AI is busy right now (out of time for this reply)");
   try {
-    return { ...(await geminiGenerate(db, opts)), via: "gemini" };
+    return { ...(await geminiGenerate(db, { ...opts, contents: forGemini(opts.contents) })), via: "gemini" };
   } catch (e) {
     const quotaOrOutage = e instanceof FreeTierLimitError || /overloaded|network/i.test((e as Error).message);
     if (!quotaOrOutage || !fallbackConfigured() || opts.prefer === "backup") throw e;

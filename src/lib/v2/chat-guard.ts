@@ -1,7 +1,8 @@
 /** What the latest message must mention before a tool that changes something may run. */
 const CHANGE_INTENT: Record<string, RegExp> = {
   set_autopilot: /\b(auto.?submit|cap|limit|per day|a day|daily|pause|resume|unpause|stop|turn (it )?(on|off)|enable|disable|fit|threshold|setting)/i,
-  update_preferences: /\b(prefer|location|remote|role|salary|pay|keyword|exclude|level|intern|new grad|relocat|compan|city|state)/i,
+  // "jobs in the oil industry", "the mineral sector", "nursing jobs", "$30 per hour"…
+  update_preferences: /\b(prefer|location|remote|role|salary|pay|hour|per year|\$\d|keyword|exclude|level|intern|new grad|entry|mid|senior|relocat|compan|city|state|industr|sector|field|title|position|jobs? (in|as|like)|focus|priorit|target|kind of jobs?|type of jobs?)/i,
   queue_applications: /\b(apply|queue|submit|send)/i,
   set_focus: /\b(focus|priorit|look for|search|find|apply|go after|target|instead|switch|clear|stop)/i,
   run_agent_now: /\b(run|start|go ahead|kick|launch|apply|search|look (for|into)|find|go after|hunt)\b/i,

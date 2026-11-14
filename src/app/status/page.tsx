@@ -120,7 +120,15 @@ export default async function StatusPage({ searchParams }: { searchParams: Promi
 
   return (
     <div className="max-w-4xl">
-      <PageHeader title="System status" description="What’s working, what isn’t, and how to fix it. Checked live each time you open this page." />
+      <PageHeader
+        title="System status"
+        description="What’s working, what isn’t, and how to fix it. Checked live each time you open this page."
+        action={
+          <Link href="/usage" className="text-sm text-[var(--accent)] hover:underline">
+            Free-tier usage →
+          </Link>
+        }
+      />
       <Card className="mb-6">
         <p className="text-sm">
           {fails === 0 && warns === 0 ? "✅ Everything is working." : `${fails ? `❌ ${fails} problem${fails > 1 ? "s" : ""}` : ""}${fails && warns ? " · " : ""}${warns ? `⚠️ ${warns} thing${warns > 1 ? "s" : ""} to look at` : ""}`}

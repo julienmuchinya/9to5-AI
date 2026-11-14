@@ -1,4 +1,6 @@
 name: 9to5 AI Agent
+# "Your run" = started for one person (Run now / chat); the app tells the two lanes apart by this name.
+run-name: ${{ github.event_name == 'workflow_dispatch' && inputs.only_user != '' && 'Your run' || 'Scheduled run' }}
 
 on:
   schedule:
@@ -28,8 +30,11 @@ permissions:
   contents: read
   actions: write
 
+# Two lanes: the schedule (and its follow-ups) in one, each person's own "Run now" / chat runs in another,
+# so asking the agent for something never waits behind — or stops — a 2.5-hour scheduled run.
+# Both lanes claim each job before applying (applications.applying_until), so they never send the same one.
 concurrency:
-  group: 9to5-agent
+  group: 9to5-agent-${{ github.event_name == 'workflow_dispatch' && inputs.only_user || 'auto' }}
   cancel-in-progress: false
 
 jobs:

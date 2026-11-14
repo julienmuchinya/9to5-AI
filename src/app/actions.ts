@@ -6,6 +6,8 @@ import { requireUser } from "@/lib/v2/session";
 import { APP_QUESTIONS, customStore, findSimilarAnswer, type CustomAnswers, type PendingQuestion } from "@/lib/v2/app-questions";
 import { DEFAULT_DAILY_CAP, DEFAULT_MIN_FIT, MAX_DAILY_APPLY_CAP } from "@/lib/v2/priority";
 import { agentCanSubmit } from "@/lib/v2/verify";
+import { readTuning } from "@/lib/v2/tuning";
+import { ROLE_CATALOG } from "@/lib/v2/role-catalog";
 
 const list = (v: FormDataEntryValue | null) =>
   String(v ?? "")
@@ -29,7 +31,9 @@ export async function saveProfile(form: FormData) {
   }
   // Titles ticked under "More titles you could apply to" join the target roles.
   const roles = list(form.get("target_roles"));
-  for (const r of form.getAll("add_roles").map(String)) if (!roles.some((x) => x.toLowerCase() === r.toLowerCase())) roles.push(r);
+  // A whole field ticked ("Healthcare — all") adds every title in it.
+  const fromFields = form.getAll("add_fields").flatMap((f) => ROLE_CATALOG.find((g) => g.field === String(f))?.roles ?? []);
+  for (const r of [...form.getAll("add_roles").map(String), ...fromFields]) if (!roles.some((x) => x.toLowerCase() === r.toLowerCase())) roles.push(r);
   const row = {
       application_answers: answers,
       id: user.id,
@@ -68,18 +72,26 @@ export async function saveProfile(form: FormData) {
 
 export async function saveAutopilot(form: FormData) {
   const { supabase, user } = await requireUser();
-  const { error } = await supabase
-    .from("autopilot_settings")
-    .upsert({
-      user_id: user.id,
-      auto_submit_enabled: form.get("auto_submit_enabled") === "on",
-      paused: form.get("paused") === "on",
-      emergency_stop: false,
-      mock_mode: false,
-      daily_apply_cap: Math.max(0, Math.min(MAX_DAILY_APPLY_CAP, Number(form.get("daily_apply_cap") || DEFAULT_DAILY_CAP))),
-      min_fit_score: Math.max(40, Math.min(95, Number(form.get("min_fit_score") || DEFAULT_MIN_FIT))),
-      updated_at: new Date().toISOString(),
-    }, { onConflict: "user_id" });
+  const row = {
+    user_id: user.id,
+    auto_submit_enabled: form.get("auto_submit_enabled") === "on",
+    paused: form.get("paused") === "on",
+    emergency_stop: false,
+    mock_mode: false,
+    daily_apply_cap: Math.max(0, Math.min(MAX_DAILY_APPLY_CAP, Number(form.get("daily_apply_cap") || DEFAULT_DAILY_CAP))),
+    min_fit_score: Math.max(40, Math.min(95, Number(form.get("min_fit_score") || DEFAULT_MIN_FIT))),
+    updated_at: new Date().toISOString(),
+  };
+  // How the agent picks jobs (migration 010). readTuning clamps every value to its allowed range.
+  const tuning = readTuning({
+    max_age_days: form.get("max_age_days"),
+    company_cap: form.get("company_cap"),
+    order: form.get("order"),
+    focus_first: form.get("focus_first") === "on",
+    mine_first: form.get("mine_first") === "on",
+  });
+  let { error } = await supabase.from("autopilot_settings").upsert({ ...row, tuning }, { onConflict: "user_id" });
+  if (error && (error.code === "42703" || error.code === "PGRST204" || /tuning/.test(error.message))) ({ error } = await supabase.from("autopilot_settings").upsert(row, { onConflict: "user_id" }));
   if (error) throw new Error(`Couldn’t save autopilot settings: ${error.message}`);
   revalidatePath("/settings");
   revalidatePath("/dashboard");

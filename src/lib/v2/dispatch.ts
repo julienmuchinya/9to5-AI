@@ -39,7 +39,12 @@ export interface MachineStatus {
   nextScheduled: string;
   /** GitHub often starts scheduled runs late or skips them; this says so honestly. */
   scheduleNote: string;
+  /** The scheduled lane, which runs alongside your own runs (state above = your own lane). */
+  scheduled: { state: MachineState; since: string | null };
 }
+
+/** Matches run-name in .github/workflows/daily-agent.yml. */
+export const OWN_RUN_TITLE = "Your run";
 
 /** The agent machine's real state, from GitHub Actions (falls back to "idle" without a token). */
 export async function machineStatus(): Promise<MachineStatus> {
@@ -52,23 +57,32 @@ export async function machineStatus(): Promise<MachineStatus> {
     last: null,
     nextScheduled: nextScheduledRun().toISOString(),
     scheduleNote: "GitHub starts scheduled runs when it has capacity — often up to a few hours late on the free plan.",
+    scheduled: { state: "idle", since: null },
   };
   if (!token) return base;
   try {
-    const res = await fetch(`https://api.github.com/repos/${repo}/actions/workflows/daily-agent.yml/runs?per_page=6`, {
+    const res = await fetch(`https://api.github.com/repos/${repo}/actions/workflows/daily-agent.yml/runs?per_page=12`, {
       headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json" },
       cache: "no-store",
     });
     if (!res.ok) return base;
-    const runs = ((await res.json()).workflow_runs ?? []) as { status: string; conclusion: string | null; event: string; created_at: string; run_started_at?: string; updated_at: string }[];
-    const live = runs.find((r) => r.status === "in_progress") ?? runs.find((r) => ["queued", "waiting", "pending", "requested"].includes(r.status));
+    type Run = { status: string; conclusion: string | null; event: string; display_title?: string; created_at: string; run_started_at?: string; updated_at: string };
+    const runs = ((await res.json()).workflow_runs ?? []) as Run[];
+    // Two lanes (see the workflow's concurrency): your own runs never wait for, or block on, the schedule.
+    const own = runs.filter((r) => r.display_title === OWN_RUN_TITLE);
+    const sched = runs.filter((r) => r.display_title !== OWN_RUN_TITLE);
+    const liveOf = (list: Run[]) => list.find((r) => r.status === "in_progress") ?? list.find((r) => ["queued", "waiting", "pending", "requested"].includes(r.status));
+    const stateOf = (r: Run | undefined): MachineState => (r ? (r.status === "in_progress" ? "running" : "queued") : "idle");
+    const live = liveOf(own);
+    const liveSched = liveOf(sched);
     const done = runs.find((r) => r.status === "completed");
     return {
       ...base,
-      state: live ? (live.status === "in_progress" ? "running" : "queued") : "idle",
+      state: stateOf(live),
       since: live ? (live.run_started_at ?? live.created_at) : null,
-      manual: live?.event === "workflow_dispatch",
-      last: done ? { at: done.run_started_at ?? done.created_at, endedAt: done.updated_at, ok: done.conclusion === "success", manual: done.event === "workflow_dispatch" } : null,
+      manual: Boolean(live),
+      last: done ? { at: done.run_started_at ?? done.created_at, endedAt: done.updated_at, ok: done.conclusion === "success", manual: done.display_title === OWN_RUN_TITLE } : null,
+      scheduled: { state: stateOf(liveSched), since: liveSched ? (liveSched.run_started_at ?? liveSched.created_at) : null },
     };
   } catch {
     return base;

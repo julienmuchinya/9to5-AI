@@ -62,7 +62,7 @@ export class GmailAuthError extends Error {}
 /** Refresh token → short-lived access token. */
 export async function gmailAccessToken(refreshToken: string): Promise<string> {
   const t = await tokenRequest({ refresh_token: refreshToken, grant_type: "refresh_token" });
-  if (t.error === "invalid_grant") throw new GmailAuthError("Google access expired or was removed — click “Connect with Google” again on the Autopilot page.");
+  if (t.error === "invalid_grant") throw new GmailAuthError("Google access expired or was removed — click “Connect with Google” again on the Settings page.");
   if (t.error || !t.access_token) throw new Error(`Google token error: ${t.error_description || t.error}`);
   return t.access_token;
 }
@@ -73,7 +73,7 @@ export class GmailRateLimitError extends Error {}
 async function gmailGet<T>(token: string, path: string): Promise<T> {
   for (let attempt = 0; ; attempt++) {
     const res = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/${path}`, { headers: { Authorization: `Bearer ${token}` } });
-    if (res.status === 401) throw new GmailAuthError("Google access expired — connect with Google again on the Autopilot page.");
+    if (res.status === 401) throw new GmailAuthError("Google access expired — connect with Google again on the Settings page.");
     if (res.ok) return (await res.json()) as T;
     const body = await res.text();
     const limited = res.status === 429 || (res.status === 403 && /quota|rate ?limit|userRateLimitExceeded|rateLimitExceeded/i.test(body));
@@ -158,6 +158,6 @@ export async function gmailSend(token: string, msg: { to: string; subject: strin
   if (res.ok) return;
   const body = (await res.text()).slice(0, 200);
   if (res.status === 403 && /insufficient|scope|permission/i.test(body))
-    throw new GmailScopeError("Gmail didn't allow sending — click “Connect with Google” again on the Autopilot page and allow sending email.");
+    throw new GmailScopeError("Gmail didn't allow sending — click “Connect with Google” again on the Settings page and allow sending email.");
   throw new Error(`Gmail send ${res.status}: ${body}`);
 }
