@@ -4,6 +4,8 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { APP_NAME } from "@/lib/constants";
 import { inputCls } from "@/components/security-questions";
+import { PasswordInput } from "@/components/password-input";
+import { digitsOnly } from "@/lib/site";
 import { getRecoveryQuestions, resetWithAnswers, resetWithCode, sendResetEmail } from "../auth-actions";
 
 type Step = "email" | "choose" | "questions" | "code" | "done";
@@ -36,17 +38,25 @@ export default function ForgotPage() {
     }
   }
   const pwMismatch = pw2.length > 0 && pw !== pw2;
+  const pwWeak = pw.length > 0 && !(pw.length >= 8 && /[a-zA-Z]/.test(pw) && /[0-9]/.test(pw));
   const newPasswordFields = (
     <>
       <label className="block text-sm">
         New password
-        <input className={`${inputCls} mt-1`} type="password" minLength={8} value={pw} onChange={(e) => setPw(e.target.value)} required autoComplete="new-password" />
+        <PasswordInput className={inputCls} minLength={8} value={pw} onChange={(e) => setPw(e.target.value)} required autoComplete="new-password" aria-describedby="pw-rules" />
+        <span id="pw-rules" className={`mt-1 block text-xs ${pwWeak ? "text-amber-300" : "text-[var(--muted)]"}`}>
+          8+ characters with at least one letter and one number.
+        </span>
       </label>
       <label className="block text-sm">
         Repeat new password
-        <input className={`${inputCls} mt-1`} type="password" minLength={8} value={pw2} onChange={(e) => setPw2(e.target.value)} required autoComplete="new-password" />
+        <PasswordInput className={inputCls} minLength={8} value={pw2} onChange={(e) => setPw2(e.target.value)} required autoComplete="new-password" />
       </label>
-      {pwMismatch && <p className="text-sm text-red-400">Passwords don’t match.</p>}
+      {pwMismatch && (
+        <p role="alert" className="text-sm text-red-400">
+          Passwords don’t match yet — the Reset button turns on when both fields are the same.
+        </p>
+      )}
     </>
   );
   const btn = "w-full rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-medium text-white disabled:opacity-50";
@@ -167,7 +177,7 @@ export default function ForgotPage() {
             </p>
             <label className="block text-sm">
               6-digit code from the email
-              <input className={`${inputCls} mt-1 tracking-widest`} inputMode="numeric" pattern="[0-9]{6,8}" maxLength={8} placeholder="123456" value={code} onChange={(e) => setCode(e.target.value.replace(/D/g, ""))} required autoComplete="one-time-code" />
+              <input className={`${inputCls} mt-1 tracking-widest`} inputMode="numeric" pattern="[0-9]{6,8}" maxLength={8} placeholder="123456" value={code} onChange={(e) => setCode(digitsOnly(e.target.value))} required autoComplete="one-time-code" />
             </label>
             {newPasswordFields}
             <button disabled={busy || pwMismatch} className={btn}>
@@ -176,7 +186,7 @@ export default function ForgotPage() {
           </form>
         )}
 
-        {msg && <p className={`text-sm ${msg.ok ? "text-emerald-400" : "text-red-400"}`}>{msg.message}</p>}
+        {msg && <p role={msg.ok ? "status" : "alert"} className={`text-sm ${msg.ok ? "text-emerald-400" : "text-red-400"}`}>{msg.message}</p>}
         {step === "done" && (
           <Link href="/login" className={`${btn} block text-center`}>
             Go to sign in

@@ -89,7 +89,7 @@ export default async function ResumesPage() {
                   <span>Response rate</span>
                   <span>{s?.sent ? pct(s.rate) : "—"}</span>
                 </div>
-                <div className="mt-1 h-1.5 rounded-full bg-white/5">
+                <div className="mt-1 h-1.5 rounded-full bg-[var(--hover)]">
                   <div className="h-1.5 rounded-full bg-gradient-to-r from-[var(--accent)] to-[var(--accent-2)]" style={{ width: s?.sent ? pct(s.rate) : "0%" }} />
                 </div>
               </div>

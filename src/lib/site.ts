@@ -19,6 +19,9 @@ export function safeNext(next: string | null | undefined, fallback = "/dashboard
   return next;
 }
 
+/** Keep only the digits of a pasted/typed one-time code ("123 456" → "123456"). */
+export const digitsOnly = (s: string): string => s.replace(/\D/g, "");
+
 /** Plain-English versions of Supabase auth errors. */
 export function friendlyAuthError(message: string | null | undefined, code?: string | null): string {
   const m = `${code ?? ""} ${message ?? ""}`.toLowerCase();

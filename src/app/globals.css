@@ -1,33 +1,98 @@
 @import "tailwindcss";
 
+/* Dark-mode utilities follow the chosen theme (data-theme), not only the OS setting. */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+/*
+ * Semantic design tokens. Light is the base; dark overrides below.
+ * Components use these variables (bg-[var(--card)] …) instead of fixed colors.
+ */
 :root {
-  --background: #0b0d14;
-  --background-2: #10131d;
-  --foreground: #eceef6;
-  --card: #141824;
-  --card-2: #1a1f2e;
-  --border: #252b3b;
-  --border-strong: #343c52;
-  --accent: #7c6cff;
-  --accent-hover: #6a58ff;
-  --accent-2: #22d3ee;
-  --accent-soft: rgba(124, 108, 255, 0.14);
-  --success: #34d399;
-  --warning: #fbbf24;
-  --danger: #f87171;
-  --muted: #8b93a7;
-  --shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 10px 30px -12px rgba(0, 0, 0, 0.55);
+  --background: #f7f8fc;
+  --background-2: #fbfcff;
+  --foreground: #182238;
+  --card: #ffffff;
+  --card-2: #fbfcff;
+  --border: #e9edf5;
+  --border-strong: #d6dceb;
+  --accent: #6157ee;
+  --accent-hover: #5044d9;
+  --accent-2: #22b8d6;
+  --accent-soft: rgba(97, 87, 238, 0.1);
+  --accent-text: #4a3fd6;
+  --hover: rgba(24, 34, 56, 0.05);
+  --success: #159873;
+  --warning: #ca872b;
+  --danger: #d26068;
+  --muted: #5e6980;
+  --shadow: 0 1px 2px rgba(24, 34, 56, 0.04), 0 8px 24px -16px rgba(24, 34, 56, 0.18);
   --radius: 16px;
+  --glow-1: rgba(97, 87, 238, 0.07);
+  --glow-2: rgba(34, 184, 214, 0.05);
+  color-scheme: light;
+
+  /* Status text/background shades were picked for a dark canvas. On light, map the pale
+     text shades to darker ones and the deep "tinted panel" shades to pale ones. */
+  --color-emerald-200: #0b6e52;
+  --color-emerald-300: #0f7d5e;
+  --color-emerald-400: #159873;
+  --color-emerald-900: #d6f3e8;
+  --color-amber-200: #8a5a12;
+  --color-amber-300: #9a6514;
+  --color-amber-400: #b8781f;
+  --color-amber-900: #fbecd2;
+  --color-red-200: #9e2f37;
+  --color-red-300: #b23a43;
+  --color-red-400: #c4505a;
+  --color-red-900: #fbe0e2;
+  --color-cyan-300: #0e7490;
+  --color-cyan-400: #0891b2;
 }
 
-html {
+[data-theme="dark"] {
+  --background: #101422;
+  --background-2: #141a2a;
+  --foreground: #eff2ff;
+  --card: #191f30;
+  --card-2: #1d2538;
+  --border: #30384a;
+  --border-strong: #404a60;
+  --accent: #8f83ff;
+  --accent-hover: #7c70ee;
+  --accent-2: #22d3ee;
+  --accent-soft: rgba(166, 155, 255, 0.14);
+  --accent-text: #c3baff;
+  --hover: rgba(255, 255, 255, 0.05);
+  --success: #64d0ac;
+  --warning: #ffbf69;
+  --danger: #ff8a91;
+  --muted: #9da9bf;
+  --shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 10px 30px -12px rgba(0, 0, 0, 0.55);
+  --glow-1: rgba(124, 108, 255, 0.12);
+  --glow-2: rgba(34, 211, 238, 0.06);
   color-scheme: dark;
+
+  /* Restore Tailwind's own shades. */
+  --color-emerald-200: oklch(90.5% 0.093 164.15);
+  --color-emerald-300: oklch(84.5% 0.143 164.978);
+  --color-emerald-400: oklch(76.5% 0.177 163.223);
+  --color-emerald-900: oklch(37.8% 0.077 168.94);
+  --color-amber-200: oklch(92.4% 0.12 95.746);
+  --color-amber-300: oklch(87.9% 0.169 91.605);
+  --color-amber-400: oklch(82.8% 0.189 84.429);
+  --color-amber-900: oklch(41.4% 0.112 45.904);
+  --color-red-200: oklch(88.5% 0.062 18.334);
+  --color-red-300: oklch(80.8% 0.114 19.571);
+  --color-red-400: oklch(70.4% 0.191 22.216);
+  --color-red-900: oklch(39.6% 0.141 25.723);
+  --color-cyan-300: oklch(86.5% 0.127 207.078);
+  --color-cyan-400: oklch(78.9% 0.154 211.53);
 }
 
 body {
   background:
-    radial-gradient(1200px 600px at 85% -10%, rgba(124, 108, 255, 0.12), transparent 60%),
-    radial-gradient(900px 500px at -10% 110%, rgba(34, 211, 238, 0.06), transparent 60%),
+    radial-gradient(1200px 600px at 85% -10%, var(--glow-1), transparent 60%),
+    radial-gradient(900px 500px at -10% 110%, var(--glow-2), transparent 60%),
     var(--background);
   background-attachment: fixed;
   color: var(--foreground);
@@ -36,15 +101,9 @@ body {
 }
 
 ::selection {
-  background: rgba(124, 108, 255, 0.35);
+  background: color-mix(in srgb, var(--accent) 30%, transparent);
 }
 
-/* Form controls follow the dark theme (native selects were white on Windows). */
-select,
-input,
-textarea {
-  color-scheme: dark;
-}
 select option {
   background: var(--card);
   color: var(--foreground);
@@ -83,9 +142,12 @@ details > summary::before {
 details[open] > summary::before {
   transform: rotate(90deg);
 }
+details.no-marker > summary::before {
+  content: none;
+}
 
 .text-gradient {
-  background: linear-gradient(90deg, #a79bff, var(--accent-2));
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
@@ -103,4 +165,37 @@ details[open] > summary::before {
 }
 .animate-fade-up {
   animation: fade-up 0.35s ease both;
+}
+
+@keyframes slide-in {
+  from {
+    transform: translateX(24px);
+    opacity: 0;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+.animate-slide-in {
+  animation: slide-in 0.2s ease both;
+}
+
+/* Hide horizontal-scroll chip rows' scrollbar on touch screens. */
+.no-scrollbar {
+  scrollbar-width: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

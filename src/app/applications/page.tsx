@@ -1,7 +1,9 @@
 import Link from "next/link";
 import { timeFmt } from "@/lib/tz";
 import { requireUser, serviceClient } from "@/lib/v2/session";
-import { Badge, Card, EmptyState, Notice, PageHeader, StatButton, buttonCls } from "@/components/ui";
+import { Badge, Button, Card, CompanyMark, EmptyState, Notice, PageHeader, StatCard, buttonCls } from "@/components/ui";
+import { Icon } from "@/components/sidebar";
+import { RouteDrawer } from "@/components/drawer";
 import { customStore, findSimilarAnswer, questionSimilarity, type CustomAnswers, type PendingQuestion } from "@/lib/v2/app-questions";
 import { PendingQuestions, type AskedQuestion } from "./pending-questions";
 import { BulkBar } from "./bulk-bar";
@@ -16,32 +18,21 @@ import { RevealPassword } from "../accounts/reveal";
 import { markApplied, retryApplication, setApplicationStatus } from "../actions";
 import { PROGRESSED, SENT, countPipeline, isSent, statusRows } from "@/lib/v2/pipeline";
 import { NEEDS_LABEL, needsKind, type NeedsKind } from "@/lib/v2/needs";
+import { funnel, pct, stateLabel } from "@/lib/v2/overview";
 
 export const dynamic = "force-dynamic";
 
-type Variant = "success" | "warning" | "danger" | "default" | "accent" | "info";
-const VARIANT: Record<string, Variant> = {
-  queued: "accent",
-  submitted: "info",
-  received: "info",
-  under_review: "warning",
-  interview: "success",
-  offer: "success",
-  rejected: "danger",
-  needs_user: "warning",
-  failed: "danger",
-  closed: "default",
-};
 const PAGE = 24;
-/** Which statuses each filter button shows. "sent" also includes anything with a submitted date. */
+/** Which statuses each filter tab shows. "sent" also includes anything with a submitted date. */
 const FILTER: Record<string, string[] | null> = {
+  needs: ["needs_user"],
   queued: ["queued"],
   sent: [...SENT],
-  needs: ["needs_user"],
   review: ["received", "under_review"],
   screening: ["screening"],
   interview: ["interview", "offer"],
   rejected: ["rejected"],
+  failed: ["failed", "closed"],
   all: null,
 };
 
@@ -61,24 +52,28 @@ type Row = {
   status: string;
   error: string | null;
   apply_url: string | null;
-  answers?: Record<string, string> | null;
   submitted_at: string | null;
   created_at: string;
+  status_updated_at: string | null;
   requested_by: string;
   resume_focus: string | null;
   attempts: number | null;
+  answers?: Record<string, string> | null;
   pending_questions?: PendingQuestion[] | null;
   jobs: { title: string; company_name: string; url: string; job_postings: { posted_at: string | null } | null } | null;
 };
+type Event = { application_id: string; kind: string; source: string; detail: string | null; created_at: string };
 
-export default async function ApplicationsPage({ searchParams }: { searchParams: Promise<{ tab?: string; msg?: string; sort?: string; page?: string; why?: string }> }) {
+const ROW_SELECT = "id,status,error,apply_url,submitted_at,created_at,status_updated_at,requested_by,resume_focus,attempts,jobs(title,company_name,url,job_postings(posted_at))";
+
+export default async function ApplicationsPage({ searchParams }: { searchParams: Promise<{ tab?: string; msg?: string; sort?: string; page?: string; why?: string; app?: string }> }) {
   const { supabase, user } = await requireUser();
   const t = await timeFmt();
   const sp = await searchParams;
   const sort = sp.sort ?? "newest";
   const page = Math.max(1, Number(sp.page) || 1);
 
-  // Counts come from every application (3 small columns), so these buttons match the dashboard exactly.
+  // Counts come from every application (3 small columns), so these numbers match the Overview exactly.
   const [all, { data: lastRun }, { data: prof }, { data: needRows }, { data: logins }, ai] = await Promise.all([
     statusRows(supabase, user.id),
     supabase.from("agent_runs").select("started_at,ended_at,status,summary").eq("user_id", user.id).order("started_at", { ascending: false }).limit(1).maybeSingle(),
@@ -88,6 +83,7 @@ export default async function ApplicationsPage({ searchParams }: { searchParams:
     aiStatus(serviceClient()),
   ]);
   const c = countPipeline(all);
+  const f = funnel(all);
   const tab = sp.tab && sp.tab in FILTER ? sp.tab : c.needs > 0 ? "needs" : "all";
   const why = (sp.why ?? "") as NeedsKind | "";
 
@@ -111,16 +107,10 @@ export default async function ApplicationsPage({ searchParams }: { searchParams:
   }
   const questions = [...asked.values()].sort((a, b) => b.companies.length - a.companies.length);
 
-  // Only the cards on screen are loaded (with answers/timelines), not the whole history.
+  // Only the rows on screen are loaded.
   const statuses = FILTER[tab];
   const order = sort === "oldest" ? { col: "created_at", asc: true } : sort === "status" ? { col: "status", asc: true } : { col: "created_at", asc: false };
-  let q = supabase
-    .from("applications")
-    .select(
-      `id,status,error,apply_url,submitted_at,created_at,requested_by,resume_focus,attempts,jobs(title,company_name,url,job_postings(posted_at))${tab === "needs" ? ",answers,pending_questions" : ""}`,
-      { count: "exact" }
-    )
-    .eq("user_id", user.id);
+  let q = supabase.from("applications").select(ROW_SELECT, { count: "exact" }).eq("user_id", user.id);
   if (tab === "sent") q = q.or(`submitted_at.not.is.null,status.in.(${SENT.join(",")})`);
   else if (statuses) q = q.in("status", statuses);
   if (tab === "needs" && why) {
@@ -129,18 +119,28 @@ export default async function ApplicationsPage({ searchParams }: { searchParams:
   }
   q = q.order(order.col, { ascending: order.asc });
   if (order.col !== "created_at") q = q.order("created_at", { ascending: false });
-  const { data, count: filteredCount } = await q.range((page - 1) * PAGE, page * PAGE - 1);
+  const { data, count: filteredCount, error: listError } = await q.range((page - 1) * PAGE, page * PAGE - 1);
   const rows = (data ?? []) as unknown as Row[];
   if (sort === "company") rows.sort((a, b) => (a.jobs?.company_name ?? "").localeCompare(b.jobs?.company_name ?? ""));
   if (sort === "posted") rows.sort((a, b) => Date.parse(b.jobs?.job_postings?.posted_at ?? "0") - Date.parse(a.jobs?.job_postings?.posted_at ?? "0"));
   const pages = Math.max(1, Math.ceil((filteredCount ?? 0) / PAGE));
 
-  const shownIds = rows.filter((r) => !["needs_user", "queued"].includes(r.status)).map((r) => r.id);
+  // The open application (detail drawer), with its answers and full timeline.
+  const { data: openRow } = sp.app
+    ? await supabase.from("applications").select(`${ROW_SELECT},answers,pending_questions`).eq("user_id", user.id).eq("id", sp.app).maybeSingle()
+    : { data: null };
+  const open = openRow as unknown as Row | null;
+  const { data: openEvents } = open
+    ? await supabase.from("application_events").select("application_id,kind,source,detail,created_at").eq("application_id", open.id).order("created_at", { ascending: false })
+    : { data: [] as Event[] };
+
+  // Latest event per visible row, for "last activity".
+  const shownIds = rows.map((r) => r.id);
   const { data: evs } = shownIds.length
-    ? await supabase.from("application_events").select("application_id,kind,source,detail,created_at").in("application_id", shownIds).order("created_at", { ascending: false })
-    : { data: [] as { application_id: string; kind: string; source: string; detail: string | null; created_at: string }[] };
-  const events = new Map<string, { kind: string; source: string; detail: string | null; created_at: string }[]>();
-  for (const e of evs ?? []) events.set(e.application_id, [...(events.get(e.application_id) ?? []), e]);
+    ? await supabase.from("application_events").select("application_id,kind,source,detail,created_at").in("application_id", shownIds).order("created_at", { ascending: false }).limit(500)
+    : { data: [] as Event[] };
+  const latest = new Map<string, Event>();
+  for (const e of (evs ?? []) as Event[]) if (!latest.has(e.application_id)) latest.set(e.application_id, e);
   const loginByHost = new Map((logins ?? []).map((l) => [l.portal_host as string, l]));
 
   // What's working, by job type (sent applications only).
@@ -161,47 +161,101 @@ export default async function ApplicationsPage({ searchParams }: { searchParams:
   const running = lastRun?.status === "running";
   const link = (o: Record<string, string | number | undefined>) => {
     const p = new URLSearchParams();
-    const merged = { tab, sort, ...o };
-    for (const [k, v] of Object.entries(merged)) if (v !== undefined && v !== "" && !(k === "page" && Number(v) === 1)) p.set(k, String(v));
+    const merged: Record<string, string | number | undefined> = { tab, sort, why: why || undefined, page, ...o };
+    for (const [k, v] of Object.entries(merged)) if (v !== undefined && v !== "" && !(k === "page" && Number(v) === 1) && !(k === "sort" && v === "newest")) p.set(k, String(v));
     return `/applications?${p.toString()}`;
   };
+  const inProgress = c.queued + c.inReview + c.screening + all.filter((r) => r.status === "submitted").length;
+  const tabs: [string, string, number][] = [
+    ["needs", "Needs you", c.needs],
+    ["all", "All", c.total],
+    ["queued", "Queued", c.queued],
+    ["sent", "Sent", c.sent],
+    ["review", "In review", c.inReview],
+    ["screening", "Screening", c.screening],
+    ["interview", "Interviews", c.interviews],
+    ["rejected", "Rejected", c.rejected],
+    ["failed", "Failed / closed", c.failed + c.closed],
+  ];
 
   return (
     <div>
       <PageHeader
-        eyebrow="Pipeline"
-        title="Applications"
-        description="Every application, where it stands, and what’s working. Statuses update from your inbox when it’s connected."
+        eyebrow="Application pipeline"
+        title="All your applications, one view"
+        description="Track every outcome, finish what needs you, and keep interviews moving. Statuses update from your inbox when it’s connected."
         action={
           <div className="flex flex-wrap items-center gap-3">
             <AiStatus data={ai} compact when={t.dateTime} />
-            {dispatchConfigured() && <RunNowButton running={running} details />}
+            {dispatchConfigured() && <RunNowButton running={running} />}
+            <Button href="/jobs">
+              <Icon name="search" /> Find more jobs
+            </Button>
           </div>
         }
       />
 
-      <div className="mb-5 grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-8">
-        <StatButton href={link({ tab: "needs", why: undefined, page: 1 })} label="Needs you" value={c.needs} tone="warning" active={tab === "needs"} />
-        <StatButton href={link({ tab: "queued", why: undefined, page: 1 })} label="Queued" value={c.queued} active={tab === "queued"} />
-        <StatButton href={link({ tab: "sent", why: undefined, page: 1 })} label="Sent" value={c.sent} tone="info" active={tab === "sent"} />
-        <StatButton href={link({ tab: "review", why: undefined, page: 1 })} label="In review" value={c.inReview} tone="info" active={tab === "review"} />
-        <StatButton href={link({ tab: "screening", why: undefined, page: 1 })} label="Screening" value={c.screening} tone="info" active={tab === "screening"} />
-        <StatButton href={link({ tab: "interview", why: undefined, page: 1 })} label="Interviews" value={c.interviews} tone="success" active={tab === "interview"} />
-        <StatButton href={link({ tab: "rejected", why: undefined, page: 1 })} label="Rejected" value={c.rejected} tone="danger" active={tab === "rejected"} />
-        <StatButton href={link({ tab: "all", why: undefined, page: 1 })} label="All" value={c.total} active={tab === "all"} />
+      <div className="mb-6 grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-4">
+        <StatCard label="In progress" value={inProgress} sub="Queued, sent, in review or screening" icon={<Icon name="briefcase" />} />
+        <StatCard label="Needs you" value={c.needs} variant={c.needs ? "warning" : "default"} sub="Questions, sign-ins, CAPTCHAs" icon={<Icon name="clock" />} />
+        <StatCard label="Interviews" value={c.interviews} variant="success" sub="Interview or offer stage" icon={<Icon name="calendar" />} />
+        <StatCard label="Offers" value={f.offers} variant="success" sub="Recorded by you or your inbox" icon={<Icon name="check" />} />
       </div>
 
       {sp.msg && (
-        <div className="mb-4">
+        <div className="mb-4" role="status">
           <Notice tone={/couldn't/i.test(sp.msg) ? "danger" : "success"}>{sp.msg}</Notice>
         </div>
       )}
 
-      {tab === "needs" ? (
-        <>
-          <PendingQuestions questions={questions} />
-          <div className="mb-4 flex flex-wrap gap-1.5">
-            <Link href={link({ why: undefined, page: 1 })} className={`rounded-full px-3 py-1 text-xs ring-1 ring-inset ${!why ? "bg-[var(--accent-soft)] text-[#c3baff] ring-[var(--accent)]/30" : "text-[var(--muted)] ring-[var(--border)] hover:text-[var(--foreground)]"}`}>
+      {tab !== "needs" && questions.length > 0 && (
+        <div className="mb-5">
+          <Notice tone="warning">
+            {questions.length} question{questions.length === 1 ? " is" : "s are"} holding up applications.{" "}
+            <Link href="/applications?tab=needs#questions" className="font-medium underline">
+              Answer {questions.length === 1 ? "it" : "them"} once →
+            </Link>
+          </Notice>
+        </div>
+      )}
+      {tab === "needs" && <PendingQuestions questions={questions} />}
+
+      {c.queued > 0 && tab === "queued" && (
+        <Card className="mb-5 border-[var(--accent)]/30 bg-gradient-to-r from-[var(--accent-soft)] to-transparent p-4">
+          <p className="text-sm">
+            {running ? `The agent is applying right now (started ${ago(lastRun?.started_at)}).` : `${c.queued} waiting — next scheduled run ~${t.time(next, true)} (GitHub may start it late).`}{" "}
+            <span className="text-[var(--muted)]">
+              Freshest postings go first, max 10 per company per day.{lastRun && !running ? ` Last run ${ago(lastRun.started_at)} (${lastRun.status}).` : ""}
+            </span>
+          </p>
+        </Card>
+      )}
+
+      <Card className="overflow-hidden p-0!">
+        {/* Filter tabs */}
+        <div className="flex items-center gap-2 border-b border-[var(--border)] p-3 sm:p-4">
+          <nav aria-label="Filter applications" className="no-scrollbar -mx-1 flex flex-1 gap-1 overflow-x-auto px-1">
+            {tabs.map(([k, label, n]) => (
+              <Link
+                key={k}
+                href={link({ tab: k, why: undefined, page: 1, app: undefined })}
+                scroll={false}
+                aria-current={tab === k ? "page" : undefined}
+                className={`inline-flex min-h-[40px] shrink-0 items-center gap-1.5 rounded-xl px-3 text-sm transition ${
+                  tab === k ? "bg-[var(--accent-soft)] font-semibold text-[var(--accent-text)]" : "text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--foreground)]"
+                }`}
+              >
+                {label}
+                <span className={`rounded-md px-1.5 text-xs tabular-nums ${k === "needs" && n > 0 ? "bg-amber-400/15 text-amber-300" : "bg-[var(--hover)]"}`}>{n}</span>
+              </Link>
+            ))}
+          </nav>
+          <span className="hidden shrink-0 rounded-lg bg-[var(--accent-soft)] px-2 py-1 text-xs font-semibold text-[var(--accent-text)] sm:inline">{filteredCount ?? 0} shown</span>
+        </div>
+
+        {tab === "needs" && Object.keys(kindCount).length > 1 && (
+          <div className="flex flex-wrap gap-1.5 border-b border-[var(--border)] px-4 py-3">
+            <Link href={link({ why: undefined, page: 1 })} scroll={false} className={`rounded-full px-3 py-1.5 text-xs ring-1 ring-inset ${!why ? "bg-[var(--accent-soft)] text-[var(--accent-text)] ring-[var(--accent)]/30" : "text-[var(--muted)] ring-[var(--border)] hover:text-[var(--foreground)]"}`}>
               All reasons ({c.needs})
             </Link>
             {(Object.keys(NEEDS_LABEL) as NeedsKind[])
@@ -210,205 +264,107 @@ export default async function ApplicationsPage({ searchParams }: { searchParams:
                 <Link
                   key={k}
                   href={link({ why: k, page: 1 })}
+                  scroll={false}
                   title={NEEDS_LABEL[k].hint}
-                  className={`rounded-full px-3 py-1 text-xs ring-1 ring-inset ${why === k ? "bg-amber-400/10 text-amber-200 ring-amber-400/40" : "text-[var(--muted)] ring-[var(--border)] hover:text-[var(--foreground)]"}`}
+                  className={`rounded-full px-3 py-1.5 text-xs ring-1 ring-inset ${why === k ? "bg-amber-400/10 text-amber-300 ring-amber-400/40" : "text-[var(--muted)] ring-[var(--border)] hover:text-[var(--foreground)]"}`}
                 >
                   {NEEDS_LABEL[k].label} ({kindCount[k]})
                 </Link>
               ))}
+            {why && NEEDS_LABEL[why]?.hint && <p className="w-full pt-1 text-xs text-[var(--muted)]">{NEEDS_LABEL[why].hint}</p>}
           </div>
-          {why && NEEDS_LABEL[why]?.hint && <p className="-mt-2 mb-4 text-xs text-[var(--muted)]">{NEEDS_LABEL[why].hint}</p>}
-        </>
-      ) : (
-        questions.length > 0 && (
-          <div className="mb-5">
-            <Notice tone="warning">
-              {questions.length} question{questions.length === 1 ? " is" : "s are"} holding up applications.{" "}
-              <Link href="/applications?tab=needs#questions" className="font-medium underline">
-                Answer {questions.length === 1 ? "it" : "them"} once →
-              </Link>
-            </Notice>
+        )}
+
+        {rows.length > 0 && (
+          <div className="border-b border-[var(--border)] px-4 py-3">
+            <BulkBar back={link({ page, app: undefined })} sort={sort} />
           </div>
-        )
-      )}
+        )}
 
-      {c.queued > 0 && tab === "queued" && (
-        <Card className="mb-5 border-[var(--accent)]/30 bg-gradient-to-r from-[var(--accent-soft)] to-transparent p-4">
-          <p className="text-sm">
-            {running
-              ? `The agent is applying right now (started ${ago(lastRun?.started_at)}).`
-              : `${c.queued} waiting — next scheduled run ~${t.time(next, true)} (GitHub may start it late).`}{" "}
-            <span className="text-[var(--muted)]">Freshest postings go first, max 10 per company per day.{lastRun && !running ? ` Last run ${ago(lastRun.started_at)} (${lastRun.status}).` : ""}</span>
-          </p>
-        </Card>
-      )}
-
-      {byFamily.length > 0 && (tab === "sent" || tab === "all") && (
-        <details className="mb-5 rounded-2xl border border-[var(--border)] bg-[var(--card)] p-4">
-          <summary className="cursor-pointer text-sm font-semibold">
-            What’s working: response rate by job type{" "}
-            <Link href="/resumes" className="ml-2 text-xs font-normal text-[var(--accent)] hover:underline">
-              by resume →
-            </Link>
-          </summary>
-          <div className="mt-3 grid gap-x-6 gap-y-2.5 sm:grid-cols-2">
-            {byFamily.map(([k, v]) => (
-              <div key={k} className="text-sm">
-                <div className="flex justify-between gap-2">
-                  <span className="truncate">{k}</span>
-                  <span className="shrink-0 text-[var(--muted)]">
-                    {v.good}/{v.sent} moved forward · {v.rejected} rejected
-                  </span>
-                </div>
-                <div className="mt-1 h-1.5 rounded-full bg-white/5">
-                  <div className="h-1.5 rounded-full bg-gradient-to-r from-[var(--accent)] to-[var(--accent-2)]" style={{ width: `${Math.round((100 * v.good) / v.sent)}%` }} />
-                </div>
-              </div>
-            ))}
+        {listError ? (
+          <div className="p-6">
+            <EmptyState icon="!" message="Couldn’t load your applications. Refresh the page to try again." />
           </div>
-        </details>
-      )}
-
-      {c.total === 0 && <EmptyState message="No applications yet. Click Apply on a matched job, ask in Chat, or turn on auto-submit." />}
-      {c.total > 0 && rows.length === 0 && <EmptyState message="Nothing here right now." />}
-
-      {rows.length > 0 && <BulkBar back={link({ page })} sort={sort} />}
-
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-        {rows.map((r) => {
-          const timeline = events.get(r.id) ?? [];
-          const answers = readable(r.answers ?? null);
-          const login = loginByHost.get(hostOf(r.apply_url ?? r.jobs?.url));
-          const posted = ago(r.jobs?.job_postings?.posted_at);
-          const kind = r.status === "needs_user" ? kinds.get(r.id) : undefined;
-          const waiting = (r.pending_questions ?? []).filter((x) => !findSimilarAnswer(x.label, x.options ?? [], mine));
-          return (
-            <Card key={r.id} className="flex flex-col p-3.5 transition hover:border-[var(--border-strong)]">
-              <div className="flex items-start gap-2">
-                <input
-                  type="checkbox"
-                  form="bulk"
-                  name="ids"
-                  value={r.id}
-                  aria-label={`Select ${r.jobs?.title ?? "application"} at ${r.jobs?.company_name ?? ""}`}
-                  className="mt-1 h-4 w-4 shrink-0 accent-[var(--accent)]"
-                />
-                <div className="min-w-0 flex-1">
-                  <p className="line-clamp-2 text-sm font-medium leading-snug" title={r.jobs?.title}>
-                    {r.jobs?.title ?? "Job"}
-                  </p>
-                  <p className="truncate text-xs text-[var(--muted)]">{r.jobs?.company_name}</p>
-                </div>
-                <Badge variant={VARIANT[r.status] ?? "default"}>{STAGE_LABEL[r.status] === "Queued for next run" ? "Queued" : STAGE_LABEL[r.status] ?? r.status}</Badge>
-              </div>
-
-              <p className="mt-2 text-[11px] text-[var(--muted)]">
-                {r.submitted_at ? `Applied ${t.dateTime(r.submitted_at)}` : `Added ${t.date(r.created_at)}`}
-                {posted ? ` · posted ${posted}` : ""}
-                {r.requested_by === "user" ? " · by you" : ""}
-              </p>
-              {r.resume_focus && <p className="truncate text-[11px] text-[var(--muted)]">Resume: {r.resume_focus}</p>}
-              <StageTrack status={r.status} history={timeline.map((e) => e.kind)} />
-
-              {kind && <p className="mt-2 text-[11px] font-medium uppercase tracking-wide text-amber-300">{NEEDS_LABEL[kind].label}</p>}
-              {r.error && ["needs_user", "queued", "failed"].includes(r.status) && (
-                <p className={`mt-1 line-clamp-3 text-xs ${r.status === "queued" ? "text-[var(--muted)]" : "text-amber-200/90"}`} title={r.error}>
-                  {r.error}
-                  {r.status === "queued" && (r.attempts ?? 0) > 0 ? ` (try ${(r.attempts ?? 0) + 1} of 3)` : ""}
-                </p>
-              )}
-              {waiting.length > 0 && (
-                <p className="mt-1 line-clamp-2 text-xs text-[var(--muted)]">
-                  Waiting on: {waiting.map((x) => x.label).slice(0, 3).join(" · ")}{" "}
-                  <a href="#questions" className="text-[var(--accent)] hover:underline">
-                    answer ↑
-                  </a>
-                </p>
-              )}
-
-              {login && r.status === "needs_user" && (
-                <div className="mt-2 rounded-lg border border-[var(--border)] bg-[var(--background-2)] p-2 text-xs">
-                  <p className="text-[var(--muted)]">
-                    {login.portal_host} {login.account_created ? "· account created" : "· create the account with:"}
-                  </p>
-                  <p className="mt-0.5 truncate">
-                    <code className="rounded bg-white/5 px-1">{login.email_used}</code>
-                  </p>
-                  <div className="mt-0.5">
-                    <RevealPassword id={login.id} />
-                  </div>
-                </div>
-              )}
-
-              {answers.length > 0 && (
-                <details className="mt-2 text-xs">
-                  <summary className="cursor-pointer text-[var(--muted)]">Prepared answers ({answers.length})</summary>
-                  <dl className="mt-1.5 max-h-64 space-y-1.5 overflow-y-auto pr-1">
-                    {answers.slice(0, 40).map(([q2, a]) => (
-                      <div key={q2} className="rounded-md bg-[var(--background-2)] p-1.5">
-                        <dt className="text-[var(--muted)]">{q2}</dt>
-                        <dd className="mt-0.5 select-all">{String(a)}</dd>
-                      </div>
-                    ))}
-                  </dl>
-                </details>
-              )}
-
-              {!["needs_user", "queued"].includes(r.status) && (
-                <details className="mt-2 text-xs">
-                  <summary className="cursor-pointer text-[var(--muted)]">Timeline & status ({timeline.length})</summary>
-                  <ol className="mt-1.5 space-y-1 border-l border-[var(--border)] pl-2.5">
-                    {timeline.map((e, i) => (
-                      <li key={i}>
-                        <span className="text-[var(--muted)]">{t.date(e.created_at)}</span> · {STAGE_LABEL[e.kind] ?? e.kind}
-                        <span className="text-[var(--muted)]"> ({e.source === "email" ? "inbox" : e.source === "agent" ? "agent" : "you"})</span>
-                        {e.detail ? ` — ${e.detail}` : ""}
-                      </li>
-                    ))}
-                    {timeline.length === 0 && <li className="text-[var(--muted)]">No updates yet.</li>}
-                  </ol>
-                  <form action={setApplicationStatus.bind(null, r.id)} className="mt-2 flex flex-wrap gap-1.5">
-                    <select name="status" defaultValue={r.status} className="rounded-lg border border-[var(--border)] bg-[var(--background-2)] px-1.5 py-1 text-xs">
-                      {["submitted", "received", "under_review", "screening", "interview", "offer", "rejected", "withdrawn"].map((s) => (
-                        <option key={s} value={s}>
-                          {STAGE_LABEL[s]}
-                        </option>
-                      ))}
-                    </select>
-                    <input name="note" placeholder="Note" className="min-w-0 flex-1 rounded-lg border border-[var(--border)] bg-[var(--background-2)] px-2 py-1 text-xs" />
-                    <button className={buttonCls("secondary", "sm")}>Save</button>
-                  </form>
-                </details>
-              )}
-
-              <div className="mt-auto flex flex-wrap gap-1.5 pt-3">
-                {(r.apply_url || r.jobs?.url) && (
-                  <a href={r.apply_url ?? r.jobs?.url} target="_blank" rel="noopener noreferrer" className={buttonCls(r.status === "needs_user" ? "primary" : "secondary", "sm")}>
-                    {r.status === "needs_user" ? "Open ↗" : "Posting ↗"}
-                  </a>
-                )}
-                {r.status === "needs_user" && (
-                  <form action={markApplied.bind(null, r.id)}>
-                    <button className={buttonCls("secondary", "sm")}>I applied</button>
-                  </form>
-                )}
-                {["needs_user", "failed"].includes(r.status) && (
-                  <form action={retryApplication.bind(null, r.id)}>
-                    <button className={buttonCls("ghost", "sm")} title="Put it back in the queue">
-                      Retry
-                    </button>
-                  </form>
-                )}
-              </div>
-            </Card>
-          );
-        })}
-      </div>
+        ) : c.total === 0 ? (
+          <div className="p-6">
+            <EmptyState message="No applications yet. Apply to a matched job, ask in Chat, or turn on auto-submit." action={<Button href="/jobs">Find jobs</Button>} />
+          </div>
+        ) : rows.length === 0 ? (
+          <div className="p-6">
+            <EmptyState message="Nothing here right now." />
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <caption className="sr-only">Applications — select a row to see its details</caption>
+            <thead className="hidden bg-[var(--background-2)] text-left text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--muted)] xl:table-header-group">
+              <tr>
+                <th scope="col" className="w-10 py-3 pl-4">
+                  <span className="sr-only">Select</span>
+                </th>
+                <th scope="col" className="py-3 pr-3">Role / company</th>
+                <th scope="col" className="py-3 pr-3">Status</th>
+                <th scope="col" className="py-3 pr-3">Last activity</th>
+                <th scope="col" className="py-3 pr-3">Next step</th>
+                <th scope="col" className="w-12 py-3 pr-4">
+                  <span className="sr-only">Open</span>
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => {
+                const st = stateLabel(r.status);
+                const ev = latest.get(r.id);
+                const lastAt = ev?.created_at ?? r.status_updated_at ?? r.submitted_at ?? r.created_at;
+                const kind = r.status === "needs_user" ? kinds.get(r.id) : undefined;
+                const nextStep = kind ? NEEDS_LABEL[kind].label : r.status === "queued" && (r.attempts ?? 0) > 0 ? `Retry ${(r.attempts ?? 0) + 1} of 3 on next run` : st.next;
+                const href = link({ app: r.id });
+                return (
+                  <tr key={r.id} className={`grid grid-cols-[auto_1fr_auto] gap-x-3 border-b border-[var(--border)] px-4 py-3 last:border-b-0 hover:bg-[var(--hover)] xl:table-row xl:px-0 xl:py-0 ${sp.app === r.id ? "bg-[var(--accent-soft)]/50" : ""}`}>
+                    <td className="row-span-3 pt-0.5 xl:py-3.5 xl:pl-4">
+                      <input
+                        type="checkbox"
+                        form="bulk"
+                        name="ids"
+                        value={r.id}
+                        aria-label={`Select ${r.jobs?.title ?? "application"} at ${r.jobs?.company_name ?? ""}`}
+                        className="h-4 w-4 accent-[var(--accent)]"
+                      />
+                    </td>
+                    <td className="min-w-0 xl:py-3.5 xl:pr-3">
+                      <Link href={href} scroll={false} className="block min-w-0 hover:text-[var(--accent-text)]">
+                        <span className="block truncate font-semibold" title={r.jobs?.title}>
+                          {r.jobs?.title ?? "Job"}
+                        </span>
+                        <span className="block truncate text-xs text-[var(--muted)]">{r.jobs?.company_name}</span>
+                      </Link>
+                    </td>
+                    <td className="col-start-3 row-start-1 xl:py-3.5 xl:pr-3">
+                      <Badge variant={st.tone}>{st.label}</Badge>
+                    </td>
+                    <td className="col-start-2 text-xs text-[var(--muted)] xl:py-3.5 xl:pr-3 xl:text-sm">
+                      <span className="xl:hidden">Last activity: </span>
+                      {ago(lastAt) ?? t.date(lastAt)}
+                    </td>
+                    <td className={`col-start-2 text-xs xl:py-3.5 xl:pr-3 xl:text-sm ${kind ? "font-medium text-amber-300" : "text-[var(--muted)] xl:text-[var(--foreground)]"}`}>{nextStep}</td>
+                    <td className="hidden xl:table-cell xl:py-3.5 xl:pr-4">
+                      <Link href={href} scroll={false} className="grid h-9 w-9 place-items-center rounded-lg text-[var(--accent)] hover:bg-[var(--accent-soft)]" aria-label={`Open ${r.jobs?.title ?? "application"}`}>
+                        <Icon name="arrow" />
+                      </Link>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          </div>
+        )}
+      </Card>
 
       {pages > 1 && (
-        <nav className="mt-6 flex items-center justify-center gap-2 text-sm" aria-label="Pages">
+        <nav className="mt-5 flex items-center justify-center gap-2 text-sm" aria-label="Pages">
           {page > 1 && (
-            <Link href={link({ page: page - 1, why: why || undefined })} className={buttonCls("secondary", "sm")}>
+            <Link href={link({ page: page - 1, app: undefined })} className={buttonCls("secondary", "sm")}>
               ← Newer
             </Link>
           )}
@@ -416,12 +372,275 @@ export default async function ApplicationsPage({ searchParams }: { searchParams:
             Page {page} of {pages} · {filteredCount} applications
           </span>
           {page < pages && (
-            <Link href={link({ page: page + 1, why: why || undefined })} className={buttonCls("secondary", "sm")}>
+            <Link href={link({ page: page + 1, app: undefined })} className={buttonCls("secondary", "sm")}>
               Older →
             </Link>
           )}
         </nav>
       )}
+
+      {/* Funnel */}
+      <Card className="mt-6 p-5 sm:p-6">
+        <div className="mb-4 flex flex-wrap items-start justify-between gap-2">
+          <div>
+            <h2 className="text-lg font-semibold">Application funnel</h2>
+            <p className="text-sm text-[var(--muted)]">Counts only what’s recorded. Employers that never reply, or replies outside your connected inbox, aren’t counted.</p>
+          </div>
+        </div>
+        <ol className="grid grid-cols-2 gap-3 sm:grid-cols-5">
+          {(
+            [
+              ["Tracked", f.tracked, null],
+              ["Sent", f.sent, pct(f.sent, f.tracked)],
+              ["Confirmed received", f.confirmed, pct(f.confirmed, f.sent)],
+              ["Employer responded", f.responses, pct(f.responses, f.sent)],
+              ["Interviews", f.interviews, pct(f.interviews, f.sent)],
+            ] as [string, number, number | null][]
+          ).map(([label, n, rate]) => (
+            <li key={label} className="rounded-2xl bg-[var(--background-2)] p-4 text-center ring-1 ring-inset ring-[var(--border)]">
+              <p className="text-2xl font-bold tabular-nums">{n}</p>
+              <p className="mt-1 text-xs text-[var(--muted)]">{label}</p>
+              {rate != null && <p className="mt-0.5 text-[11px] text-[var(--muted)]">{rate}%{label === "Sent" ? " of tracked" : " of sent"}</p>}
+            </li>
+          ))}
+        </ol>
+        {byFamily.length > 0 && (
+          <details className="mt-5 border-t border-[var(--border)] pt-4">
+            <summary className="cursor-pointer text-sm font-semibold">
+              What’s working: response rate by job type{" "}
+              <Link href="/resumes" className="ml-2 text-xs font-normal text-[var(--accent-text)] hover:underline">
+                by resume →
+              </Link>
+            </summary>
+            <div className="mt-3 grid gap-x-6 gap-y-2.5 sm:grid-cols-2">
+              {byFamily.map(([k, v]) => (
+                <div key={k} className="text-sm">
+                  <div className="flex justify-between gap-2">
+                    <span className="truncate">{k}</span>
+                    <span className="shrink-0 text-[var(--muted)]">
+                      {v.good}/{v.sent} moved forward · {v.rejected} rejected
+                    </span>
+                  </div>
+                  <div className="mt-1 h-1.5 rounded-full bg-[var(--hover)]">
+                    <div className="h-1.5 rounded-full bg-gradient-to-r from-[var(--accent)] to-[var(--accent-2)]" style={{ width: `${Math.round((100 * v.good) / v.sent)}%` }} />
+                  </div>
+                </div>
+              ))}
+            </div>
+          </details>
+        )}
+      </Card>
+
+      {open && (
+        <RouteDrawer closeHref={link({ app: undefined })} label={`${open.jobs?.title ?? "Application"} at ${open.jobs?.company_name ?? ""}`}>
+          <ApplicationDetail
+            r={open}
+            events={(openEvents ?? []) as Event[]}
+            kind={open.status === "needs_user" ? needsKind(open.error, (open.pending_questions ?? []).filter((x) => !findSimilarAnswer(x.label, x.options ?? [], mine)).length) : undefined}
+            waiting={(open.pending_questions ?? []).filter((x) => !findSimilarAnswer(x.label, x.options ?? [], mine))}
+            login={loginByHost.get(hostOf(open.apply_url ?? open.jobs?.url))}
+            closeHref={link({ app: undefined })}
+            t={t}
+          />
+        </RouteDrawer>
+      )}
     </div>
+  );
+}
+
+function ApplicationDetail({
+  r,
+  events,
+  kind,
+  waiting,
+  login,
+  closeHref,
+  t,
+}: {
+  r: Row;
+  events: Event[];
+  kind?: NeedsKind;
+  waiting: PendingQuestion[];
+  login?: { id: string; portal_host: string; email_used: string; account_created: boolean };
+  closeHref: string;
+  t: Awaited<ReturnType<typeof timeFmt>>;
+}) {
+  const st = stateLabel(r.status);
+  const answers = readable(r.answers ?? null);
+  const posted = ago(r.jobs?.job_postings?.posted_at);
+  const url = r.apply_url ?? r.jobs?.url;
+  return (
+    <>
+      <div className="flex items-start justify-between gap-3 border-b border-[var(--border)] px-5 py-4">
+        <div className="flex min-w-0 items-center gap-3">
+          <CompanyMark name={r.jobs?.company_name ?? "?"} />
+          <div className="min-w-0">
+            <h2 className="truncate text-base font-semibold" title={r.jobs?.title}>
+              {r.jobs?.title ?? "Application"}
+            </h2>
+            <p className="truncate text-sm text-[var(--muted)]">{r.jobs?.company_name}</p>
+          </div>
+        </div>
+        <Link href={closeHref} scroll={false} data-autofocus className="grid h-11 w-11 shrink-0 place-items-center rounded-xl text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--foreground)]" aria-label="Close details">
+          <Icon name="close" className="h-5 w-5" />
+        </Link>
+      </div>
+
+      <div className="space-y-5 px-5 py-5">
+        <div>
+          <Badge variant={st.tone}>{st.label}</Badge>
+          {kind && <p className="mt-2 text-sm font-semibold text-amber-300">{NEEDS_LABEL[kind].label}</p>}
+          <p className="mt-1 text-sm text-[var(--muted)]">{kind ? NEEDS_LABEL[kind].hint || st.next : st.next}</p>
+          {r.status === "submitted" && (
+            <p className="mt-2 text-xs text-[var(--muted)]">
+              The agent saw the site’s success page, but the employer hasn’t confirmed by email yet. It changes to “Confirmed received” when the confirmation reaches your connected inbox.
+            </p>
+          )}
+          <StageTrack status={r.status} history={events.map((e) => e.kind)} />
+        </div>
+
+        <dl className="grid grid-cols-2 gap-3 rounded-2xl bg-[var(--background-2)] p-4 text-sm ring-1 ring-inset ring-[var(--border)]">
+          <div>
+            <dt className="text-xs text-[var(--muted)]">{r.submitted_at ? "Applied" : "Added"}</dt>
+            <dd>{r.submitted_at ? t.dateTime(r.submitted_at) : t.date(r.created_at)}</dd>
+          </div>
+          <div>
+            <dt className="text-xs text-[var(--muted)]">Posted</dt>
+            <dd>{posted ?? "—"}</dd>
+          </div>
+          <div>
+            <dt className="text-xs text-[var(--muted)]">Resume used</dt>
+            <dd className="truncate">{r.resume_focus ?? "Main resume"}</dd>
+          </div>
+          <div>
+            <dt className="text-xs text-[var(--muted)]">Requested by</dt>
+            <dd>{r.requested_by === "user" ? "You" : "Agent (auto-submit)"}</dd>
+          </div>
+          {(r.attempts ?? 0) > 0 && (
+            <div>
+              <dt className="text-xs text-[var(--muted)]">Attempts</dt>
+              <dd>{r.attempts}</dd>
+            </div>
+          )}
+        </dl>
+
+        {r.error && ["needs_user", "queued", "failed"].includes(r.status) && (
+          <div>
+            <h3 className="mb-1 text-sm font-semibold">What happened</h3>
+            <p className={`text-sm ${r.status === "queued" ? "text-[var(--muted)]" : "text-amber-300"}`}>{r.error}</p>
+          </div>
+        )}
+
+        {waiting.length > 0 && (
+          <div>
+            <h3 className="mb-1 text-sm font-semibold">Waiting on your answer</h3>
+            <ul className="list-disc space-y-0.5 pl-5 text-sm">
+              {waiting.slice(0, 6).map((x) => (
+                <li key={x.key}>{x.label}</li>
+              ))}
+            </ul>
+            <Link href="/applications?tab=needs#questions" className="mt-1.5 inline-block text-sm font-medium text-[var(--accent-text)] hover:underline">
+              Answer once for every application →
+            </Link>
+          </div>
+        )}
+
+        {login && r.status === "needs_user" && (
+          <div className="rounded-2xl border border-[var(--border)] p-4 text-sm">
+            <h3 className="mb-1 font-semibold">Portal login</h3>
+            <p className="text-[var(--muted)]">
+              {login.portal_host} {login.account_created ? "· account created" : "· create the account with:"}
+            </p>
+            <p className="mt-1 truncate">
+              <code className="rounded bg-[var(--hover)] px-1">{login.email_used}</code>
+            </p>
+            <div className="mt-1">
+              <RevealPassword id={login.id} />
+            </div>
+          </div>
+        )}
+
+        <div className="flex flex-wrap gap-2">
+          {url && (
+            <a href={url} target="_blank" rel="noopener noreferrer" className={`${buttonCls(r.status === "needs_user" ? "primary" : "secondary")} min-h-[44px]`}>
+              {r.status === "needs_user" ? "Open application" : "Posting"} <Icon name="external" className="h-3.5 w-3.5" />
+            </a>
+          )}
+          {r.status === "needs_user" && (
+            <form action={markApplied.bind(null, r.id)}>
+              <button className={`${buttonCls("secondary")} min-h-[44px]`}>I applied myself</button>
+            </form>
+          )}
+          {["needs_user", "failed"].includes(r.status) && (
+            <form action={retryApplication.bind(null, r.id)}>
+              <button className={`${buttonCls("ghost")} min-h-[44px]`} title="Put it back in the queue">
+                Retry
+              </button>
+            </form>
+          )}
+        </div>
+
+        {answers.length > 0 && (
+          <details className="rounded-2xl border border-[var(--border)] p-4 text-sm">
+            <summary className="cursor-pointer font-semibold">Answers the agent prepared ({answers.length})</summary>
+            <p className="mt-1 text-xs text-[var(--muted)]">From your profile and resume. Check anything the agent wrote before relying on it.</p>
+            <dl className="mt-2 max-h-80 space-y-1.5 overflow-y-auto pr-1 text-xs">
+              {answers.slice(0, 60).map(([q2, a]) => (
+                <div key={q2} className="rounded-lg bg-[var(--background-2)] p-2">
+                  <dt className="text-[var(--muted)]">{q2}</dt>
+                  <dd className="mt-0.5 select-all">{String(a)}</dd>
+                </div>
+              ))}
+            </dl>
+          </details>
+        )}
+
+        <div>
+          <h3 className="mb-2 text-sm font-semibold">Timeline</h3>
+          <ol className="space-y-2 border-l-2 border-[var(--border)] pl-4 text-sm">
+            {events.map((e, i) => (
+              <li key={i} className="relative">
+                <span className="absolute -left-[21px] top-1.5 h-2 w-2 rounded-full bg-[var(--accent)]" aria-hidden />
+                <span className="font-medium">{STAGE_LABEL[e.kind] ?? e.kind}</span>
+                <span className="text-[var(--muted)]">
+                  {" "}
+                  · {t.dateTime(e.created_at)} · {e.source === "email" ? "from your inbox" : e.source === "agent" ? "agent" : "you"}
+                </span>
+                {e.detail && <p className="text-xs text-[var(--muted)]">{e.detail}</p>}
+              </li>
+            ))}
+            <li className="relative">
+              <span className="absolute -left-[21px] top-1.5 h-2 w-2 rounded-full bg-[var(--border-strong)]" aria-hidden />
+              <span className="font-medium">Added</span>
+              <span className="text-[var(--muted)]"> · {t.dateTime(r.created_at)}</span>
+            </li>
+          </ol>
+        </div>
+
+        {!["needs_user", "queued"].includes(r.status) && (
+          <form action={setApplicationStatus.bind(null, r.id)} className="space-y-2 rounded-2xl border border-[var(--border)] p-4">
+            <h3 className="text-sm font-semibold">Record an update</h3>
+            <p className="text-xs text-[var(--muted)]">E.g. a recruiter called. This only changes your record — nothing is sent to the employer.</p>
+            <div className="flex flex-wrap gap-2">
+              <label className="sr-only" htmlFor="status-select">
+                Status
+              </label>
+              <select id="status-select" name="status" defaultValue={r.status} className="min-h-[40px] rounded-lg border border-[var(--border)] bg-[var(--background-2)] px-2 text-sm">
+                {["submitted", "received", "under_review", "screening", "interview", "offer", "rejected", "withdrawn"].map((s) => (
+                  <option key={s} value={s}>
+                    {STAGE_LABEL[s]}
+                  </option>
+                ))}
+              </select>
+              <label className="sr-only" htmlFor="status-note">
+                Note
+              </label>
+              <input id="status-note" name="note" placeholder="Note (optional)" className="min-h-[40px] min-w-0 flex-1 rounded-lg border border-[var(--border)] bg-[var(--background-2)] px-2 text-sm" />
+              <button className={`${buttonCls("secondary", "sm")} min-h-[40px]`}>Save</button>
+            </div>
+          </form>
+        )}
+      </div>
+    </>
   );
 }

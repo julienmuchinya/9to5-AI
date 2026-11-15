@@ -29,11 +29,11 @@ type Variant = "default" | "success" | "warning" | "danger" | "accent" | "info";
 
 export function Badge({ children, variant = "default" }: { children: ReactNode; variant?: Variant }) {
   const colors: Record<Variant, string> = {
-    default: "bg-white/5 text-[var(--muted)] ring-white/10",
+    default: "bg-[var(--hover)] text-[var(--muted)] ring-[var(--border)]",
     success: "bg-emerald-400/10 text-emerald-300 ring-emerald-400/20",
     warning: "bg-amber-400/10 text-amber-300 ring-amber-400/20",
     danger: "bg-red-400/10 text-red-300 ring-red-400/20",
-    accent: "bg-[var(--accent-soft)] text-[#b3a9ff] ring-[var(--accent)]/25",
+    accent: "bg-[var(--accent-soft)] text-[var(--accent-text)] ring-[var(--accent)]/25",
     info: "bg-cyan-400/10 text-cyan-300 ring-cyan-400/20",
   };
   return <span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-medium ring-1 ring-inset ${colors[variant]}`}>{children}</span>;
@@ -45,9 +45,9 @@ export const buttonCls = (variant: "primary" | "secondary" | "danger" | "ghost" 
   } ${
     {
       primary: "bg-[var(--accent)] text-white shadow-[0_6px_20px_-8px_var(--accent)] hover:bg-[var(--accent-hover)]",
-      secondary: "border border-[var(--border)] bg-[var(--card-2)] text-[var(--foreground)] hover:border-[var(--border-strong)] hover:bg-white/5",
+      secondary: "border border-[var(--border)] bg-[var(--card-2)] text-[var(--foreground)] hover:border-[var(--border-strong)] hover:bg-[var(--hover)]",
       danger: "bg-red-500/90 text-white hover:bg-red-500",
-      ghost: "text-[var(--muted)] hover:bg-white/5 hover:text-[var(--foreground)]",
+      ghost: "text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--foreground)]",
     }[variant]
   }`;
 
@@ -89,8 +89,8 @@ export function PageHeader({ title, description, action, eyebrow }: { title: str
   return (
     <div className="mb-8 flex flex-wrap items-end justify-between gap-4 animate-fade-up">
       <div>
-        {eyebrow && <p className="mb-1 text-xs font-semibold uppercase tracking-widest text-[var(--accent)]">{eyebrow}</p>}
-        <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">{title}</h1>
+        {eyebrow && <p className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-[var(--accent)]">{eyebrow}</p>}
+        <h1 className="text-[26px] font-bold tracking-tight sm:text-[32px]">{title}</h1>
         {description && <p className="mt-1.5 max-w-2xl text-[var(--muted)]">{description}</p>}
       </div>
       {action}
@@ -111,20 +111,20 @@ export function StatCard({
   variant?: "default" | "success" | "warning" | "danger";
   icon?: ReactNode;
 }) {
-  const tone = {
-    default: "from-[var(--accent)]/10 text-[var(--accent)]",
-    success: "from-emerald-400/10 text-emerald-300",
-    warning: "from-amber-400/10 text-amber-300",
-    danger: "from-red-400/10 text-red-300",
+  const chip = {
+    default: "bg-[var(--accent-soft)] text-[var(--accent)]",
+    success: "bg-emerald-400/15 text-emerald-400",
+    warning: "bg-amber-400/15 text-amber-400",
+    danger: "bg-red-400/15 text-red-400",
   }[variant];
   return (
-    <div className={`relative overflow-hidden rounded-2xl border border-[var(--border)] bg-gradient-to-br ${tone} to-transparent bg-[var(--card)] p-4 shadow-[var(--shadow)]`}>
-      <div className="flex items-center justify-between">
-        <p className="text-xs font-medium uppercase tracking-wider text-[var(--muted)]">{label}</p>
-        {icon && <span className="opacity-80">{icon}</span>}
+    <div className="h-full rounded-2xl border border-[var(--border)] bg-[var(--card)] p-5 shadow-[var(--shadow)]">
+      <div className="flex items-start justify-between gap-2">
+        <p className="text-sm font-medium text-[var(--muted)]">{label}</p>
+        {icon && <span className={`grid h-9 w-9 shrink-0 place-items-center rounded-xl ${chip}`}>{icon}</span>}
       </div>
-      <p className="mt-2 text-3xl font-semibold tracking-tight text-[var(--foreground)]">{value}</p>
-      {sub && <p className="mt-1 text-xs text-[var(--muted)]">{sub}</p>}
+      <p className="mt-2 text-3xl font-bold tracking-tight text-[var(--foreground)] tabular-nums">{value}</p>
+      {sub && <p className="mt-2 text-xs text-[var(--muted)]">{sub}</p>}
     </div>
   );
 }
@@ -145,7 +145,7 @@ export function TabLink({ href, active, children }: { href: string; active: bool
     <Link
       href={href}
       className={`rounded-xl px-3 py-1.5 text-sm transition ${
-        active ? "bg-[var(--accent-soft)] font-medium text-[#c3baff] ring-1 ring-inset ring-[var(--accent)]/30" : "text-[var(--muted)] hover:bg-white/5 hover:text-[var(--foreground)]"
+        active ? "bg-[var(--accent-soft)] font-medium text-[var(--accent-text)] ring-1 ring-inset ring-[var(--accent)]/30" : "text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--foreground)]"
       }`}
     >
       {children}
@@ -155,7 +155,7 @@ export function TabLink({ href, active, children }: { href: string; active: bool
 
 export function Notice({ tone = "info", children }: { tone?: "info" | "warning" | "danger" | "success"; children: ReactNode }) {
   const c = {
-    info: "border-[var(--accent)]/25 bg-[var(--accent-soft)] text-[#cfc8ff]",
+    info: "border-[var(--accent)]/25 bg-[var(--accent-soft)] text-[var(--accent-text)]",
     warning: "border-amber-400/25 bg-amber-400/10 text-amber-200",
     danger: "border-red-400/25 bg-red-400/10 text-red-200",
     success: "border-emerald-400/25 bg-emerald-400/10 text-emerald-200",
@@ -190,7 +190,7 @@ export function StatButton({
       scroll={false}
       aria-current={active ? "page" : undefined}
       className={`group flex items-center justify-between gap-3 rounded-xl border px-3.5 py-2.5 text-left transition active:scale-[0.98] ${
-        active ? `border-transparent ${t.bg} ring-2 ring-inset ${t.ring}` : "border-[var(--border)] bg-[var(--card)] hover:border-[var(--border-strong)] hover:bg-white/[0.04]"
+        active ? `border-transparent ${t.bg} ring-2 ring-inset ${t.ring}` : "border-[var(--border)] bg-[var(--card)] hover:border-[var(--border-strong)] hover:bg-[var(--hover)]"
       }`}
     >
       <span className="flex min-w-0 items-center gap-2">
@@ -199,5 +199,38 @@ export function StatButton({
       </span>
       <span className="text-lg font-semibold tabular-nums text-[var(--foreground)]">{value}</span>
     </Link>
+  );
+}
+
+const MARK_TONES = [
+  "bg-[var(--accent-soft)] text-[var(--accent)]",
+  "bg-cyan-400/15 text-cyan-400",
+  "bg-emerald-400/15 text-emerald-400",
+  "bg-amber-400/15 text-amber-400",
+  "bg-red-400/15 text-red-400",
+];
+
+/** Letter tile for an employer (no logos are fetched). */
+export function CompanyMark({ name, size = "md" }: { name: string; size?: "md" | "lg" }) {
+  let h = 0;
+  for (const ch of name) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  const dim = size === "lg" ? "h-12 w-12 text-lg" : "h-11 w-11 text-base";
+  return (
+    <span className={`grid shrink-0 place-items-center rounded-xl font-bold ${dim} ${MARK_TONES[h % MARK_TONES.length]}`} aria-hidden>
+      {(name.trim()[0] ?? "?").toUpperCase()}
+    </span>
+  );
+}
+
+/** The resume-fit estimate. It is not a hiring probability, and says so on hover. */
+export function FitBadge({ score }: { score: number }) {
+  const tone = score >= 75 ? "bg-emerald-400/15 text-emerald-300" : score >= 60 ? "bg-amber-400/15 text-amber-300" : "bg-[var(--hover)] text-[var(--muted)]";
+  return (
+    <span
+      className={`inline-flex items-center rounded-lg px-2 py-1 text-xs font-semibold tabular-nums ${tone}`}
+      title="How well this posting matches your resume, roles, level and location (0–100). An estimate — not your chance of getting the job."
+    >
+      {score}% fit
+    </span>
   );
 }

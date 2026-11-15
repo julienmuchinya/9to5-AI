@@ -1,5 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { friendlyAuthError, safeNext, siteOrigin } from "./site";
+import { digitsOnly, friendlyAuthError, safeNext, siteOrigin } from "./site";
+
+describe("digitsOnly", () => {
+  // Regression: the code fields used /D/g (strips the letter "D") instead of /\D/g,
+  // so a pasted "123 456" kept its space and failed verification.
+  it("keeps only digits from pasted codes", () => {
+    expect(digitsOnly("123 456")).toBe("123456");
+    expect(digitsOnly("12-34-56")).toBe("123456");
+    expect(digitsOnly("Code: 654321\n")).toBe("654321");
+    expect(digitsOnly("DDD")).toBe("");
+  });
+});
 
 describe("siteOrigin", () => {
   it("uses the address the person is on, not localhost", () => {

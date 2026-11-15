@@ -6,7 +6,8 @@ import Link from "next/link";
 import { APP_NAME } from "@/lib/constants";
 import { SecurityQuestionsFields, type QA } from "@/components/security-questions";
 import { saveSecurityQuestions } from "../auth-actions";
-import { friendlyAuthError, safeNext } from "@/lib/site";
+import { digitsOnly, friendlyAuthError, safeNext } from "@/lib/site";
+import { PasswordInput } from "@/components/password-input";
 
 const PENDING_QA = "9to5:pending-security-questions";
 
@@ -42,6 +43,7 @@ export default function LoginPage() {
   useEffect(() => {
     const p = new URLSearchParams(window.location.search);
     setNext(safeNext(p.get("next")));
+    if (p.get("mode") === "signup") setMode("signup");
     const hash = new URLSearchParams(window.location.hash.slice(1));
     const err = p.get("error") ?? (hash.get("error") ? friendlyAuthError(hash.get("error_description"), hash.get("error_code")) : null);
     if (err) setMsg({ kind: "error", text: err });
@@ -148,7 +150,7 @@ export default function LoginPage() {
               maxLength={8}
               placeholder="123456"
               value={code}
-              onChange={(e) => setCode(e.target.value.replace(/D/g, ""))}
+              onChange={(e) => setCode(digitsOnly(e.target.value))}
               required
               autoFocus
               autoComplete="one-time-code"
@@ -199,9 +201,8 @@ export default function LoginPage() {
         </label>
         <label className="mb-4 block text-sm">
           Password
-          <input
-            className={`${input} mt-1`}
-            type="password"
+          <PasswordInput
+            className={input}
             minLength={8}
             value={password}
             onChange={(e) => setPassword(e.target.value)}
@@ -223,7 +224,7 @@ export default function LoginPage() {
           </div>
         )}
         {msg && (
-          <p role="status" className={`mb-4 text-sm ${msg.kind === "error" ? "text-red-400" : "text-emerald-400"}`}>
+          <p role={msg.kind === "error" ? "alert" : "status"} className={`mb-4 text-sm ${msg.kind === "error" ? "text-red-400" : "text-emerald-400"}`}>
             {msg.text}
           </p>
         )}
@@ -238,6 +239,7 @@ export default function LoginPage() {
           onClick={() => {
             setMode(mode === "signin" ? "signup" : "signin");
             setMsg(null);
+            setPassword(""); // don't carry a typed password between sign-in and sign-up
           }}
           className="mt-4 w-full text-center text-sm text-[var(--muted)] hover:text-[var(--foreground)]"
         >

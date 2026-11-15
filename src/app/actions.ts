@@ -244,6 +244,14 @@ export async function dismissJob(jobId: string) {
   revalidatePath("/jobs");
 }
 
+/** Bookmark a job for later (Find Jobs → Saved). Needs migration 011; before it runs this does nothing. */
+export async function toggleSavedJob(jobId: string, save: boolean) {
+  const { supabase, user } = await requireUser();
+  await supabase.from("jobs").update({ saved_at: save ? new Date().toISOString() : null }).eq("id", jobId).eq("user_id", user.id);
+  revalidatePath("/jobs");
+  revalidatePath("/dashboard");
+}
+
 export async function markApplied(appId: string) {
   const { supabase, user } = await requireUser();
   await supabase
