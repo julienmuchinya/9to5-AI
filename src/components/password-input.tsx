@@ -13,7 +13,7 @@ export function PasswordInput({ className = "", ...props }: Omit<InputHTMLAttrib
         onClick={() => setShow((s) => !s)}
         aria-label={show ? "Hide password" : "Show password"}
         aria-pressed={show}
-        className="absolute inset-y-0 right-0 min-w-[44px] px-3 text-xs text-[var(--muted)] hover:text-[var(--foreground)]"
+        className="absolute bottom-0 right-0 top-auto h-[50px] min-w-[44px] px-3 font-sans text-xs normal-case tracking-normal text-[var(--foreground)] underline underline-offset-2 hover:text-[var(--orange-text)]"
       >
         {show ? "Hide" : "Show"}
       </button>

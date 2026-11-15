@@ -95,7 +95,7 @@ export function postedDaysAgo(postedOn: string | undefined | null): number | nul
   return m ? Number(m[1]) + (/\+/.test(s) ? 1 : 0) : null;
 }
 
-interface ListRow {
+export interface ListRow {
   title: string;
   externalPath: string;
   locationsText?: string;
@@ -118,13 +118,14 @@ interface Detail {
 
 const base = (b: WorkdayBoard) => `https://${b.host}.myworkdayjobs.com/wday/cxs/${b.tenant}/${b.site}`;
 
-async function listJobs(b: WorkdayBoard, searchText: string, limit: number): Promise<ListRow[]> {
+/** One keyword search on a Workday board (titles, paths and "Posted N days ago" only). */
+export async function listJobs(b: WorkdayBoard, searchText: string, limit: number, timeoutMs = 15_000): Promise<ListRow[]> {
   try {
     const res = await fetch(`${base(b)}/jobs`, {
       method: "POST",
       headers: { ...UA, "Content-Type": "application/json", Accept: "application/json" },
       body: JSON.stringify({ appliedFacets: {}, limit: Math.min(20, limit), offset: 0, searchText }),
-      signal: AbortSignal.timeout(15_000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     if (!res.ok) return [];
     return ((await res.json()) as { jobPostings?: ListRow[] }).jobPostings ?? [];

@@ -1,12 +1,13 @@
 import Link from "next/link";
 import { timeFmt } from "@/lib/tz";
 import { requireUser, serviceClient } from "@/lib/v2/session";
-import { Badge, Button, Card, CompanyMark, EmptyState, Notice, PageHeader, StatCard, buttonCls } from "@/components/ui";
-import { Icon } from "@/components/sidebar";
+import { Badge, Button, Card, CompanyMark, Emphasis, EmptyState, Notice, PageHeader, StatStrip, buttonCls } from "@/components/ui";
+import { DeskButton, Icon } from "@/components/sidebar";
 import { RouteDrawer } from "@/components/drawer";
 import { customStore, findSimilarAnswer, questionSimilarity, type CustomAnswers, type PendingQuestion } from "@/lib/v2/app-questions";
 import { PendingQuestions, type AskedQuestion } from "./pending-questions";
 import { BulkBar } from "./bulk-bar";
+import { AnswersEditor } from "./answers-editor";
 import { STAGE_LABEL, roleFamily } from "@/lib/v2/tracking";
 import { ago } from "@/lib/v2/priority";
 import { dispatchConfigured, nextScheduledRun } from "@/lib/v2/dispatch";
@@ -19,22 +20,13 @@ import { markApplied, retryApplication, setApplicationStatus } from "../actions"
 import { PROGRESSED, SENT, countPipeline, isSent, statusRows } from "@/lib/v2/pipeline";
 import { NEEDS_LABEL, needsKind, type NeedsKind } from "@/lib/v2/needs";
 import { funnel, pct, stateLabel } from "@/lib/v2/overview";
+import { APP_FILTER } from "@/lib/v2/app-filter";
 
 export const dynamic = "force-dynamic";
 
 const PAGE = 24;
-/** Which statuses each filter tab shows. "sent" also includes anything with a submitted date. */
-const FILTER: Record<string, string[] | null> = {
-  needs: ["needs_user"],
-  queued: ["queued"],
-  sent: [...SENT],
-  review: ["received", "under_review"],
-  screening: ["screening"],
-  interview: ["interview", "offer"],
-  rejected: ["rejected"],
-  failed: ["failed", "closed"],
-  all: null,
-};
+/** Which statuses each filter tab shows (shared with the bulk "select all" action). */
+const FILTER = APP_FILTER;
 
 const hostOf = (u: string | null | undefined) => {
   try {
@@ -165,41 +157,43 @@ export default async function ApplicationsPage({ searchParams }: { searchParams:
     for (const [k, v] of Object.entries(merged)) if (v !== undefined && v !== "" && !(k === "page" && Number(v) === 1) && !(k === "sort" && v === "newest")) p.set(k, String(v));
     return `/applications?${p.toString()}`;
   };
-  const inProgress = c.queued + c.inReview + c.screening + all.filter((r) => r.status === "submitted").length;
   const tabs: [string, string, number][] = [
-    ["needs", "Needs you", c.needs],
-    ["all", "All", c.total],
+    ["all", "All applications", c.total],
+    ["needs", "Needs attention", c.needs],
+    ["interview", "Interviews", c.interviews],
+    ["drafts", "Drafts", c.drafts],
     ["queued", "Queued", c.queued],
     ["sent", "Sent", c.sent],
     ["review", "In review", c.inReview],
     ["screening", "Screening", c.screening],
-    ["interview", "Interviews", c.interviews],
     ["rejected", "Rejected", c.rejected],
-    ["failed", "Failed / closed", c.failed + c.closed],
+    ["failed", "Closed / ignored", c.failed + c.closed + c.ignored],
   ];
 
   return (
     <div>
       <PageHeader
-        eyebrow="Application pipeline"
-        title="All your applications, one view"
-        description="Track every outcome, finish what needs you, and keep interviews moving. Statuses update from your inbox when it’s connected."
+        eyebrow="Applications / every step counts"
+        aside="The running record"
+        title="Keep the *thread.*"
         action={
-          <div className="flex flex-wrap items-center gap-3">
-            <AiStatus data={ai} compact when={t.dateTime} />
-            {dispatchConfigured() && <RunNowButton running={running} />}
-            <Button href="/jobs">
-              <Icon name="search" /> Find more jobs
-            </Button>
-          </div>
+          <Link href="/jobs" className={buttonCls("primary")}>
+            Find more roles ↗
+          </Link>
         }
       />
 
-      <div className="mb-6 grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-4">
-        <StatCard label="In progress" value={inProgress} sub="Queued, sent, in review or screening" icon={<Icon name="briefcase" />} />
-        <StatCard label="Needs you" value={c.needs} variant={c.needs ? "warning" : "default"} sub="Questions, sign-ins, CAPTCHAs" icon={<Icon name="clock" />} />
-        <StatCard label="Interviews" value={c.interviews} variant="success" sub="Interview or offer stage" icon={<Icon name="calendar" />} />
-        <StatCard label="Offers" value={f.offers} variant="success" sub="Recorded by you or your inbox" icon={<Icon name="check" />} />
+      <StatStrip
+        items={[
+          { value: c.total, label: "Tracked applications", href: link({ tab: "all", why: undefined, page: 1, app: undefined }) },
+          { value: c.needs, label: "Need attention", href: link({ tab: "needs", why: undefined, page: 1, app: undefined }), tone: c.needs ? "warning" : undefined },
+          { value: c.screening + c.interviews, label: "In conversation", href: link({ tab: "interview", why: undefined, page: 1, app: undefined }) },
+          { value: f.confirmed, label: "Confirmed submissions", href: link({ tab: "sent", why: undefined, page: 1, app: undefined }) },
+        ]}
+      />
+      <div className="mb-8 mt-3 flex flex-wrap items-center justify-between gap-3">
+        <AiStatus data={ai} compact when={t.dateTime} />
+        {dispatchConfigured() && <RunNowButton running={running} />}
       </div>
 
       {sp.msg && (
@@ -231,27 +225,30 @@ export default async function ApplicationsPage({ searchParams }: { searchParams:
         </Card>
       )}
 
-      <Card className="overflow-hidden p-0!">
+      <div>
         {/* Filter tabs */}
-        <div className="flex items-center gap-2 border-b border-[var(--border)] p-3 sm:p-4">
-          <nav aria-label="Filter applications" className="no-scrollbar -mx-1 flex flex-1 gap-1 overflow-x-auto px-1">
-            {tabs.map(([k, label, n]) => (
-              <Link
-                key={k}
-                href={link({ tab: k, why: undefined, page: 1, app: undefined })}
-                scroll={false}
-                aria-current={tab === k ? "page" : undefined}
-                className={`inline-flex min-h-[40px] shrink-0 items-center gap-1.5 rounded-xl px-3 text-sm transition ${
-                  tab === k ? "bg-[var(--accent-soft)] font-semibold text-[var(--accent-text)]" : "text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--foreground)]"
-                }`}
-              >
-                {label}
-                <span className={`rounded-md px-1.5 text-xs tabular-nums ${k === "needs" && n > 0 ? "bg-amber-400/15 text-amber-300" : "bg-[var(--hover)]"}`}>{n}</span>
-              </Link>
-            ))}
+        <div className="flex items-center gap-3 pb-4">
+          <nav aria-label="Filter applications" className="no-scrollbar -mx-1 flex flex-1 gap-1.5 overflow-x-auto px-1">
+            {tabs
+              .filter(([k, , n]) => n > 0 || ["all", "needs", "interview"].includes(k) || tab === k)
+              .map(([k, label, n]) => (
+                <Link
+                  key={k}
+                  href={link({ tab: k, why: undefined, page: 1, app: undefined })}
+                  scroll={false}
+                  aria-current={tab === k ? "page" : undefined}
+                  className={`inline-flex min-h-[40px] shrink-0 items-center gap-2 rounded-sm border px-3.5 text-sm transition ${
+                    tab === k ? "border-[var(--accent)] bg-[var(--accent)] font-semibold text-white" : "border-[var(--border-strong)] bg-[var(--card)] hover:border-[var(--foreground)]"
+                  }`}
+                >
+                  {label}
+                  <span className={`font-mono text-[11px] ${tab === k ? "text-white/75" : k === "needs" && n > 0 ? "text-[var(--orange-text)]" : "text-[var(--muted)]"}`}>{n}</span>
+                </Link>
+              ))}
           </nav>
-          <span className="hidden shrink-0 rounded-lg bg-[var(--accent-soft)] px-2 py-1 text-xs font-semibold text-[var(--accent-text)] sm:inline">{filteredCount ?? 0} shown</span>
+          <span className="kicker hidden shrink-0 sm:inline">{String(filteredCount ?? 0).padStart(2, "0")} records shown</span>
         </div>
+        <div className="border-t-2 border-[var(--foreground)]">
 
         {tab === "needs" && Object.keys(kindCount).length > 1 && (
           <div className="flex flex-wrap gap-1.5 border-b border-[var(--border)] px-4 py-3">
@@ -277,7 +274,15 @@ export default async function ApplicationsPage({ searchParams }: { searchParams:
 
         {rows.length > 0 && (
           <div className="border-b border-[var(--border)] px-4 py-3">
-            <BulkBar back={link({ page, app: undefined })} sort={sort} />
+            <BulkBar
+              back={link({ page, app: undefined })}
+              sort={sort}
+              tab={tab}
+              why={why}
+              total={filteredCount ?? rows.length}
+              shown={rows.length}
+              viewLabel={tabs.find(([k]) => k === tab)?.[1] ?? "this view"}
+            />
           </div>
         )}
 
@@ -297,15 +302,15 @@ export default async function ApplicationsPage({ searchParams }: { searchParams:
           <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <caption className="sr-only">Applications — select a row to see its details</caption>
-            <thead className="hidden bg-[var(--background-2)] text-left text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--muted)] xl:table-header-group">
+            <thead className="hidden border-b border-[var(--border)] text-left font-mono text-[10px] font-normal uppercase tracking-[0.14em] text-[var(--muted)] xl:table-header-group">
               <tr>
                 <th scope="col" className="w-10 py-3 pl-4">
                   <span className="sr-only">Select</span>
                 </th>
-                <th scope="col" className="py-3 pr-3">Role / company</th>
-                <th scope="col" className="py-3 pr-3">Status</th>
-                <th scope="col" className="py-3 pr-3">Last activity</th>
-                <th scope="col" className="py-3 pr-3">Next step</th>
+                <th scope="col" className="py-3 pr-3 font-normal">Role &amp; company</th>
+                <th scope="col" className="py-3 pr-3 font-normal">Current stage</th>
+                <th scope="col" className="py-3 pr-3 font-normal">Last change</th>
+                <th scope="col" className="py-3 pr-3 font-normal">Next step</th>
                 <th scope="col" className="w-12 py-3 pr-4">
                   <span className="sr-only">Open</span>
                 </th>
@@ -320,8 +325,8 @@ export default async function ApplicationsPage({ searchParams }: { searchParams:
                 const nextStep = kind ? NEEDS_LABEL[kind].label : r.status === "queued" && (r.attempts ?? 0) > 0 ? `Retry ${(r.attempts ?? 0) + 1} of 3 on next run` : st.next;
                 const href = link({ app: r.id });
                 return (
-                  <tr key={r.id} className={`grid grid-cols-[auto_1fr_auto] gap-x-3 border-b border-[var(--border)] px-4 py-3 last:border-b-0 hover:bg-[var(--hover)] xl:table-row xl:px-0 xl:py-0 ${sp.app === r.id ? "bg-[var(--accent-soft)]/50" : ""}`}>
-                    <td className="row-span-3 pt-0.5 xl:py-3.5 xl:pl-4">
+                  <tr key={r.id} className={`grid grid-cols-[auto_1fr_auto] gap-x-3 border-b border-[var(--border)] px-1 py-4 hover:bg-[var(--hover)] xl:table-row xl:px-0 xl:py-0 ${sp.app === r.id ? "bg-[var(--accent-soft)]" : ""}`}>
+                    <td className="row-span-3 pt-0.5 xl:py-5 xl:pl-3">
                       <input
                         type="checkbox"
                         form="bulk"
@@ -331,25 +336,25 @@ export default async function ApplicationsPage({ searchParams }: { searchParams:
                         className="h-4 w-4 accent-[var(--accent)]"
                       />
                     </td>
-                    <td className="min-w-0 xl:py-3.5 xl:pr-3">
+                    <td className="min-w-0 xl:py-5 xl:pr-3">
                       <Link href={href} scroll={false} className="block min-w-0 hover:text-[var(--accent-text)]">
                         <span className="block truncate font-semibold" title={r.jobs?.title}>
                           {r.jobs?.title ?? "Job"}
                         </span>
-                        <span className="block truncate text-xs text-[var(--muted)]">{r.jobs?.company_name}</span>
+                        <span className="block truncate text-[13px] text-[var(--muted)]">{r.jobs?.company_name}</span>
                       </Link>
                     </td>
-                    <td className="col-start-3 row-start-1 xl:py-3.5 xl:pr-3">
+                    <td className="col-start-3 row-start-1 xl:py-5 xl:pr-3">
                       <Badge variant={st.tone}>{st.label}</Badge>
                     </td>
-                    <td className="col-start-2 text-xs text-[var(--muted)] xl:py-3.5 xl:pr-3 xl:text-sm">
+                    <td className="col-start-2 text-xs text-[var(--muted)] xl:py-5 xl:pr-3 xl:text-sm">
                       <span className="xl:hidden">Last activity: </span>
                       {ago(lastAt) ?? t.date(lastAt)}
                     </td>
-                    <td className={`col-start-2 text-xs xl:py-3.5 xl:pr-3 xl:text-sm ${kind ? "font-medium text-amber-300" : "text-[var(--muted)] xl:text-[var(--foreground)]"}`}>{nextStep}</td>
-                    <td className="hidden xl:table-cell xl:py-3.5 xl:pr-4">
-                      <Link href={href} scroll={false} className="grid h-9 w-9 place-items-center rounded-lg text-[var(--accent)] hover:bg-[var(--accent-soft)]" aria-label={`Open ${r.jobs?.title ?? "application"}`}>
-                        <Icon name="arrow" />
+                    <td className={`col-start-2 text-xs xl:py-5 xl:pr-3 xl:text-sm ${kind ? "font-medium text-amber-300" : "text-[var(--muted)] xl:text-[var(--foreground)]"}`}>{nextStep}</td>
+                    <td className="hidden xl:table-cell xl:py-5 xl:pr-4">
+                      <Link href={href} scroll={false} className="grid h-10 w-10 place-items-center text-lg hover:bg-[var(--hover)]" aria-label={`Open ${r.jobs?.title ?? "application"}`}>
+                        ↗
                       </Link>
                     </td>
                   </tr>
@@ -359,7 +364,8 @@ export default async function ApplicationsPage({ searchParams }: { searchParams:
           </table>
           </div>
         )}
-      </Card>
+        </div>
+      </div>
 
       {pages > 1 && (
         <nav className="mt-5 flex items-center justify-center gap-2 text-sm" aria-label="Pages">
@@ -379,15 +385,24 @@ export default async function ApplicationsPage({ searchParams }: { searchParams:
         </nav>
       )}
 
-      {/* Funnel */}
-      <Card className="mt-6 p-5 sm:p-6">
-        <div className="mb-4 flex flex-wrap items-start justify-between gap-2">
-          <div>
-            <h2 className="text-lg font-semibold">Application funnel</h2>
-            <p className="text-sm text-[var(--muted)]">Counts only what’s recorded. Employers that never reply, or replies outside your connected inbox, aren’t counted.</p>
-          </div>
+      {/* A clear record */}
+      <div className="mt-10 flex flex-wrap items-center justify-between gap-4 bg-[var(--accent-soft)] px-6 py-6">
+        <div>
+          <p className="display text-[24px]">A clear record, without the guesswork.</p>
+          <p className="mt-1 text-sm text-[var(--muted)]">Every role keeps its own history, next step and source. Nothing is marked submitted without evidence.</p>
         </div>
-        <ol className="grid grid-cols-2 gap-3 sm:grid-cols-5">
+        <DeskButton open={{ drawer: "help" }} className={buttonCls("secondary")}>
+          How tracking works ↗
+        </DeskButton>
+      </div>
+
+      {/* Funnel */}
+      <section className="mt-12" aria-labelledby="funnel">
+        <h2 id="funnel" className="display text-[30px]">
+          From first look to <Emphasis text="*conversation.*" />
+        </h2>
+        <p className="mt-1 text-sm text-[var(--muted)]">Counts only what’s recorded. Employers that never reply, or replies outside your connected inbox, aren’t counted.</p>
+        <ol className="mt-5 grid grid-cols-2 border-t-2 border-[var(--foreground)] sm:grid-cols-5">
           {(
             [
               ["Tracked", f.tracked, null],
@@ -396,11 +411,11 @@ export default async function ApplicationsPage({ searchParams }: { searchParams:
               ["Employer responded", f.responses, pct(f.responses, f.sent)],
               ["Interviews", f.interviews, pct(f.interviews, f.sent)],
             ] as [string, number, number | null][]
-          ).map(([label, n, rate]) => (
-            <li key={label} className="rounded-2xl bg-[var(--background-2)] p-4 text-center ring-1 ring-inset ring-[var(--border)]">
-              <p className="text-2xl font-bold tabular-nums">{n}</p>
-              <p className="mt-1 text-xs text-[var(--muted)]">{label}</p>
-              {rate != null && <p className="mt-0.5 text-[11px] text-[var(--muted)]">{rate}%{label === "Sent" ? " of tracked" : " of sent"}</p>}
+          ).map(([label, n, rate], i) => (
+            <li key={label} className={`border-b border-[var(--border)] py-5 pr-4 ${i ? "sm:border-l sm:pl-5" : ""}`}>
+              <p className="kicker">{String(i + 1).padStart(2, "0")} / {label}</p>
+              <p className="display mt-2 text-[40px] tabular-nums">{n}</p>
+              {rate != null && <p className="mt-1 font-mono text-[11px] text-[var(--muted)]">{rate}%{label === "Sent" ? " of tracked" : " of sent"}</p>}
             </li>
           ))}
         </ol>
@@ -421,15 +436,15 @@ export default async function ApplicationsPage({ searchParams }: { searchParams:
                       {v.good}/{v.sent} moved forward · {v.rejected} rejected
                     </span>
                   </div>
-                  <div className="mt-1 h-1.5 rounded-full bg-[var(--hover)]">
-                    <div className="h-1.5 rounded-full bg-gradient-to-r from-[var(--accent)] to-[var(--accent-2)]" style={{ width: `${Math.round((100 * v.good) / v.sent)}%` }} />
+                  <div className="mt-1 h-1 bg-[var(--hover)]">
+                    <div className="h-1 bg-[var(--accent)]" style={{ width: `${Math.round((100 * v.good) / v.sent)}%` }} />
                   </div>
                 </div>
               ))}
             </div>
           </details>
         )}
-      </Card>
+      </section>
 
       {open && (
         <RouteDrawer closeHref={link({ app: undefined })} label={`${open.jobs?.title ?? "Application"} at ${open.jobs?.company_name ?? ""}`}>
@@ -471,57 +486,55 @@ function ApplicationDetail({
   const url = r.apply_url ?? r.jobs?.url;
   return (
     <>
-      <div className="flex items-start justify-between gap-3 border-b border-[var(--border)] px-5 py-4">
-        <div className="flex min-w-0 items-center gap-3">
-          <CompanyMark name={r.jobs?.company_name ?? "?"} />
-          <div className="min-w-0">
-            <h2 className="truncate text-base font-semibold" title={r.jobs?.title}>
-              {r.jobs?.title ?? "Application"}
-            </h2>
-            <p className="truncate text-sm text-[var(--muted)]">{r.jobs?.company_name}</p>
-          </div>
+      <div className="flex items-start justify-between gap-4 border-b border-[var(--border)] px-6 pb-5 pt-7 sm:px-10">
+        <div className="min-w-0">
+          <p className="kicker !text-[var(--orange-text)]">Application record / {r.id.slice(0, 4).toUpperCase()}</p>
+          <h2 className="display mt-2 text-[32px] sm:text-[38px]" title={r.jobs?.title}>
+            {r.jobs?.title ?? "Application"}
+          </h2>
         </div>
-        <Link href={closeHref} scroll={false} data-autofocus className="grid h-11 w-11 shrink-0 place-items-center rounded-xl text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--foreground)]" aria-label="Close details">
-          <Icon name="close" className="h-5 w-5" />
+        <Link href={closeHref} scroll={false} data-autofocus className="grid h-11 w-11 shrink-0 place-items-center rounded-sm border border-[var(--border-strong)] text-lg hover:border-[var(--foreground)]" aria-label="Close details">
+          ×
         </Link>
       </div>
 
-      <div className="space-y-5 px-5 py-5">
-        <div>
+      <div className="space-y-7 px-6 py-6 sm:px-10">
+        <div className="flex items-center gap-4 border-b border-[var(--border)] pb-5">
+          <CompanyMark name={r.jobs?.company_name ?? "?"} />
+          <div className="min-w-0 flex-1">
+            <p className="truncate font-semibold">{r.jobs?.company_name}</p>
+            <p className="text-xs text-[var(--muted)]">{posted ? `Posted ${posted}` : "Posting date unknown"}</p>
+          </div>
           <Badge variant={st.tone}>{st.label}</Badge>
-          {kind && <p className="mt-2 text-sm font-semibold text-amber-300">{NEEDS_LABEL[kind].label}</p>}
-          <p className="mt-1 text-sm text-[var(--muted)]">{kind ? NEEDS_LABEL[kind].hint || st.next : st.next}</p>
+        </div>
+
+        <div>
+          <p className="kicker rule-label">Next recommended action</p>
+          <p className="display mt-2 text-[26px]">{kind ? NEEDS_LABEL[kind].label : st.next || "Nothing to do"}</p>
+          {kind && NEEDS_LABEL[kind].hint && <p className="mt-2 text-sm text-[var(--muted)]">{NEEDS_LABEL[kind].hint}</p>}
           {r.status === "submitted" && (
-            <p className="mt-2 text-xs text-[var(--muted)]">
+            <p className="mt-2 text-sm text-[var(--muted)]">
               The agent saw the site’s success page, but the employer hasn’t confirmed by email yet. It changes to “Confirmed received” when the confirmation reaches your connected inbox.
             </p>
           )}
+          {r.status === "draft" && <p className="mt-2 text-sm text-[var(--muted)]">This draft hasn’t gone anywhere. Queue it when you’re ready and the agent applies on its next run.</p>}
           <StageTrack status={r.status} history={events.map((e) => e.kind)} />
         </div>
 
-        <dl className="grid grid-cols-2 gap-3 rounded-2xl bg-[var(--background-2)] p-4 text-sm ring-1 ring-inset ring-[var(--border)]">
-          <div>
-            <dt className="text-xs text-[var(--muted)]">{r.submitted_at ? "Applied" : "Added"}</dt>
-            <dd>{r.submitted_at ? t.dateTime(r.submitted_at) : t.date(r.created_at)}</dd>
-          </div>
-          <div>
-            <dt className="text-xs text-[var(--muted)]">Posted</dt>
-            <dd>{posted ?? "—"}</dd>
-          </div>
-          <div>
-            <dt className="text-xs text-[var(--muted)]">Resume used</dt>
-            <dd className="truncate">{r.resume_focus ?? "Main resume"}</dd>
-          </div>
-          <div>
-            <dt className="text-xs text-[var(--muted)]">Requested by</dt>
-            <dd>{r.requested_by === "user" ? "You" : "Agent (auto-submit)"}</dd>
-          </div>
-          {(r.attempts ?? 0) > 0 && (
-            <div>
-              <dt className="text-xs text-[var(--muted)]">Attempts</dt>
-              <dd>{r.attempts}</dd>
+        <dl className="grid grid-cols-2 border-t border-[var(--border)] text-sm">
+          {(
+            [
+              [r.submitted_at ? "Applied" : "Added", r.submitted_at ? t.dateTime(r.submitted_at) : t.date(r.created_at)],
+              ["Resume used", r.resume_focus ?? (r.submitted_at ? "Main resume" : "Chosen when it applies")],
+              ["Requested by", r.requested_by === "user" ? "You" : "Agent (auto-submit)"],
+              ["Attempts", String(r.attempts ?? 0)],
+            ] as [string, string][]
+          ).map(([k, v]) => (
+            <div key={k} className="border-b border-[var(--border)] py-3 pr-3">
+              <dt className="kicker">{k}</dt>
+              <dd className="mt-1 truncate">{v}</dd>
             </div>
-          )}
+          ))}
         </dl>
 
         {r.error && ["needs_user", "queued", "failed"].includes(r.status) && (
@@ -546,7 +559,7 @@ function ApplicationDetail({
         )}
 
         {login && r.status === "needs_user" && (
-          <div className="rounded-2xl border border-[var(--border)] p-4 text-sm">
+          <div className="border border-[var(--border)] p-5 text-sm">
             <h3 className="mb-1 font-semibold">Portal login</h3>
             <p className="text-[var(--muted)]">
               {login.portal_host} {login.account_created ? "· account created" : "· create the account with:"}
@@ -571,61 +584,53 @@ function ApplicationDetail({
               <button className={`${buttonCls("secondary")} min-h-[44px]`}>I applied myself</button>
             </form>
           )}
-          {["needs_user", "failed"].includes(r.status) && (
+          {r.status === "draft" && (
             <form action={retryApplication.bind(null, r.id)}>
-              <button className={`${buttonCls("ghost")} min-h-[44px]`} title="Put it back in the queue">
+              <button className={buttonCls("primary")}>Queue it for the agent ↗</button>
+            </form>
+          )}
+          {["needs_user", "failed", "ignored"].includes(r.status) && (
+            <form action={retryApplication.bind(null, r.id)}>
+              <button className={buttonCls("ghost")} title="Put it back in the queue">
                 Retry
               </button>
             </form>
           )}
         </div>
 
-        {answers.length > 0 && (
-          <details className="rounded-2xl border border-[var(--border)] p-4 text-sm">
-            <summary className="cursor-pointer font-semibold">Answers the agent prepared ({answers.length})</summary>
-            <p className="mt-1 text-xs text-[var(--muted)]">From your profile and resume. Check anything the agent wrote before relying on it.</p>
-            <dl className="mt-2 max-h-80 space-y-1.5 overflow-y-auto pr-1 text-xs">
-              {answers.slice(0, 60).map(([q2, a]) => (
-                <div key={q2} className="rounded-lg bg-[var(--background-2)] p-2">
-                  <dt className="text-[var(--muted)]">{q2}</dt>
-                  <dd className="mt-0.5 select-all">{String(a)}</dd>
-                </div>
-              ))}
-            </dl>
-          </details>
-        )}
+        <details className="border border-[var(--border)] p-5 text-sm" open={answers.length > 0 && answers.length <= 12}>
+          <summary className="cursor-pointer font-semibold">Answers ({answers.length})</summary>
+          <p className="mb-2 mt-1 text-xs text-[var(--muted)]">
+            What the agent filled in from your profile and resume. Edit or delete any of them, or add one. Tick “use on every application” to change what the agent answers from now on.
+          </p>
+          <AnswersEditor appId={r.id} answers={answers.slice(0, 80).map(([q2, a]) => [q2, String(a)])} company={r.jobs?.company_name ?? ""} />
+        </details>
 
         <div>
-          <h3 className="mb-2 text-sm font-semibold">Timeline</h3>
-          <ol className="space-y-2 border-l-2 border-[var(--border)] pl-4 text-sm">
-            {events.map((e, i) => (
-              <li key={i} className="relative">
-                <span className="absolute -left-[21px] top-1.5 h-2 w-2 rounded-full bg-[var(--accent)]" aria-hidden />
-                <span className="font-medium">{STAGE_LABEL[e.kind] ?? e.kind}</span>
-                <span className="text-[var(--muted)]">
-                  {" "}
-                  · {t.dateTime(e.created_at)} · {e.source === "email" ? "from your inbox" : e.source === "agent" ? "agent" : "you"}
-                </span>
-                {e.detail && <p className="text-xs text-[var(--muted)]">{e.detail}</p>}
+          <h3 className="display text-[28px]">A record of progress.</h3>
+          <ol className="mt-3 border-t border-[var(--foreground)] text-sm">
+            {[...events.map((e) => ({ kind: STAGE_LABEL[e.kind] ?? e.kind, at: e.created_at, who: e.source === "email" ? "from your inbox" : e.source === "agent" ? "by the agent" : "by you", detail: e.detail })), { kind: "Added", at: r.created_at, who: "", detail: null }].map((e, i) => (
+              <li key={i} className="border-b border-[var(--border)] py-3.5">
+                <p className="kicker">{String(i + 1).padStart(2, "0")} / event</p>
+                <p className="mt-1">
+                  {t.date(e.at).replace(/, \d{4}$/, "")} — {e.kind}
+                  {e.who && <span className="text-[var(--muted)]"> · {e.who}</span>}
+                </p>
+                {e.detail && <p className="mt-0.5 text-xs text-[var(--muted)]">{e.detail}</p>}
               </li>
             ))}
-            <li className="relative">
-              <span className="absolute -left-[21px] top-1.5 h-2 w-2 rounded-full bg-[var(--border-strong)]" aria-hidden />
-              <span className="font-medium">Added</span>
-              <span className="text-[var(--muted)]"> · {t.dateTime(r.created_at)}</span>
-            </li>
           </ol>
         </div>
 
-        {!["needs_user", "queued"].includes(r.status) && (
-          <form action={setApplicationStatus.bind(null, r.id)} className="space-y-2 rounded-2xl border border-[var(--border)] p-4">
+        {!["needs_user", "queued", "draft"].includes(r.status) && (
+          <form action={setApplicationStatus.bind(null, r.id)} className="space-y-2 border border-[var(--border)] p-5">
             <h3 className="text-sm font-semibold">Record an update</h3>
             <p className="text-xs text-[var(--muted)]">E.g. a recruiter called. This only changes your record — nothing is sent to the employer.</p>
             <div className="flex flex-wrap gap-2">
               <label className="sr-only" htmlFor="status-select">
                 Status
               </label>
-              <select id="status-select" name="status" defaultValue={r.status} className="min-h-[40px] rounded-lg border border-[var(--border)] bg-[var(--background-2)] px-2 text-sm">
+              <select id="status-select" name="status" defaultValue={r.status} className="min-h-[40px] rounded-sm border border-[var(--border-strong)] bg-[var(--card)] px-2 text-sm">
                 {["submitted", "received", "under_review", "screening", "interview", "offer", "rejected", "withdrawn"].map((s) => (
                   <option key={s} value={s}>
                     {STAGE_LABEL[s]}
@@ -635,7 +640,7 @@ function ApplicationDetail({
               <label className="sr-only" htmlFor="status-note">
                 Note
               </label>
-              <input id="status-note" name="note" placeholder="Note (optional)" className="min-h-[40px] min-w-0 flex-1 rounded-lg border border-[var(--border)] bg-[var(--background-2)] px-2 text-sm" />
+              <input id="status-note" name="note" placeholder="Note (optional)" className="min-h-[40px] min-w-0 flex-1 rounded-sm border border-[var(--border-strong)] bg-[var(--card)] px-2 text-sm" />
               <button className={`${buttonCls("secondary", "sm")} min-h-[40px]`}>Save</button>
             </div>
           </form>

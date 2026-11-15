@@ -376,3 +376,60 @@ export function boardsFrom(postings: Posting[]): { ats: "greenhouse" | "lever" |
 }
 
 export { domainOf };
+
+// ── Keyword search for the Find Jobs page (any field, not only the roles the agent watches) ──
+/** Names arrive with HTML codes ("Quest Defense Systems &#038; Solutions"). */
+const plain = (s: string) => stripHtml(s.replace(/&#0*(\d+);/g, (_, n) => String.fromCharCode(Number(n))));
+
+/** US-friendly remote location text ("USA", "Anywhere", "Worldwide"…). */
+const usOk = (loc: string) => isUsRemote(loc) || isUsLocation(loc);
+
+/** Remotive's keyword search. Remote jobs in any field. */
+export async function searchRemotive(term: string, timeoutMs = 9000): Promise<Posting[]> {
+  const r = await getJson<{
+    jobs: { id: number; title: string; company_name: string; url: string; candidate_required_location: string; salary: string; publication_date: string; description: string; job_type: string }[];
+  }>(`https://remotive.com/api/remote-jobs?search=${encodeURIComponent(term)}&limit=40`, timeoutMs);
+  return (r?.jobs ?? [])
+    .filter((j) => usOk(j.candidate_required_location || "Remote"))
+    .map((j) => {
+      const desc = stripHtml(j.description);
+      const pay = parseSalary(j.salary || desc);
+      return finish({
+        source: "remotive",
+        source_key: `remotive:${j.id}`,
+        company_name: plain(j.company_name),
+        title: plain(j.title),
+        level: detectLevel(j.title, j.job_type),
+        locations: [j.candidate_required_location || "Remote"],
+        is_remote: true,
+        url: j.url,
+        salary_min: pay.min,
+        salary_max: pay.max,
+        description: desc,
+        posted_at: j.publication_date,
+      });
+    });
+}
+
+/** Jobicy's keyword (tag) search, US remote jobs. */
+export async function searchJobicy(term: string, timeoutMs = 9000): Promise<Posting[]> {
+  const r = await getJson<{
+    jobs: { id: number; jobTitle: string; companyName: string; url: string; jobGeo: string; annualSalaryMin?: number; annualSalaryMax?: number; pubDate: string; jobDescription: string; jobLevel?: string }[];
+  }>(`https://jobicy.com/api/v2/remote-jobs?count=50&geo=usa&tag=${encodeURIComponent(term)}`, timeoutMs);
+  return (r?.jobs ?? []).map((j) =>
+    finish({
+      source: "jobicy",
+      source_key: `jobicy:${j.id}`,
+      company_name: plain(j.companyName),
+      title: plain(j.jobTitle),
+      level: detectLevel(j.jobTitle, j.jobLevel ?? ""),
+      locations: [j.jobGeo || "USA"],
+      is_remote: true,
+      url: j.url,
+      salary_min: j.annualSalaryMin,
+      salary_max: j.annualSalaryMax,
+      description: stripHtml(j.jobDescription ?? ""),
+      posted_at: j.pubDate,
+    })
+  );
+}

@@ -3,11 +3,13 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { requireUser } from "@/lib/v2/session";
-import { APP_QUESTIONS, customStore, findSimilarAnswer, type CustomAnswers, type PendingQuestion } from "@/lib/v2/app-questions";
+import { APP_QUESTIONS, customStore, findSimilarAnswer, memoryKey, type CustomAnswers, type PendingQuestion } from "@/lib/v2/app-questions";
 import { DEFAULT_DAILY_CAP, DEFAULT_MIN_FIT, MAX_DAILY_APPLY_CAP } from "@/lib/v2/priority";
 import { agentCanSubmit } from "@/lib/v2/verify";
 import { readTuning } from "@/lib/v2/tuning";
 import { ROLE_CATALOG } from "@/lib/v2/role-catalog";
+import { appTabFilter, isAppTab } from "@/lib/v2/app-filter";
+import { needsKind } from "@/lib/v2/needs";
 
 const list = (v: FormDataEntryValue | null) =>
   String(v ?? "")
@@ -244,6 +246,177 @@ export async function dismissJob(jobId: string) {
   revalidatePath("/jobs");
 }
 
+/**
+ * Explore → Prepare application. "draft" records it for you only — the agent never touches drafts.
+ * "queue" hands it to the agent for its next run. Both require an explicit acknowledgement on the form.
+ * An optional note is kept on the application's timeline.
+ */
+export async function prepareApplication(jobId: string, input: { mode: "draft" | "queue"; note?: string; acknowledged: boolean }): Promise<{ ok: boolean; message: string; appId?: string }> {
+  const { supabase, user } = await requireUser();
+  if (!input.acknowledged) return { ok: false, message: "Tick the box to confirm first." };
+  const { data: job } = await supabase.from("jobs").select("id,posting_id,url,job_postings(ats,apply_url,verification_status)").eq("id", jobId).eq("user_id", user.id).maybeSingle();
+  if (!job) return { ok: false, message: "Job not found." };
+  const p = (job as unknown as { job_postings: { ats: string | null; apply_url: string | null; verification_status: string } | null }).job_postings;
+  if (input.mode === "queue" && p?.verification_status !== "verified") return { ok: false, message: "This employer isn’t verified, so the agent won’t apply. Save a draft and apply yourself." };
+  const { data: existing } = await supabase.from("applications").select("id,status").eq("user_id", user.id).eq("job_id", jobId).maybeSingle();
+  if (existing && !["draft", "ignored", "failed"].includes(existing.status as string))
+    return { ok: false, message: "You already have an application for this job.", appId: existing.id as string };
+  const status = input.mode === "queue" ? "queued" : "draft";
+  const { data: app, error } = await supabase
+    .from("applications")
+    .upsert(
+      { user_id: user.id, job_id: job.id, posting_id: job.posting_id, apply_url: p?.apply_url || job.url, ats: p?.ats ?? null, status, requested_by: "user", error: null, status_updated_at: new Date().toISOString() },
+      { onConflict: "user_id,job_id" }
+    )
+    .select("id")
+    .single();
+  if (error || !app) return { ok: false, message: `Couldn’t save: ${error?.message ?? "unknown error"}` };
+  const note = (input.note ?? "").trim().slice(0, 1000);
+  await supabase.from("application_events").insert({
+    user_id: user.id,
+    application_id: app.id,
+    kind: note ? "note" : status,
+    source: "user",
+    detail: note || (status === "draft" ? "Draft saved — not sent" : "Queued for the agent"),
+  });
+  // /jobs isn't revalidated here: the dialog shows its confirmation first and refreshes the page when closed.
+  revalidatePath("/applications");
+  revalidatePath("/dashboard");
+  return {
+    ok: true,
+    appId: app.id as string,
+    message: status === "draft" ? "Draft saved. Nothing was sent — queue it from Applications when you’re ready." : "Queued. The agent applies on its next run; you’ll see the result in Applications.",
+  };
+}
+
+/**
+ * Edit, add or rename one answer on an application (Applications → details → Answers).
+ * With "remember", it's also saved to your profile answers, so the agent uses it on every
+ * application that asks the same question (including when this one is retried).
+ */
+export async function saveApplicationAnswer(appId: string, input: { question: string; answer: string; oldQuestion?: string; remember?: boolean }): Promise<{ ok: boolean; message: string }> {
+  const { supabase, user } = await requireUser();
+  const q = input.question.replace(/\s+/g, " ").trim().slice(0, 300);
+  const a = input.answer.trim().slice(0, 5000);
+  if (!q) return { ok: false, message: "Write the question." };
+  if (!a) return { ok: false, message: "Write an answer, or use Delete to remove it." };
+  const { data: app } = await supabase.from("applications").select("answers").eq("id", appId).eq("user_id", user.id).maybeSingle();
+  if (!app) return { ok: false, message: "Application not found." };
+  const answers: Record<string, string> = { ...((app.answers ?? {}) as Record<string, string>) };
+  if (input.oldQuestion && input.oldQuestion !== q) delete answers[input.oldQuestion];
+  answers[q] = a;
+  const { error } = await supabase.from("applications").update({ answers }).eq("id", appId).eq("user_id", user.id);
+  if (error) return { ok: false, message: `Couldn't save: ${error.message}` };
+  if (input.remember) {
+    const { data: p } = await supabase.from("profiles").select("custom_answers").eq("id", user.id).maybeSingle();
+    const custom: CustomAnswers = { ...((p?.custom_answers ?? {}) as CustomAnswers) };
+    custom[memoryKey(q)] = { q, a: a.slice(0, 2000), at: new Date().toISOString() };
+    const { error: e2 } = await supabase.from("profiles").update({ custom_answers: custom }).eq("id", user.id);
+    if (e2) return { ok: false, message: `Saved on this application, but not to your profile: ${e2.message}` };
+    revalidatePath("/profile");
+  }
+  revalidatePath("/applications");
+  return { ok: true, message: input.remember ? "Saved — and used on every application that asks this." : "Saved on this application." };
+}
+
+/** Remove one answer from an application. */
+export async function deleteApplicationAnswer(appId: string, question: string): Promise<{ ok: boolean; message: string }> {
+  const { supabase, user } = await requireUser();
+  const { data: app } = await supabase.from("applications").select("answers").eq("id", appId).eq("user_id", user.id).maybeSingle();
+  if (!app) return { ok: false, message: "Application not found." };
+  const answers: Record<string, string> = { ...((app.answers ?? {}) as Record<string, string>) };
+  delete answers[question];
+  const { error } = await supabase.from("applications").update({ answers }).eq("id", appId).eq("user_id", user.id);
+  if (error) return { ok: false, message: `Couldn't delete: ${error.message}` };
+  revalidatePath("/applications");
+  return { ok: true, message: "Answer deleted." };
+}
+
+/**
+ * Find Jobs → search results: add a job that isn't one of your matches yet (from the shared job database,
+ * or from a live web search), so you can save it or apply. A live result is fetched again on the server —
+ * nothing the browser sends is saved as a posting — then checked like any other posting.
+ */
+export async function addSearchedJob(form: FormData) {
+  const { supabase, user } = await requireUser();
+  const postingId = String(form.get("posting_id") ?? "");
+  const liveKey = String(form.get("live_key") ?? "");
+  const term = String(form.get("term") ?? "").slice(0, 100);
+  const back = String(form.get("back") ?? "/jobs");
+  const fail = (m: string) => redirect(`${back.startsWith("/jobs") ? back : "/jobs"}${back.includes("?") ? "&" : "?"}msg=${encodeURIComponent(m)}`);
+
+  type P = { id: string; source_key: string; title: string; company_name: string; url: string; apply_url: string | null; level: string | null; locations: string[]; is_remote: boolean; salary_min: number | null; salary_max: number | null; description: string | null; source: string; verification_score: number | null };
+  const COLS = "id,source_key,title,company_name,url,apply_url,level,locations,is_remote,salary_min,salary_max,description,source,verification_score";
+  let posting: P | null = null;
+
+  if (/^[0-9a-f-]{36}$/i.test(postingId)) {
+    const { data } = await supabase.from("job_postings").select(COLS).eq("id", postingId).maybeSingle();
+    posting = data as P | null;
+  } else if (/^(remotive|jobicy|workday):[\w.:-]{1,200}$/.test(liveKey)) {
+    const db = (await import("@/lib/v2/session")).serviceClient();
+    const { data: existing } = await db.from("job_postings").select(COLS).eq("source_key", liveKey).maybeSingle();
+    posting = existing as P | null;
+    if (!posting) {
+      const { resolveLiveHit } = await import("@/lib/v2/discovery/live-search");
+      const { verifyPosting } = await import("@/lib/v2/verify");
+      const p = await resolveLiveHit(liveKey, term);
+      if (!p) fail("Couldn't open that job any more — it may have been taken down. Try the search again.");
+      const v = verifyPosting(p!);
+      const now = new Date().toISOString();
+      const { data: saved, error } = await db
+        .from("job_postings")
+        .upsert(
+          {
+            ...p!,
+            salary_min: p!.salary_min ?? null,
+            salary_max: p!.salary_max ?? null,
+            first_seen_at: now,
+            last_seen_at: now,
+            active: true,
+            verification_status: v.status,
+            verification_score: v.score,
+            verification_signals: v.signals,
+            verified_at: now,
+          },
+          { onConflict: "source_key" }
+        )
+        .select(COLS)
+        .single();
+      if (error) fail(`Couldn't add it: ${error.message}`);
+      posting = saved as P;
+    }
+  }
+  if (!posting) fail("That job wasn't found.");
+  const p = posting!;
+
+  const { data: prof } = await supabase.from("profiles").select("*").eq("id", user.id).maybeSingle();
+  const { matchPosting, profileToMatch } = await import("@/lib/v2/match");
+  const m = matchPosting(profileToMatch(prof ?? {}), { ...p, level: p.level, description: p.description });
+  const { data: job, error } = await supabase
+    .from("jobs")
+    .upsert(
+      {
+        user_id: user.id,
+        idempotency_key: p.source_key,
+        posting_id: p.id,
+        title: p.title,
+        company_name: p.company_name,
+        url: p.url,
+        source: "search",
+        fit_score: m.score,
+        fit_reasons: ["Added by you from search", ...m.reasons],
+        trust_score: p.verification_score,
+        dismissed: false,
+      },
+      { onConflict: "user_id,idempotency_key" }
+    )
+    .select("id")
+    .single();
+  if (error || !job) fail(`Couldn't add it: ${error?.message ?? "unknown error"}`);
+  revalidatePath("/jobs");
+  redirect(`/jobs?job=${job!.id}&added=1`);
+}
+
 /** Bookmark a job for later (Find Jobs → Saved). Needs migration 011; before it runs this does nothing. */
 export async function toggleSavedJob(jobId: string, save: boolean) {
   const { supabase, user } = await requireUser();
@@ -319,31 +492,77 @@ export async function disconnectInbox() {
   revalidatePath("/settings");
 }
 
-const BULK_ACTIONS = ["retry", "applied", "rejected", "withdrawn", "delete"] as const;
+const BULK_ACTIONS = ["retry", "ignore", "applied", "rejected", "withdrawn", "delete"] as const;
+const BULK_MAX = 5000;
 
-/** Applications page: one action on many selected applications. */
+/** Every application id in one Applications view (tab + optional Needs-you reason), across all pages. */
+async function idsInView(supabase: Awaited<ReturnType<typeof requireUser>>["supabase"], userId: string, tab: string, why: string): Promise<string[]> {
+  const out: string[] = [];
+  if (tab === "needs" && why) {
+    // The reason is worked out from each application's error and open questions, same as the page does.
+    const { data: p } = await supabase.from("profiles").select("custom_answers").eq("id", userId).maybeSingle();
+    const mine = customStore(p?.custom_answers as CustomAnswers | null);
+    const { data } = await supabase.from("applications").select("id,error,pending_questions").eq("user_id", userId).eq("status", "needs_user").limit(BULK_MAX);
+    for (const r of (data ?? []) as { id: string; error: string | null; pending_questions: PendingQuestion[] | null }[]) {
+      const open = (r.pending_questions ?? []).filter((q) => !findSimilarAnswer(q.label, q.options ?? [], mine));
+      if (needsKind(r.error, open.length) === why) out.push(r.id);
+    }
+    return out;
+  }
+  const f = appTabFilter(tab);
+  for (let from = 0; from < BULK_MAX; from += 1000) {
+    let q = supabase.from("applications").select("id").eq("user_id", userId);
+    if (f.or) q = q.or(f.or);
+    if (f.statuses) q = q.in("status", f.statuses);
+    const { data, error } = await q.order("created_at", { ascending: false }).range(from, from + 999);
+    if (error || !data?.length) break;
+    out.push(...data.map((r) => r.id as string));
+    if (data.length < 1000) break;
+  }
+  return out;
+}
+
+/**
+ * Applications page: one action on many applications — either the ticked ones, or (scope = "all")
+ * every application in the current view, across all pages.
+ */
 export async function bulkApplications(form: FormData) {
   const { supabase, user } = await requireUser();
-  const ids = [...new Set(form.getAll("ids").map(String).filter((x) => /^[0-9a-f-]{36}$/i.test(x)))].slice(0, 500);
   const action = String(form.get("action") ?? "") as (typeof BULK_ACTIONS)[number];
   const back = String(form.get("back") ?? "/applications");
   const done = (m: string) => redirect(`${back.startsWith("/applications") ? back.split("#")[0] : "/applications"}${back.includes("?") ? "&" : "?"}msg=${encodeURIComponent(m)}`);
-  if (!ids.length) done("Select at least one application first.");
   if (!BULK_ACTIONS.includes(action)) done("Pick an action.");
+  const tab = String(form.get("tab") ?? "");
+  const ids =
+    form.get("scope") === "all" && isAppTab(tab)
+      ? await idsInView(supabase, user.id, tab, String(form.get("why") ?? ""))
+      : [...new Set(form.getAll("ids").map(String).filter((x) => /^[0-9a-f-]{36}$/i.test(x)))].slice(0, BULK_MAX);
+  if (!ids.length) done("Select at least one application first.");
   const now = new Date().toISOString();
-  const scope = () => supabase.from("applications");
-  if (action === "retry") {
-    await scope().update({ status: "queued", error: null, attempts: 0, pending_questions: null, status_updated_at: now }).in("id", ids).eq("user_id", user.id);
-  } else if (action === "applied") {
-    await scope().update({ status: "submitted", submitted_at: now, status_updated_at: now, error: null, pending_questions: null }).in("id", ids).eq("user_id", user.id);
-    await supabase.from("application_events").insert(ids.map((id) => ({ user_id: user.id, application_id: id, kind: "submitted", source: "user", detail: "Marked as applied" })));
-  } else if (action === "rejected" || action === "withdrawn") {
-    await scope().update({ status: action, status_updated_at: now, pending_questions: null }).in("id", ids).eq("user_id", user.id);
-    await supabase.from("application_events").insert(ids.map((id) => ({ user_id: user.id, application_id: id, kind: action, source: "user", detail: "Updated from the Applications page" })));
-  } else if (action === "delete") {
-    await scope().delete().in("id", ids).eq("user_id", user.id);
+  // Large selections go in batches (URL length limits on .in()).
+  for (let i = 0; i < ids.length; i += 200) {
+    const part = ids.slice(i, i + 200);
+    const scope = () => supabase.from("applications");
+    const events = (kind: string, detail: string) =>
+      supabase.from("application_events").insert(part.map((id) => ({ user_id: user.id, application_id: id, kind, source: "user", detail })));
+    if (action === "retry") {
+      await scope().update({ status: "queued", error: null, attempts: 0, pending_questions: null, status_updated_at: now }).in("id", part).eq("user_id", user.id);
+    } else if (action === "ignore") {
+      // Stop asking about it: out of Needs you and the queue. Its own status, so it never counts as sent.
+      await scope().update({ status: "ignored", status_updated_at: now, pending_questions: null }).in("id", part).eq("user_id", user.id);
+      await events("ignored", "Ignored by you");
+    } else if (action === "applied") {
+      await scope().update({ status: "submitted", submitted_at: now, status_updated_at: now, error: null, pending_questions: null }).in("id", part).eq("user_id", user.id);
+      await events("submitted", "Marked as applied");
+    } else if (action === "rejected" || action === "withdrawn") {
+      await scope().update({ status: action, status_updated_at: now, pending_questions: null }).in("id", part).eq("user_id", user.id);
+      await events(action, "Updated from the Applications page");
+    } else if (action === "delete") {
+      await scope().delete().in("id", part).eq("user_id", user.id);
+    }
   }
   revalidatePath("/applications");
-  const label = { retry: "back in the queue", applied: "marked as applied", rejected: "marked rejected", withdrawn: "withdrawn", delete: "deleted" }[action];
+  revalidatePath("/dashboard");
+  const label = { retry: "back in the queue", ignore: "ignored (see Closed / ignored)", applied: "marked as applied", rejected: "marked rejected", withdrawn: "withdrawn", delete: "deleted" }[action];
   done(`${ids.length} application${ids.length === 1 ? "" : "s"} ${label}.`);
 }

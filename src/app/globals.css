@@ -4,104 +4,134 @@
 @custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
 
 /*
- * Semantic design tokens. Light is the base; dark overrides below.
+ * Career Desk design tokens. Warm paper, pine green, vermilion punctuation; flat surfaces, 1px rules.
  * Components use these variables (bg-[var(--card)] …) instead of fixed colors.
  */
 :root {
-  --background: #f7f8fc;
-  --background-2: #fbfcff;
-  --foreground: #182238;
-  --card: #ffffff;
-  --card-2: #fbfcff;
-  --border: #e9edf5;
-  --border-strong: #d6dceb;
-  --accent: #6157ee;
-  --accent-hover: #5044d9;
-  --accent-2: #22b8d6;
-  --accent-soft: rgba(97, 87, 238, 0.1);
-  --accent-text: #4a3fd6;
-  --hover: rgba(24, 34, 56, 0.05);
-  --success: #159873;
-  --warning: #ca872b;
-  --danger: #d26068;
-  --muted: #5e6980;
-  --shadow: 0 1px 2px rgba(24, 34, 56, 0.04), 0 8px 24px -16px rgba(24, 34, 56, 0.18);
-  --radius: 16px;
-  --glow-1: rgba(97, 87, 238, 0.07);
-  --glow-2: rgba(34, 184, 214, 0.05);
+  /* Brand */
+  --paper: #f7f5ef;
+  --sheet: #fffefa;
+  --ink: #20382f;
+  --green: #173d32;
+  --orange: #e76a45;
+  --orange-text: #b8461f; /* AA on paper for small orange type */
+  --cream: #f1e8d8;
+  --soft: #ebeee4;
+  --line: #dadfd1;
+
+  /* Semantic (used by every component) */
+  --background: var(--paper);
+  --background-2: #fbfaf5;
+  --foreground: var(--ink);
+  --card: var(--sheet);
+  --card-2: #fbfaf4;
+  --border: var(--line);
+  --border-strong: #c3c9b8;
+  --accent: var(--green);
+  --accent-hover: #0f2d24;
+  --accent-2: #2e6a57;
+  --accent-soft: var(--soft);
+  --accent-text: var(--green);
+  --hover: rgba(32, 56, 47, 0.05);
+  --success: #2e7a55;
+  --warning: #a86a12;
+  --danger: #b4452f;
+  --muted: #5f685f;
+  --shadow: 0 1px 0 rgba(32, 56, 47, 0.03);
+  --radius: 2px;
+  --rail: var(--green);
+  --rail-text: #eef0e6;
+  --rail-muted: #9fb3a8;
   color-scheme: light;
 
-  /* Status text/background shades were picked for a dark canvas. On light, map the pale
-     text shades to darker ones and the deep "tinted panel" shades to pale ones. */
-  --color-emerald-200: #0b6e52;
-  --color-emerald-300: #0f7d5e;
-  --color-emerald-400: #159873;
-  --color-emerald-900: #d6f3e8;
-  --color-amber-200: #8a5a12;
-  --color-amber-300: #9a6514;
-  --color-amber-400: #b8781f;
-  --color-amber-900: #fbecd2;
-  --color-red-200: #9e2f37;
-  --color-red-300: #b23a43;
-  --color-red-400: #c4505a;
-  --color-red-900: #fbe0e2;
-  --color-cyan-300: #0e7490;
-  --color-cyan-400: #0891b2;
+  /* Flat, editorial corners everywhere (Tailwind's rounded-* scale). rounded-full stays round. */
+  --radius-sm: 2px;
+  --radius-md: 2px;
+  --radius-lg: 2px;
+  --radius-xl: 3px;
+  --radius-2xl: 3px;
+  --radius-3xl: 4px;
+
+  /* Type */
+  --font-serif: var(--font-fraunces), Georgia, "Times New Roman", serif;
+  --font-mono: var(--font-dm-mono), ui-monospace, Consolas, monospace;
+
+  /* Status shades tuned for paper (status text / tinted panels). */
+  --color-emerald-200: #1e5a40;
+  --color-emerald-300: #24684a;
+  --color-emerald-400: #2e7a55;
+  --color-emerald-900: #e2ecdf;
+  --color-amber-200: #7a4c0c;
+  --color-amber-300: #8a560f;
+  --color-amber-400: #a86a12;
+  --color-amber-900: #f4e8cf;
+  --color-red-200: #8c3322;
+  --color-red-300: #9e3a27;
+  --color-red-400: #b4452f;
+  --color-red-900: #f6e1d9;
+  --color-cyan-300: #2f5d6e;
+  --color-cyan-400: #3d7186;
 }
 
+/* Night desk: the same system after dark. */
 [data-theme="dark"] {
-  --background: #101422;
-  --background-2: #141a2a;
-  --foreground: #eff2ff;
-  --card: #191f30;
-  --card-2: #1d2538;
-  --border: #30384a;
-  --border-strong: #404a60;
-  --accent: #8f83ff;
-  --accent-hover: #7c70ee;
-  --accent-2: #22d3ee;
-  --accent-soft: rgba(166, 155, 255, 0.14);
-  --accent-text: #c3baff;
+  --paper: #0f1c17;
+  --sheet: #152a23;
+  --ink: #eef0e6;
+  --cream: #213529;
+  --soft: rgba(143, 211, 181, 0.1);
+  --line: #2a4339;
+  --orange: #f08a66;
+  --orange-text: #f39a79;
+
+  --background: var(--paper);
+  --background-2: #12241d;
+  --foreground: var(--ink);
+  --card: var(--sheet);
+  --card-2: #1a3129;
+  --border: var(--line);
+  --border-strong: #3a5649;
+  --accent: #2f7a60;
+  --accent-hover: #3a8c70;
+  --accent-2: #8fd3b5;
+  --accent-soft: var(--soft);
+  --accent-text: #9fdcc0;
   --hover: rgba(255, 255, 255, 0.05);
-  --success: #64d0ac;
-  --warning: #ffbf69;
-  --danger: #ff8a91;
-  --muted: #9da9bf;
-  --shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 10px 30px -12px rgba(0, 0, 0, 0.55);
-  --glow-1: rgba(124, 108, 255, 0.12);
-  --glow-2: rgba(34, 211, 238, 0.06);
+  --success: #7fcca6;
+  --warning: #e8b660;
+  --danger: #f0907a;
+  --muted: #a3ae9f;
+  --shadow: none;
+  --rail: #0b1612;
+  --rail-text: #eef0e6;
+  --rail-muted: #8ea398;
   color-scheme: dark;
 
-  /* Restore Tailwind's own shades. */
-  --color-emerald-200: oklch(90.5% 0.093 164.15);
-  --color-emerald-300: oklch(84.5% 0.143 164.978);
-  --color-emerald-400: oklch(76.5% 0.177 163.223);
-  --color-emerald-900: oklch(37.8% 0.077 168.94);
-  --color-amber-200: oklch(92.4% 0.12 95.746);
-  --color-amber-300: oklch(87.9% 0.169 91.605);
-  --color-amber-400: oklch(82.8% 0.189 84.429);
-  --color-amber-900: oklch(41.4% 0.112 45.904);
-  --color-red-200: oklch(88.5% 0.062 18.334);
-  --color-red-300: oklch(80.8% 0.114 19.571);
-  --color-red-400: oklch(70.4% 0.191 22.216);
-  --color-red-900: oklch(39.6% 0.141 25.723);
-  --color-cyan-300: oklch(86.5% 0.127 207.078);
-  --color-cyan-400: oklch(78.9% 0.154 211.53);
+  --color-emerald-200: #b5e6cd;
+  --color-emerald-300: #9adbbb;
+  --color-emerald-400: #7fcca6;
+  --color-emerald-900: #1d3b2d;
+  --color-amber-200: #f3d7a0;
+  --color-amber-300: #edc57f;
+  --color-amber-400: #e8b660;
+  --color-amber-900: #3d3019;
+  --color-red-200: #f6c2b5;
+  --color-red-300: #f3a896;
+  --color-red-400: #f0907a;
+  --color-red-900: #432620;
+  --color-cyan-300: #a9d3e0;
+  --color-cyan-400: #8cc2d3;
 }
 
 body {
-  background:
-    radial-gradient(1200px 600px at 85% -10%, var(--glow-1), transparent 60%),
-    radial-gradient(900px 500px at -10% 110%, var(--glow-2), transparent 60%),
-    var(--background);
-  background-attachment: fixed;
+  background: var(--background);
   color: var(--foreground);
   font-family: var(--font-sans), system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   -webkit-font-smoothing: antialiased;
 }
 
 ::selection {
-  background: color-mix(in srgb, var(--accent) 30%, transparent);
+  background: color-mix(in srgb, var(--orange) 28%, transparent);
 }
 
 select option {
@@ -117,11 +147,10 @@ input[type="radio"] {
 }
 
 :focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--orange);
   outline-offset: 2px;
 }
 
-/* Thin scrollbars that match the theme. */
 * {
   scrollbar-width: thin;
   scrollbar-color: var(--border-strong) transparent;
@@ -146,11 +175,45 @@ details.no-marker > summary::before {
   content: none;
 }
 
+/* ── Editorial type helpers ─────────────────────────────────────────── */
+/* Large serif statements ("A better next move."). */
+.display {
+  font-family: var(--font-serif);
+  font-weight: 400;
+  letter-spacing: -0.035em;
+  line-height: 1.02;
+  font-optical-sizing: auto;
+}
+/* The orange italic word inside a display line. */
+.display em,
+.em-accent {
+  font-style: italic;
+  color: var(--orange);
+}
+/* Small monospaced upper-case labels: overlines, metadata, dates, statuses. */
+.kicker {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+/* "—— LABEL" rule-led overline. */
+.rule-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+.rule-label::before {
+  content: "";
+  width: 28px;
+  height: 1px;
+  background: currentColor;
+  opacity: 0.6;
+}
+
 .text-gradient {
-  background: linear-gradient(90deg, var(--accent), var(--accent-2));
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
+  color: var(--orange);
 }
 
 @keyframes fade-up {
@@ -181,7 +244,6 @@ details.no-marker > summary::before {
   animation: slide-in 0.2s ease both;
 }
 
-/* Hide horizontal-scroll chip rows' scrollbar on touch screens. */
 .no-scrollbar {
   scrollbar-width: none;
 }

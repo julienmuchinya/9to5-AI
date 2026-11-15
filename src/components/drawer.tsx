@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useEffect, useRef, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, type ReactNode } from "react";
 
 /**
  * Accessible right-side drawer: focus moves in, Tab stays inside, Esc or the backdrop closes it,
@@ -12,6 +12,7 @@ export function Drawer({
   onClose,
   label,
   wide = false,
+  modal = false,
   returnFocus,
   children,
 }: {
@@ -19,6 +20,8 @@ export function Drawer({
   onClose: () => void;
   label: string;
   wide?: boolean;
+  /** Centered dialog instead of a right-side panel (focused decisions like "Prepare application"). */
+  modal?: boolean;
   /** Element to focus on close. Defaults to whatever had focus when it opened (Safari doesn't focus clicked buttons). */
   returnFocus?: React.RefObject<HTMLElement | null>;
   children: ReactNode;
@@ -63,13 +66,17 @@ export function Drawer({
   if (!open) return null;
   return (
     <div className="fixed inset-0 z-50">
-      <div className="absolute inset-0 bg-black/30 backdrop-blur-[2px]" onClick={onClose} aria-hidden />
+      <div className="absolute inset-0 bg-[#173d32]/45" onClick={onClose} aria-hidden />
       <div
         ref={panel}
         role="dialog"
         aria-modal="true"
         aria-label={label}
-        className={`animate-slide-in absolute inset-y-0 right-0 flex w-full flex-col overflow-y-auto border-l border-[var(--border)] bg-[var(--card)] shadow-2xl ${wide ? "max-w-xl" : "max-w-md"}`}
+        className={
+          modal
+            ? "animate-fade-up absolute left-1/2 top-1/2 flex max-h-[calc(100vh-2rem)] w-[calc(100%-2rem)] max-w-[780px] -translate-x-1/2 -translate-y-1/2 flex-col overflow-y-auto overscroll-contain border border-[var(--border)] bg-[var(--background)]"
+            : `animate-slide-in absolute inset-y-0 right-0 flex w-full flex-col overflow-y-auto overscroll-contain border-l border-[var(--border)] bg-[var(--background)] ${wide ? "max-w-[720px]" : "max-w-[520px]"}`
+        }
       >
         {children}
       </div>
@@ -80,8 +87,10 @@ export function Drawer({
 /** A drawer whose open state lives in the URL (e.g. /applications?app=…), so it survives refresh and Back. */
 export function RouteDrawer({ closeHref, label, children }: { closeHref: string; label: string; children: ReactNode }) {
   const router = useRouter();
+  // Stable handler: an inline one would re-run the drawer's focus handling (and move focus) on every refresh.
+  const close = useCallback(() => router.push(closeHref, { scroll: false }), [router, closeHref]);
   return (
-    <Drawer open wide label={label} onClose={() => router.push(closeHref, { scroll: false })}>
+    <Drawer open wide label={label} onClose={close}>
       {children}
     </Drawer>
   );

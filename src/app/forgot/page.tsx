@@ -2,8 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { APP_NAME } from "@/lib/constants";
-import { inputCls } from "@/components/security-questions";
+import { AuthHeading, AuthShell, authButton, authInput, authLabel } from "@/components/auth-shell";
 import { PasswordInput } from "@/components/password-input";
 import { digitsOnly } from "@/lib/site";
 import { getRecoveryQuestions, resetWithAnswers, resetWithCode, sendResetEmail } from "../auth-actions";
@@ -41,16 +40,16 @@ export default function ForgotPage() {
   const pwWeak = pw.length > 0 && !(pw.length >= 8 && /[a-zA-Z]/.test(pw) && /[0-9]/.test(pw));
   const newPasswordFields = (
     <>
-      <label className="block text-sm">
+      <label className={authLabel}>
         New password
-        <PasswordInput className={inputCls} minLength={8} value={pw} onChange={(e) => setPw(e.target.value)} required autoComplete="new-password" aria-describedby="pw-rules" />
-        <span id="pw-rules" className={`mt-1 block text-xs ${pwWeak ? "text-amber-300" : "text-[var(--muted)]"}`}>
+        <PasswordInput className={authInput} minLength={8} value={pw} onChange={(e) => setPw(e.target.value)} required autoComplete="new-password" aria-describedby="pw-rules" />
+        <span id="pw-rules" className={`mt-1.5 block font-sans text-xs normal-case tracking-normal ${pwWeak ? "text-amber-300" : "text-[var(--muted)]"}`}>
           8+ characters with at least one letter and one number.
         </span>
       </label>
-      <label className="block text-sm">
+      <label className={authLabel}>
         Repeat new password
-        <PasswordInput className={inputCls} minLength={8} value={pw2} onChange={(e) => setPw2(e.target.value)} required autoComplete="new-password" />
+        <PasswordInput className={authInput} minLength={8} value={pw2} onChange={(e) => setPw2(e.target.value)} required autoComplete="new-password" />
       </label>
       {pwMismatch && (
         <p role="alert" className="text-sm text-red-400">
@@ -59,16 +58,13 @@ export default function ForgotPage() {
       )}
     </>
   );
-  const btn = "w-full rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-medium text-white disabled:opacity-50";
+  const btn = authButton;
 
   return (
-    <div className="flex min-h-screen items-center justify-center p-4">
-      <div className="w-full max-w-sm space-y-4 rounded-xl border border-[var(--border)] bg-[var(--card)] p-6">
-        <div>
-          <h1 className="text-xl font-bold text-[var(--accent)]">{APP_NAME}</h1>
-          <p className="mt-1 text-sm text-[var(--muted)]">Reset your password</p>
-        </div>
-        {expired && step === "email" && <p className="text-sm text-amber-300">{expired}</p>}
+    <AuthShell statement="A little more *clarity.*" note="Locked out happens. Prove it’s you with a code sent to your email, or your three recovery answers.">
+      <AuthHeading over="Account recovery" title="Find your way back." sub="We’ll help you get into your workspace. Nothing about your account is shown to anyone who doesn’t own it." />
+      <div className="space-y-5">
+        {expired && step === "email" && <p className="border-l-[3px] border-amber-400 px-3 py-2 text-sm text-amber-300">{expired}</p>}
 
         {step === "email" && (
           <form
@@ -78,10 +74,10 @@ export default function ForgotPage() {
               setStep("choose");
             }}
           >
-            <label className="block text-sm">
+            <label className={authLabel}>
               Your account email
-              <input className={`${inputCls} mt-1`} type="email" value={email} onChange={(e) => setEmail(e.target.value.trim())} required autoComplete="email" />
-              <span className="mt-1 block text-xs text-[var(--muted)]">Use the exact email you signed up with.</span>
+              <input className={`${authInput}`} type="email" value={email} onChange={(e) => setEmail(e.target.value.trim())} required autoComplete="email" />
+              <span className="mt-1.5 block font-sans text-xs normal-case tracking-normal text-[var(--muted)]">Use the exact email you signed up with.</span>
             </label>
             <button className={btn}>Continue</button>
           </form>
@@ -104,7 +100,7 @@ export default function ForgotPage() {
             </button>
             <button
               disabled={busy}
-              className="w-full rounded-lg bg-[var(--border)] px-4 py-2 text-sm font-medium disabled:opacity-50"
+              className="flex h-[44px] w-full items-center justify-center rounded-sm border border-[var(--border-strong)] bg-[var(--sheet)] px-4 text-sm font-semibold hover:border-[var(--foreground)] disabled:opacity-50"
               onClick={() =>
                 run(async () => {
                   const r = await getRecoveryQuestions(email);
@@ -133,10 +129,10 @@ export default function ForgotPage() {
           >
             <p className="text-xs text-[var(--muted)]">All three answers must be right. Capitals and punctuation don’t matter.</p>
             {questions.map((q, i) => (
-              <label key={q} className="block text-sm">
+              <label key={q} className={`${authLabel} normal-case tracking-normal font-sans text-sm`}>
                 {q}
                 <input
-                  className={`${inputCls} mt-1`}
+                  className={`${authInput}`}
                   value={answers[i]}
                   autoComplete="off"
                   onChange={(e) => {
@@ -175,9 +171,9 @@ export default function ForgotPage() {
               </button>
               .
             </p>
-            <label className="block text-sm">
+            <label className={authLabel}>
               6-digit code from the email
-              <input className={`${inputCls} mt-1 tracking-widest`} inputMode="numeric" pattern="[0-9]{6,8}" maxLength={8} placeholder="123456" value={code} onChange={(e) => setCode(digitsOnly(e.target.value))} required autoComplete="one-time-code" />
+              <input className={`${authInput} font-mono tracking-[0.4em]`} inputMode="numeric" pattern="[0-9]{6,8}" maxLength={8} placeholder="123456" value={code} onChange={(e) => setCode(digitsOnly(e.target.value))} required autoComplete="one-time-code" />
             </label>
             {newPasswordFields}
             <button disabled={busy || pwMismatch} className={btn}>
@@ -186,16 +182,19 @@ export default function ForgotPage() {
           </form>
         )}
 
-        {msg && <p role={msg.ok ? "status" : "alert"} className={`text-sm ${msg.ok ? "text-emerald-400" : "text-red-400"}`}>{msg.message}</p>}
+        {msg && <p role={msg.ok ? "status" : "alert"} className={`border-l-[3px] px-3 py-2 text-sm ${msg.ok ? "border-emerald-400 text-emerald-400" : "border-red-400 text-red-400"}`}>{msg.message}</p>}
         {step === "done" && (
           <Link href="/login" className={`${btn} block text-center`}>
             Go to sign in
           </Link>
         )}
-        <Link href="/login" className="block text-center text-sm text-[var(--muted)] hover:text-[var(--foreground)]">
-          Back to sign in
-        </Link>
+        <p className="pt-2 text-center text-sm">
+          Remembered it?{" "}
+          <Link href="/login" className="inline-flex min-h-[44px] items-center font-semibold underline underline-offset-4">
+            Sign in
+          </Link>
+        </p>
       </div>
-    </div>
+    </AuthShell>
   );
 }

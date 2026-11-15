@@ -15,6 +15,9 @@ export const STAGE_LABEL: Record<string, string> = {
   withdrawn: "Withdrawn",
   failed: "Failed",
   closed: "Posting closed",
+  ignored: "Ignored",
+  draft: "Draft",
+  note: "Note",
 };
 
 // Higher = further along. Rejected/offer are final.

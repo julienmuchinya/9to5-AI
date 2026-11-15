@@ -29,10 +29,14 @@ export interface PipelineCounts {
   rejected: number;
   failed: number;
   closed: number;
+  /** Set aside by you ("Ignore") — never sent, so not counted as sent. */
+  ignored: number;
+  /** Prepared by you, not queued or sent. */
+  drafts: number;
 }
 
 export function countPipeline(rows: { status: string; submitted_at?: string | null }[]): PipelineCounts {
-  const c: PipelineCounts = { total: rows.length, queued: 0, sent: 0, needs: 0, inReview: 0, screening: 0, interviews: 0, rejected: 0, failed: 0, closed: 0 };
+  const c: PipelineCounts = { total: rows.length, queued: 0, sent: 0, needs: 0, inReview: 0, screening: 0, interviews: 0, rejected: 0, failed: 0, closed: 0, ignored: 0, drafts: 0 };
   for (const r of rows) {
     if (isSent(r)) c.sent++;
     if (r.status === "queued") c.queued++;
@@ -43,6 +47,8 @@ export function countPipeline(rows: { status: string; submitted_at?: string | nu
     else if (r.status === "rejected") c.rejected++;
     else if (r.status === "failed") c.failed++;
     else if (r.status === "closed") c.closed++;
+    else if (r.status === "ignored") c.ignored++;
+    else if (r.status === "draft") c.drafts++;
   }
   return c;
 }

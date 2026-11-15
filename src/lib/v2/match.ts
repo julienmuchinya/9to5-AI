@@ -167,3 +167,33 @@ export function matchPosting(profile: MatchProfile, p: MatchPosting): MatchResul
   if (focus) score += 20;
   return { eligible: true, score: Math.round(Math.max(0, Math.min(100, score))), reasons };
 }
+
+/** A profiles row → what matching needs. Same defaults the agent uses. */
+export function profileToMatch(u: {
+  skills?: string[] | null;
+  resume_parsed?: { skills?: string[]; target_roles?: string[] } | null;
+  target_roles?: string[] | null;
+  job_levels?: string[] | null;
+  min_salary?: number | null;
+  locations?: string[] | null;
+  relocation?: boolean | null;
+  keywords_include?: string[] | null;
+  keywords_exclude?: string[] | null;
+  excluded_companies?: string[] | null;
+  focus_roles?: string[] | null;
+  state?: string | null;
+}): MatchProfile {
+  return {
+    skills: [...new Set([...(u.skills ?? []), ...(u.resume_parsed?.skills ?? [])])],
+    target_roles: u.target_roles?.length ? u.target_roles : (u.resume_parsed?.target_roles ?? []),
+    job_levels: u.job_levels ?? ["internship", "new_grad", "entry"],
+    min_salary: u.min_salary ?? 40000,
+    locations: u.locations ?? ["remote_us", "my_state"],
+    relocation: u.relocation ?? null,
+    keywords_include: u.keywords_include ?? [],
+    keywords_exclude: u.keywords_exclude ?? [],
+    excluded_companies: u.excluded_companies ?? [],
+    focus_roles: u.focus_roles ?? [],
+    home_state: u.state ?? null,
+  };
+}

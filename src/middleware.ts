@@ -30,7 +30,8 @@ export async function middleware(request: NextRequest) {
   const user = session?.user ?? null;
 
   const path = request.nextUrl.pathname;
-  const isPublic = PUBLIC.some((p) => path === p || path.startsWith(`${p}/`));
+  // "/" is the public welcome page (it sends signed-in people to their desk itself).
+  const isPublic = path === "/" || PUBLIC.some((p) => path === p || path.startsWith(`${p}/`));
   if (!user && !isPublic) {
     if (path.startsWith("/api/")) return NextResponse.json({ error: "Not signed in" }, { status: 401 });
     const url = request.nextUrl.clone();

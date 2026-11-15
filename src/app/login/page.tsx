@@ -3,11 +3,11 @@
 import { useEffect, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import Link from "next/link";
-import { APP_NAME } from "@/lib/constants";
 import { SecurityQuestionsFields, type QA } from "@/components/security-questions";
 import { saveSecurityQuestions } from "../auth-actions";
 import { digitsOnly, friendlyAuthError, safeNext } from "@/lib/site";
 import { PasswordInput } from "@/components/password-input";
+import { AuthHeading, AuthShell, authButton, authInput, authLabel } from "@/components/auth-shell";
 
 const PENDING_QA = "9to5:pending-security-questions";
 
@@ -51,13 +51,14 @@ export default function LoginPage() {
     if (p.get("confirmed")) setMsg({ kind: "info", text: "Email confirmed — sign in below." });
   }, []);
 
-  async function afterSignIn() {
+  /** `to` overrides the destination — new accounts go to the three-step setup first. */
+  async function afterSignIn(to?: string) {
     const pending = readPending();
     if (pending) {
       const r = await saveSecurityQuestions(pending);
       if (r.ok) writePending(null);
     }
-    window.location.href = next;
+    window.location.href = to ?? next;
   }
 
   async function resend() {
@@ -81,7 +82,8 @@ export default function LoginPage() {
       setMsg({ kind: "error", text: /expired|invalid/i.test(error.message) ? "That code is wrong or expired. Codes last 1 hour — only the newest one works." : friendlyAuthError(error.message, error.code) });
       return;
     }
-    await afterSignIn();
+    // Confirming a sign-up code means a brand-new account: start with setup.
+    await afterSignIn("/start");
   }
 
   async function submit(e: React.FormEvent) {
@@ -106,7 +108,7 @@ export default function LoginPage() {
         if (data.session) {
           const r = await saveSecurityQuestions(qa);
           if (!r.ok) writePending(qa);
-          return afterSignIn();
+          return afterSignIn("/start");
         }
         writePending(qa); // saved automatically once they're signed in
         setVerifying(true);
@@ -131,20 +133,15 @@ export default function LoginPage() {
     }
   }
 
-  const input =
-    "w-full rounded-lg border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-sm outline-none focus:border-[var(--accent)]";
   if (verifying)
     return (
-      <div className="flex min-h-screen items-center justify-center p-4">
-        <form onSubmit={verifyCode} className="w-full max-w-sm space-y-4 rounded-xl border border-[var(--border)] bg-[var(--card)] p-6">
-          <div>
-            <h1 className="text-xl font-bold text-[var(--accent)]">{APP_NAME}</h1>
-            <p className="mt-1 text-sm text-[var(--muted)]">Confirm your email</p>
-          </div>
-          <label className="block text-sm">
-            6-digit code sent to <b>{email}</b>
+      <AuthShell statement="Almost *there.*" note="One quick check that this email is yours, and your desk is ready.">
+        <AuthHeading over="Confirm your email" title="Check your inbox." sub={<>We sent a 6-digit code to <b className="text-[var(--foreground)]">{email}</b>. It works for one hour; check spam if it’s not there.</>} />
+        <form onSubmit={verifyCode} className="space-y-5">
+          <label className={authLabel}>
+            6-digit code
             <input
-              className={`${input} mt-1 text-center text-lg tracking-[0.4em]`}
+              className={`${authInput} text-center font-mono text-xl tracking-[0.5em]`}
               inputMode="numeric"
               pattern="[0-9]{6,8}"
               maxLength={8}
@@ -157,95 +154,116 @@ export default function LoginPage() {
             />
           </label>
           {msg && (
-            <p role="status" className={`text-sm ${msg.kind === "error" ? "text-red-400" : "text-emerald-400"}`}>
+            <p role={msg.kind === "error" ? "alert" : "status"} className={`border-l-[3px] px-3 py-2 text-sm ${msg.kind === "error" ? "border-red-400 text-red-400" : "border-emerald-400 text-emerald-400"}`}>
               {msg.text}
             </p>
           )}
-          <button disabled={busy || code.length < 6} className="w-full rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-medium text-white disabled:opacity-50">
-            {busy ? "Checking…" : "Confirm and sign in"}
+          <button disabled={busy || code.length < 6} className={authButton}>
+            {busy ? "Checking…" : "Confirm and open my desk ↗"}
           </button>
-          <button type="button" onClick={resend} disabled={busy} className="w-full rounded-lg bg-[var(--border)] px-4 py-2 text-sm disabled:opacity-50">
-            Send a new code
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              setVerifying(false);
-              setMode("signin");
-              setMsg(null);
-            }}
-            className="w-full text-center text-sm text-[var(--muted)] hover:text-[var(--foreground)]"
-          >
-            Back to sign in
-          </button>
+          <div className="flex flex-wrap justify-center gap-x-6 gap-y-2 text-sm">
+            <button type="button" onClick={resend} disabled={busy} className="min-h-[44px] font-semibold underline underline-offset-4 disabled:opacity-50">
+              Send a new code
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setVerifying(false);
+                setMode("signin");
+                setMsg(null);
+              }}
+              className="min-h-[44px] text-[var(--muted)] underline underline-offset-4"
+            >
+              Back to sign in
+            </button>
+          </div>
         </form>
-      </div>
+      </AuthShell>
     );
 
+  const signup = mode === "signup";
   return (
-    <div className="flex min-h-screen items-center justify-center p-4">
-      <form onSubmit={submit} className="w-full max-w-sm rounded-xl border border-[var(--border)] bg-[var(--card)] p-6">
-        <h1 className="text-xl font-bold text-[var(--accent)]">{APP_NAME}</h1>
-        <p className="mb-6 mt-1 text-sm text-[var(--muted)]">
-          {mode === "signin" ? "Sign in to your job agent" : "Create your account"}
-        </p>
-        {mode === "signup" && (
-          <label className="mb-3 block text-sm">
+    <AuthShell>
+      <AuthHeading
+        over={signup ? "Create your workspace" : "Welcome back"}
+        title={signup ? "Start fresh." : <>Pick up where<br />you left off.</>}
+        sub={signup ? "A place for your shortlist, applications and next steps — and an agent that works only within the rules you set." : "Your shortlist, applications, and next steps are right where you left them."}
+      />
+      <form onSubmit={submit} className="space-y-5">
+        {signup && (
+          <label className={authLabel}>
             Full name
-            <input className={`${input} mt-1`} value={name} onChange={(e) => setName(e.target.value)} required />
+            <input className={authInput} value={name} onChange={(e) => setName(e.target.value)} required autoComplete="name" placeholder="Your name" />
           </label>
         )}
-        <label className="mb-3 block text-sm">
-          Email
-          <input className={`${input} mt-1`} type="email" value={email} onChange={(e) => setEmail(e.target.value.trim())} required autoComplete="email" />
+        <label className={authLabel}>
+          Email address
+          <input className={authInput} type="email" value={email} onChange={(e) => setEmail(e.target.value.trim())} required autoComplete="email" placeholder="you@example.com" />
         </label>
-        <label className="mb-4 block text-sm">
+        <label className={authLabel}>
           Password
           <PasswordInput
-            className={input}
+            className={authInput}
             minLength={8}
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             required
-            autoComplete={mode === "signin" ? "current-password" : "new-password"}
+            placeholder="At least 8 characters"
+            autoComplete={signup ? "new-password" : "current-password"}
           />
-          {mode === "signup" && <span className="mt-1 block text-xs text-[var(--muted)]">8+ characters with letters and numbers.</span>}
+          {signup && <span className="mt-1.5 block font-sans text-xs normal-case tracking-normal text-[var(--muted)]">8+ characters with letters and numbers.</span>}
         </label>
-        {mode === "signin" && (
-          <Link href="/forgot" className="-mt-2 mb-4 block text-right text-xs text-[var(--muted)] hover:text-[var(--foreground)]">
-            Forgot password?
-          </Link>
-        )}
-        {mode === "signup" && (
-          <div className="mb-4">
-            <p className="mb-2 text-sm font-medium">Security questions</p>
-            <p className="mb-3 text-xs text-[var(--muted)]">If you forget your password, answering all three lets you reset it.</p>
+        {signup && (
+          <fieldset className="border-t border-[var(--border)] pt-5">
+            <legend className={`${authLabel} mb-1`}>Recovery questions</legend>
+            <p className="mb-3 text-xs text-[var(--muted)]">If you ever forget your password, answering all three — or a code sent to your email — gets you back in.</p>
             <SecurityQuestionsFields value={qa} onChange={setQa} />
-          </div>
+          </fieldset>
+        )}
+        {signup && (
+          <label className="flex items-start gap-3 text-sm">
+            <input type="checkbox" required className="mt-0.5" />
+            <span>
+              I understand 9to5 uses my resume and profile to find jobs and fill in applications, and only submits them within the rules I set.
+            </span>
+          </label>
         )}
         {msg && (
-          <p role={msg.kind === "error" ? "alert" : "status"} className={`mb-4 text-sm ${msg.kind === "error" ? "text-red-400" : "text-emerald-400"}`}>
+          <p role={msg.kind === "error" ? "alert" : "status"} className={`border-l-[3px] px-3 py-2 text-sm ${msg.kind === "error" ? "border-red-400 text-red-400" : "border-emerald-400 text-emerald-400"}`}>
             {msg.text}
           </p>
         )}
-        <button
-          disabled={busy}
-          className="w-full rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-medium text-white hover:bg-[var(--accent-hover)] disabled:opacity-50"
-        >
-          {busy ? "Please wait…" : mode === "signin" ? "Sign in" : "Create account"}
-        </button>
-        <button
-          type="button"
-          onClick={() => {
-            setMode(mode === "signin" ? "signup" : "signin");
-            setMsg(null);
-            setPassword(""); // don't carry a typed password between sign-in and sign-up
-          }}
-          className="mt-4 w-full text-center text-sm text-[var(--muted)] hover:text-[var(--foreground)]"
-        >
-          {mode === "signin" ? "No account? Create one" : "Have an account? Sign in"}
+        <button disabled={busy} className={authButton}>
+          {busy ? "Please wait…" : signup ? "Create account ↗" : "Sign in ↗"}
         </button>
       </form>
-    </div>
+      <div className="mt-6 space-y-2 text-center text-sm">
+        <p>
+          {signup ? "Already have an account?" : "New here?"}{" "}
+          <button
+            type="button"
+            onClick={() => {
+              setMode(signup ? "signin" : "signup");
+              setMsg(null);
+              setPassword(""); // don't carry a typed password between sign-in and sign-up
+            }}
+            className="min-h-[44px] font-semibold underline underline-offset-4"
+          >
+            {signup ? "Sign in" : "Create an account"}
+          </button>
+        </p>
+        {!signup && (
+          <Link href="/forgot" className="inline-flex min-h-[44px] items-center text-[var(--muted)] underline underline-offset-4">
+            Forgot password?
+          </Link>
+        )}
+      </div>
+      <p className="mt-10 text-center text-xs text-[var(--muted)]">
+        Your data stays private to your workspace ·{" "}
+        <Link href="/" className="underline underline-offset-4">
+          Back to welcome
+        </Link>
+      </p>
+    </AuthShell>
   );
 }

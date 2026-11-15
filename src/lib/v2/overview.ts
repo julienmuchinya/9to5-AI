@@ -72,6 +72,8 @@ export const pct = (n: number, d: number): number | null => (d > 0 ? Math.round(
  */
 export function stateLabel(status: string): { label: string; tone: "accent" | "info" | "success" | "warning" | "danger" | "default"; next: string } {
   switch (status) {
+    case "draft":
+      return { label: "Draft · not sent", tone: "default", next: "Review it, then queue it for the agent" };
     case "queued":
       return { label: "Queued", tone: "accent", next: "Agent applies on its next run" };
     case "needs_user":
@@ -96,6 +98,8 @@ export function stateLabel(status: string): { label: string; tone: "accent" | "i
       return { label: "Withdrawn", tone: "default", next: "No action needed" };
     case "closed":
       return { label: "Posting closed", tone: "default", next: "No action needed" };
+    case "ignored":
+      return { label: "Ignored", tone: "default", next: "Set aside by you — Retry to apply after all" };
     default:
       return { label: status.replace(/_/g, " "), tone: "default", next: "" };
   }
