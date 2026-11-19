@@ -8,7 +8,7 @@ import { customStore, findSimilarAnswer, questionSimilarity, type CustomAnswers,
 import { PendingQuestions, type AskedQuestion } from "./pending-questions";
 import { BulkBar } from "./bulk-bar";
 import { AnswersEditor } from "./answers-editor";
-import { STAGE_LABEL, roleFamily } from "@/lib/v2/tracking";
+import { STAGE_LABEL, gmailLink, roleFamily } from "@/lib/v2/tracking";
 import { ago } from "@/lib/v2/priority";
 import { dispatchConfigured, nextScheduledRun } from "@/lib/v2/dispatch";
 import { RunNowButton } from "@/components/run-now";
@@ -16,7 +16,7 @@ import { AiStatus } from "@/components/ai-status";
 import { StageTrack } from "@/components/stage-track";
 import { aiStatus } from "@/lib/v2/ai-status";
 import { RevealPassword } from "../accounts/reveal";
-import { markApplied, retryApplication, setApplicationStatus } from "../actions";
+import { markApplied, removeTimelineEvent, retryApplication, setApplicationStatus } from "../actions";
 import { PROGRESSED, SENT, countPipeline, isSent, statusRows } from "@/lib/v2/pipeline";
 import { NEEDS_LABEL, needsKind, type NeedsKind } from "@/lib/v2/needs";
 import { funnel, pct, stateLabel } from "@/lib/v2/overview";
@@ -54,7 +54,7 @@ type Row = {
   pending_questions?: PendingQuestion[] | null;
   jobs: { title: string; company_name: string; url: string; job_postings: { posted_at: string | null } | null } | null;
 };
-type Event = { application_id: string; kind: string; source: string; detail: string | null; created_at: string };
+type Event = { id?: string; application_id: string; kind: string; source: string; detail: string | null; created_at: string; message_id?: string | null };
 
 const ROW_SELECT = "id,status,error,apply_url,submitted_at,created_at,status_updated_at,requested_by,resume_focus,attempts,jobs(title,company_name,url,job_postings(posted_at))";
 
@@ -69,7 +69,7 @@ export default async function ApplicationsPage({ searchParams }: { searchParams:
   const [all, { data: lastRun }, { data: prof }, { data: needRows }, { data: logins }, ai] = await Promise.all([
     statusRows(supabase, user.id),
     supabase.from("agent_runs").select("started_at,ended_at,status,summary").eq("user_id", user.id).order("started_at", { ascending: false }).limit(1).maybeSingle(),
-    supabase.from("profiles").select("custom_answers").eq("id", user.id).maybeSingle(),
+    supabase.from("profiles").select("custom_answers,inbox_email,inbox_host").eq("id", user.id).maybeSingle(),
     supabase.from("applications").select("id,error,pending_questions,jobs(company_name)").eq("user_id", user.id).eq("status", "needs_user").limit(500),
     supabase.from("application_accounts").select("id,portal_host,email_used,account_created").eq("user_id", user.id),
     aiStatus(serviceClient()),
@@ -92,9 +92,11 @@ export default async function ApplicationsPage({ searchParams }: { searchParams:
     for (const q of open) {
       const company = r.jobs?.company_name ?? "a company";
       const same = asked.get(q.key) ?? [...asked.values()].find((x) => questionSimilarity(x.label, q.label) >= 0.75);
+      const ctx = q.context?.length ? [{ company, context: q.context }] : [];
       if (same) {
         if (!same.companies.includes(company)) same.companies.push(company);
-      } else asked.set(q.key, { ...q, options: q.options ?? [], companies: [company] });
+        for (const c of ctx) if (!same.contexts.some((x) => x.company === c.company)) same.contexts.push(c);
+      } else asked.set(q.key, { ...q, options: q.options ?? [], companies: [company], contexts: ctx, appId: r.id });
     }
   }
   const questions = [...asked.values()].sort((a, b) => b.companies.length - a.companies.length);
@@ -123,7 +125,7 @@ export default async function ApplicationsPage({ searchParams }: { searchParams:
     : { data: null };
   const open = openRow as unknown as Row | null;
   const { data: openEvents } = open
-    ? await supabase.from("application_events").select("application_id,kind,source,detail,created_at").eq("application_id", open.id).order("created_at", { ascending: false })
+    ? await supabase.from("application_events").select("id,application_id,kind,source,detail,created_at,message_id").eq("application_id", open.id).order("created_at", { ascending: false })
     : { data: [] as Event[] };
 
   // Latest event per visible row, for "last activity".
@@ -456,6 +458,7 @@ export default async function ApplicationsPage({ searchParams }: { searchParams:
             login={loginByHost.get(hostOf(open.apply_url ?? open.jobs?.url))}
             closeHref={link({ app: undefined })}
             t={t}
+            inbox={/gmail|google/i.test(`${prof?.inbox_host ?? ""} ${prof?.inbox_email ?? ""}`) ? (prof?.inbox_email ?? "") : null}
           />
         </RouteDrawer>
       )}
@@ -471,6 +474,7 @@ function ApplicationDetail({
   login,
   closeHref,
   t,
+  inbox,
 }: {
   r: Row;
   events: Event[];
@@ -479,11 +483,19 @@ function ApplicationDetail({
   login?: { id: string; portal_host: string; email_used: string; account_created: boolean };
   closeHref: string;
   t: Awaited<ReturnType<typeof timeFmt>>;
+  /** The connected Gmail address (links open the email there); null for other inboxes. */
+  inbox: string | null;
 }) {
   const st = stateLabel(r.status);
   const answers = readable(r.answers ?? null);
   const posted = ago(r.jobs?.job_postings?.posted_at);
   const url = r.apply_url ?? r.jobs?.url;
+  // The email that moved it to this stage (newest first), so an interview can be scheduled in one click.
+  const stageEmail = ["screening", "interview", "offer", "under_review", "rejected"].includes(r.status)
+    ? events.find((e) => e.source === "email" && e.kind === r.status) ?? events.find((e) => e.source === "email")
+    : undefined;
+  const mailHref = (e: Event) => (inbox != null && e.source === "email" ? gmailLink(inbox, e.message_id, e.detail) : null);
+  const stageHref = stageEmail ? mailHref(stageEmail) : null;
   return (
     <>
       <div className="flex items-start justify-between gap-4 border-b border-[var(--border)] px-6 pb-5 pt-7 sm:px-10">
@@ -518,6 +530,19 @@ function ApplicationDetail({
             </p>
           )}
           {r.status === "draft" && <p className="mt-2 text-sm text-[var(--muted)]">This draft hasn’t gone anywhere. Queue it when you’re ready and the agent applies on its next run.</p>}
+          {stageEmail && (
+            <div className="mt-4 border-l-[3px] border-[var(--orange)] bg-[var(--accent-soft)] px-4 py-3 text-sm">
+              <p className="font-semibold">{r.status === "interview" || r.status === "screening" ? "The email with your next step" : "The email behind this status"}</p>
+              <p className="mt-0.5 text-[var(--muted)]">“{stageEmail.detail ?? "Email"}” · {t.date(stageEmail.created_at)}</p>
+              {stageHref ? (
+                <a href={stageHref} target="_blank" rel="noopener noreferrer" className={`${buttonCls("primary", "sm")} mt-2 min-h-[40px]`}>
+                  {r.status === "interview" || r.status === "screening" ? "Open the email to schedule" : "Open the email"} <Icon name="external" className="h-3.5 w-3.5" />
+                </a>
+              ) : (
+                <p className="mt-1 text-xs text-[var(--muted)]">Search your inbox for that subject to open it.</p>
+              )}
+            </div>
+          )}
           <StageTrack status={r.status} history={events.map((e) => e.kind)} />
         </div>
 
@@ -549,7 +574,14 @@ function ApplicationDetail({
             <h3 className="mb-1 text-sm font-semibold">Waiting on your answer</h3>
             <ul className="list-disc space-y-0.5 pl-5 text-sm">
               {waiting.slice(0, 6).map((x) => (
-                <li key={x.key}>{x.label}</li>
+                <li key={x.key}>
+                  {x.context?.length ? (
+                    <span className="block text-xs text-[var(--muted)]">
+                      After “{x.context[x.context.length - 1].label}”{x.context[x.context.length - 1].answer ? ` (answered “${x.context[x.context.length - 1].answer}”)` : ""}:
+                    </span>
+                  ) : null}
+                  {x.label}
+                </li>
               ))}
             </ul>
             <Link href="/applications?tab=needs#questions" className="mt-1.5 inline-block text-sm font-medium text-[var(--accent-text)] hover:underline">
@@ -609,7 +641,19 @@ function ApplicationDetail({
         <div>
           <h3 className="display text-[28px]">A record of progress.</h3>
           <ol className="mt-3 border-t border-[var(--foreground)] text-sm">
-            {[...events.map((e) => ({ kind: STAGE_LABEL[e.kind] ?? e.kind, at: e.created_at, who: e.source === "email" ? "from your inbox" : e.source === "agent" ? "by the agent" : "by you", detail: e.detail })), { kind: "Added", at: r.created_at, who: "", detail: null }].map((e, i) => (
+            {[
+              ...events.map((e) => ({
+                id: e.id,
+                stage: e.kind,
+                kind: STAGE_LABEL[e.kind] ?? e.kind,
+                at: e.created_at,
+                who: e.source === "email" ? "from your inbox" : e.source === "agent" ? "by the agent" : "by you",
+                detail: e.detail,
+                href: mailHref(e),
+                email: e.source === "email",
+              })),
+              { id: undefined, stage: "", kind: "Added", at: r.created_at, who: "", detail: null, href: null, email: false },
+            ].map((e, i) => (
               <li key={i} className="border-b border-[var(--border)] py-3.5">
                 <p className="kicker">{String(i + 1).padStart(2, "0")} / event</p>
                 <p className="mt-1">
@@ -617,6 +661,22 @@ function ApplicationDetail({
                   {e.who && <span className="text-[var(--muted)]"> · {e.who}</span>}
                 </p>
                 {e.detail && <p className="mt-0.5 text-xs text-[var(--muted)]">{e.detail}</p>}
+                {(e.href || (e.id && e.email && e.stage !== "submitted")) && (
+                  <div className="mt-1.5 flex flex-wrap items-center gap-4 text-xs">
+                    {e.href && (
+                      <a href={e.href} target="_blank" rel="noopener noreferrer" className="inline-flex min-h-[32px] items-center gap-1 font-semibold underline underline-offset-4">
+                        Open email <Icon name="external" className="h-3 w-3" />
+                      </a>
+                    )}
+                    {e.id && e.email && e.stage !== "submitted" && (
+                      <form action={removeTimelineEvent.bind(null, r.id, e.id)}>
+                        <button className="min-h-[32px] text-[var(--muted)] underline-offset-4 hover:underline" title="This email wasn't about this application, or didn't say this">
+                          Not right — remove
+                        </button>
+                      </form>
+                    )}
+                  </div>
+                )}
               </li>
             ))}
           </ol>

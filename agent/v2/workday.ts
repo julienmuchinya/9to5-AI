@@ -7,7 +7,7 @@
  */
 import type { Page } from "playwright";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { memoryKey, type PendingQuestion } from "../../src/lib/v2/app-questions";
+import { autoFollowUpAnswer, memoryKey, questionContext, type PendingQuestion } from "../../src/lib/v2/app-questions";
 import { pickOption } from "../../src/lib/v2/app-questions";
 import { SUCCESS, answerFields, captchaVisible, collectFields, fill, labelled, questionsFor, readComboboxOptions, type ApplyOpts, type ApplyResult, type Field } from "./apply";
 
@@ -105,6 +105,13 @@ async function settle(page: Page, ms = 15000) {
     .waitFor({ state: "visible", timeout: ms })
     .catch(() => {});
   await page.waitForTimeout(1000);
+}
+
+/** Does a sign-in error message say the email/password pair was refused? (Not "verify your email".) */
+export function isBadPasswordError(errors: string): boolean {
+  if (!errors.trim()) return false;
+  if (/(verify|verification|activate|not (been )?(verified|activated))/i.test(errors)) return false;
+  return /(incorrect|invalid (email|user ?name|password|credentials|sign ?in|login)|wrong (email|password)|password .{0,20}(doesn.t|does not|didn.t) match|(email|user ?name) or password|locked|not recognized|couldn.t sign you in|unable to sign in)/i.test(errors);
 }
 
 async function errorsOnPage(page: Page): Promise<string> {
@@ -245,18 +252,28 @@ async function workdayAuth(page: Page, opts: ApplyOpts): Promise<AuthResult> {
       await page.waitForTimeout(2000);
     }
     if (await signedIn()) return "ok";
-    const t = `${await errorsOnPage(page)} ${await text(page)}`;
+    const errs = await errorsOnPage(page);
+    const t = `${errs} ${await text(page)}`;
     if (/(verify|verification|activate|not (been )?(verified|activated))/i.test(t)) return "unverified";
-    if (/(incorrect|invalid|wrong|doesn.t match|locked|not recognized|couldn.t sign you in|unable to sign in|check your (email|password))/i.test(t)) return "bad_password";
+    // Only the page's own error message can say the password was refused. Matching the whole page text
+    // ("invalid" in a footer, "check your email" in a banner) reported a wrong password that wasn't — and
+    // each of those sent a password-reset email even though the saved password was right.
+    if (isBadPasswordError(errs)) return "bad_password";
     return "unknown";
   };
-  /** One password reset per portal per run: a reset email every attempt filled the inbox for nothing. */
-  const resetKey = `wd-reset:${host}`;
-  const resetAllowed = () => !RESETS_THIS_RUN.has(resetKey) && !!opts.emailLink;
+  /**
+   * At most one password reset per portal per week (remembered across runs by the caller), and one per run.
+   * The reset sets the portal password TO the saved one, so once it has happened, a later refusal isn't
+   * fixed by another reset — it goes to the user instead of filling the inbox with reset emails.
+   */
+  const resetKey = `wd-reset:${opts.userId}:${host}`;
+  const resetAllowed = () => !RESETS_THIS_RUN.has(resetKey) && !!opts.emailLink && opts.passwordReset?.allowed !== false;
   const resetOnce = async () => {
     if (!resetAllowed()) return false;
     RESETS_THIS_RUN.add(resetKey);
-    return resetPassword();
+    const requested = await resetPassword();
+    if (requested) await opts.passwordReset?.record().catch(() => {});
+    return requested;
   };
 
   /** Click the link Workday emails to confirm the account, then come back to the job. */
@@ -723,6 +740,10 @@ export async function applyWorkday(page: Page, db: SupabaseClient, opts: ApplyOp
         aiCalls += ans.aiCalls;
         if (ans.quota) return { status: "needs_user", detail: "AI quota used up today — it retries tomorrow", answers: allAnswers, aiCalls, accountCreated };
         learned.push(...ans.learned);
+        for (const f of fields) if (f.required && !ans.answers[f.id] && !f.filled) {
+          const na = autoFollowUpAnswer(fields, f.id, ans.answers);
+          if (na) ans.answers[f.id] = na;
+        }
         const missing = fields.filter((f) => f.required && !ans.answers[f.id] && !f.filled);
         if (missing.length) {
           const pending: PendingQuestion[] = missing.map((m) => ({
@@ -731,6 +752,7 @@ export async function applyWorkday(page: Page, db: SupabaseClient, opts: ApplyOp
             kind: m.kind,
             options: m.kind === "checkbox" ? ["Yes", "No"] : m.options.slice(0, 60),
             required: true,
+            context: questionContext(fields, m.id, ans.answers),
           }));
           return {
             status: "needs_user",

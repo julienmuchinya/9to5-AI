@@ -18,6 +18,8 @@ export interface Mailbox {
   kind: "gmail-api" | "imap";
   /** Messages received since `since`, newest first, at most `max`. `hint` narrows a Gmail search (ignored by IMAP). */
   list(since: Date, max: number, hint?: string): Promise<MailItem[]>;
+  /** One message by the id `list` gave it (null when it's gone). */
+  get(id: string): Promise<{ from: string; subject: string; text: string } | null>;
   close(): Promise<void>;
 }
 
@@ -66,6 +68,15 @@ export async function openMailbox(u: InboxCreds): Promise<Mailbox> {
         const found = await gmailSearch(token, `${gmailAfter(since)} -in:chats${hint ? ` ${hint}` : ""}`, max);
         return found.map((m) => ({ ...m, body: async () => parse(await gmailRaw(token, m.id)) }));
       },
+      async get(id) {
+        if (!/^[0-9a-f]{8,24}$/i.test(id)) return null;
+        const raw = await gmailRaw(token, id).catch(() => null);
+        if (!raw) return null;
+        const { simpleParser } = await import("mailparser");
+        const p = await simpleParser(raw);
+        const { text } = await parse(raw);
+        return { from: p.from?.text ?? "", subject: p.subject ?? "", text };
+      },
       async close() {},
     };
   }
@@ -97,6 +108,17 @@ export async function openMailbox(u: InboxCreds): Promise<Mailbox> {
         });
       }
       return out;
+    },
+    async get(id) {
+      if (!id.includes("@")) return null;
+      const uids = ((await client.search({ header: { "message-id": id } }, { uid: true }).catch(() => [])) || []) as number[];
+      if (!uids.length) return null;
+      const full = await client.fetchOne(String(uids[0]), { source: { start: 0, maxLength: 200_000 } }, { uid: true });
+      if (!full || !full.source) return null;
+      const { simpleParser } = await import("mailparser");
+      const p = await simpleParser(full.source);
+      const { text } = await parse(full.source);
+      return { from: p.from?.text ?? "", subject: p.subject ?? "", text };
     },
     async close() {
       lock.release();

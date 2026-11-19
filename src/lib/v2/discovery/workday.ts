@@ -120,6 +120,14 @@ const base = (b: WorkdayBoard) => `https://${b.host}.myworkdayjobs.com/wday/cxs/
 
 /** One keyword search on a Workday board (titles, paths and "Posted N days ago" only). */
 export async function listJobs(b: WorkdayBoard, searchText: string, limit: number, timeoutMs = 15_000): Promise<ListRow[]> {
+  return (await listJobsStatus(b, searchText, limit, timeoutMs)).rows;
+}
+
+/**
+ * Same, also saying whether the board answered. Workday answers keyword searches with 429 when asked
+ * too often; that used to look exactly like "no jobs here".
+ */
+export async function listJobsStatus(b: WorkdayBoard, searchText: string, limit: number, timeoutMs = 15_000): Promise<{ rows: ListRow[]; status: "ok" | "throttled" | "error" }> {
   try {
     const res = await fetch(`${base(b)}/jobs`, {
       method: "POST",
@@ -127,10 +135,11 @@ export async function listJobs(b: WorkdayBoard, searchText: string, limit: numbe
       body: JSON.stringify({ appliedFacets: {}, limit: Math.min(20, limit), offset: 0, searchText }),
       signal: AbortSignal.timeout(timeoutMs),
     });
-    if (!res.ok) return [];
-    return ((await res.json()) as { jobPostings?: ListRow[] }).jobPostings ?? [];
+    if (res.status === 429) return { rows: [], status: "throttled" };
+    if (!res.ok) return { rows: [], status: "error" };
+    return { rows: ((await res.json()) as { jobPostings?: ListRow[] }).jobPostings ?? [], status: "ok" };
   } catch {
-    return [];
+    return { rows: [], status: "error" };
   }
 }
 

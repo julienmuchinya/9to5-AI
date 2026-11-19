@@ -1,11 +1,11 @@
-import { searchJobicy, searchRemotive, type Posting } from "./sources";
-import { WORKDAY_BOARDS, fetchWorkdayBoard, listJobs, postedDaysAgo, workdayKey } from "./workday";
+import { searchHimalayas, searchJobicy, searchRemotive, type Posting } from "./sources";
+import { WORKDAY_BOARDS, fetchWorkdayBoard, listJobsStatus, postedDaysAgo, workdayKey, type ListRow, type WorkdayBoard } from "./workday";
 import { isUsLocation } from "./filters";
 
 /** One job found by a live search, before it's saved anywhere. */
 export interface LiveHit {
   key: string;
-  source: "remotive" | "jobicy" | "workday";
+  source: "remotive" | "jobicy" | "workday" | "himalayas";
   title: string;
   company: string;
   location: string;
@@ -16,6 +16,9 @@ export interface LiveHit {
   posted_label?: string;
   salary_min?: number;
   salary_max?: number;
+  /** Plain-text description when the source sends it in the search results (Workday doesn't). */
+  description?: string;
+  level?: string;
 }
 
 const fromPosting = (p: Posting): LiveHit => ({
@@ -29,11 +32,26 @@ const fromPosting = (p: Posting): LiveHit => ({
   posted_at: p.posted_at ?? null,
   salary_min: p.salary_min,
   salary_max: p.salary_max,
+  description: p.description,
+  level: p.level,
 });
 
 /** Keyword search on every Workday employer the agent knows (energy, healthcare, banking, retail, government, tech…). */
-async function searchWorkday(term: string, perBoard: number, timeoutMs: number): Promise<LiveHit[]> {
-  const lists = await Promise.all(WORKDAY_BOARDS.map(async (b) => ({ b, rows: await listJobs(b, term, perBoard, timeoutMs) })));
+async function searchWorkday(term: string, perBoard: number, timeoutMs: number, onThrottled: (n: number) => void): Promise<LiveHit[]> {
+  // At most 12 employers at a time: all 61 at once is what got the search throttled (HTTP 429).
+  const lists: { b: WorkdayBoard; rows: ListRow[] }[] = [];
+  let throttled = 0;
+  const queue = [...WORKDAY_BOARDS];
+  await Promise.all(
+    Array.from({ length: 12 }, async () => {
+      for (let b = queue.shift(); b; b = queue.shift()) {
+        const r = await listJobsStatus(b, term, perBoard, timeoutMs);
+        if (r.status === "throttled") throttled++;
+        lists.push({ b, rows: r.rows });
+      }
+    })
+  );
+  if (throttled) onThrottled(throttled);
   const out: LiveHit[] = [];
   for (const { b, rows } of lists) {
     for (const r of rows) {
@@ -92,13 +110,17 @@ export async function liveSearch(term: string, opts: { timeoutMs?: number; perBo
       return [];
     }
   };
-  const [remotive, jobicy, workday] = await Promise.all([
+  const [remotive, jobicy, himalayas, workday] = await Promise.all([
     guard("Remotive", searchRemotive(t, timeoutMs).then((ps) => ps.map(fromPosting))),
     guard("Jobicy", searchJobicy(t, timeoutMs).then((ps) => ps.map(fromPosting))),
-    guard("employer sites", searchWorkday(t, opts.perBoard ?? 6, timeoutMs)),
+    guard("Himalayas", searchHimalayas(t, timeoutMs).then((ps) => ps.map(fromPosting))),
+    guard(
+      "employer sites",
+      searchWorkday(t, opts.perBoard ?? 6, timeoutMs, (n) => failed.push(`${n} employer site${n === 1 ? "" : "s"} (busy — try again in a few minutes)`))
+    ),
   ]);
   const seen = new Set<string>();
-  const all = [...workday, ...remotive, ...jobicy];
+  const all = [...workday, ...remotive, ...jobicy, ...himalayas];
   // The sources match loosely ("nurse" also returns store jobs): keep titles that contain every search word,
   // or — if that leaves nothing — any of them.
   const strict = all.filter((h) => titleMatches(h.title, t, "all"));
@@ -121,6 +143,7 @@ export async function resolveLiveHit(key: string, term: string): Promise<Posting
   const [source, ...rest] = key.split(":");
   if (source === "remotive") return (await searchRemotive(term, 12000)).find((p) => p.source_key === key) ?? null;
   if (source === "jobicy") return (await searchJobicy(term, 12000)).find((p) => p.source_key === key) ?? null;
+  if (source === "himalayas") return (await searchHimalayas(term, 12000)).find((p) => p.source_key === key) ?? null;
   if (source === "workday") {
     const board = WORKDAY_BOARDS.find((b) => b.tenant === rest[0]);
     if (!board) return null;

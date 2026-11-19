@@ -1,11 +1,16 @@
 import { Card, inputCls } from "@/components/ui";
 import { SubmitButton } from "@/components/submit-button";
-import type { PendingQuestion } from "@/lib/v2/app-questions";
+import Link from "next/link";
+import { isFollowUp, type PendingQuestion } from "@/lib/v2/app-questions";
 import { answerPendingQuestions } from "../actions";
 
 export interface AskedQuestion extends PendingQuestion {
   /** Companies whose application is waiting on this question. */
   companies: string[];
+  /** For a follow-up ("If yes, please explain"): the question(s) it follows on each company's form. */
+  contexts: { company: string; context: NonNullable<PendingQuestion["context"]> }[];
+  /** One application that asks it (to open the form when there's no context saved). */
+  appId?: string;
 }
 
 /** One form for every question the agent couldn't answer, deduplicated across applications. */
@@ -42,6 +47,30 @@ export function PendingQuestions({
                 className="rounded-xl border border-[var(--border)] bg-[var(--background-2)] p-3"
               >
                 <input type="hidden" name={`pl_${q.key}`} value={q.label} />
+                {q.contexts.length > 0 ? (
+                  <div className="mb-2 border-l-2 border-[var(--border-strong)] pl-3 text-xs text-[var(--muted)]">
+                    {q.contexts.slice(0, 3).map((c) => (
+                      <p key={c.company} className="mt-0.5">
+                        <span className="font-semibold text-[var(--foreground)]">{c.company}</span> asked first:{" "}
+                        {c.context.map((x, i) => (
+                          <span key={i}>
+                            {i > 0 ? " then " : ""}“{x.label}”{x.answer ? <> — answered <span className="text-[var(--foreground)]">“{x.answer}”</span></> : ""}
+                          </span>
+                        ))}
+                      </p>
+                    ))}
+                    <p className="mt-1">So this question is about that.</p>
+                  </div>
+                ) : isFollowUp(q.label) ? (
+                  <p className="mb-2 border-l-2 border-[var(--border-strong)] pl-3 text-xs text-[var(--muted)]">
+                    This follows another question on the form, which wasn’t saved for this application.{" "}
+                    {q.appId && (
+                      <Link href={`/applications?tab=needs&app=${q.appId}`} className="font-semibold underline underline-offset-4">
+                        Open the application to see it
+                      </Link>
+                    )}
+                  </p>
+                ) : null}
                 <label
                   htmlFor={opts.length > 6 || !opts.length ? name : undefined}
                   className="block text-sm font-medium"

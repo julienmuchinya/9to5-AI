@@ -352,7 +352,7 @@ export async function addSearchedJob(form: FormData) {
   if (/^[0-9a-f-]{36}$/i.test(postingId)) {
     const { data } = await supabase.from("job_postings").select(COLS).eq("id", postingId).maybeSingle();
     posting = data as P | null;
-  } else if (/^(remotive|jobicy|workday):[\w.:-]{1,200}$/.test(liveKey)) {
+  } else if (/^(remotive|jobicy|workday|himalayas):[\w.:-]{1,200}$/.test(liveKey)) {
     const db = (await import("@/lib/v2/session")).serviceClient();
     const { data: existing } = await db.from("job_postings").select(COLS).eq("source_key", liveKey).maybeSingle();
     posting = existing as P | null;
@@ -414,6 +414,55 @@ export async function addSearchedJob(form: FormData) {
     .single();
   if (error || !job) fail(`Couldn't add it: ${error?.message ?? "unknown error"}`);
   revalidatePath("/jobs");
+
+  // Search → "Queue it" / "Apply now": hand it straight to the agent (Apply now also starts a run).
+  const then = String(form.get("then") ?? "");
+  if (then === "queue" || then === "apply") {
+    const { data: full } = await supabase.from("job_postings").select("ats,apply_url,url,verification_status").eq("id", p.id).maybeSingle();
+    const can = full && full.verification_status === "verified" && agentCanSubmit(full as { ats: string | null; apply_url: string | null; url: string; verification_status: string });
+    const { data: existing } = await supabase.from("applications").select("id,status").eq("user_id", user.id).eq("job_id", job!.id).maybeSingle();
+    if (existing && !["draft", "ignored", "failed"].includes(existing.status as string)) redirect(`/applications?tab=all&app=${existing.id}`);
+    const status = can ? "queued" : "needs_user";
+    const { data: app, error: e2 } = await supabase
+      .from("applications")
+      .upsert(
+        {
+          user_id: user.id,
+          job_id: job!.id,
+          posting_id: p.id,
+          apply_url: full?.apply_url || p.url,
+          ats: full?.ats ?? null,
+          status,
+          requested_by: "user",
+          status_updated_at: new Date().toISOString(),
+          error: can
+            ? null
+            : full?.verification_status !== "verified"
+              ? "Added from search. The employer check didn’t pass, so the agent won’t send this one — open the posting and apply yourself if you trust it."
+              : "Added from search. The agent can’t submit on this site — open the posting and apply yourself.",
+        },
+        { onConflict: "user_id,job_id" }
+      )
+      .select("id")
+      .single();
+    if (e2 || !app) fail(`Added to your roles, but couldn’t queue it: ${e2?.message ?? "unknown error"}`);
+    await supabase.from("application_events").insert({ user_id: user.id, application_id: app!.id, kind: can ? "queued" : "note", source: "user", detail: can ? "Queued from search" : "Added from search — apply yourself" });
+    let started = false;
+    if (can && then === "apply") {
+      const { dispatchAgentRun, machineStatus } = await import("@/lib/v2/dispatch");
+      if ((await machineStatus()).state === "idle") started = (await dispatchAgentRun(user.id)).started;
+    }
+    revalidatePath("/applications");
+    revalidatePath("/dashboard");
+    const msg = !can
+      ? "Added. The agent can’t send this one — it’s under Needs you with the link to apply yourself."
+      : then === "apply"
+        ? started
+          ? "Queued, and a run is starting now."
+          : "Queued. A run is already going (or can’t start right now); it picks this up next."
+        : "Queued. The agent applies on its next run.";
+    redirect(`/applications?tab=all&app=${app!.id}&msg=${encodeURIComponent(msg)}`);
+  }
   redirect(`/jobs?job=${job!.id}&added=1`);
 }
 
@@ -447,6 +496,31 @@ export async function setApplicationStatus(appId: string, form: FormData) {
   await supabase.from("applications").update({ status, status_updated_at: new Date().toISOString() }).eq("id", appId).eq("user_id", user.id);
   await supabase.from("application_events").insert({ user_id: user.id, application_id: appId, kind: status, source: "user", detail: note });
   revalidatePath("/applications");
+}
+
+/**
+ * Applications → timeline → "Not right — remove": drops an event an email added by mistake (a newsletter,
+ * a "we may invite you" confirmation, another application at the same company) and rebuilds the status
+ * from what's left.
+ */
+export async function removeTimelineEvent(appId: string, eventId: string) {
+  const { supabase, user } = await requireUser();
+  const { data: app } = await supabase.from("applications").select("id,status,submitted_at").eq("id", appId).eq("user_id", user.id).maybeSingle();
+  if (!app) return;
+  await supabase.from("application_events").delete().eq("id", eventId).eq("application_id", appId).eq("user_id", user.id).neq("kind", "submitted");
+  const { data: rest } = await supabase.from("application_events").select("kind").eq("application_id", appId).eq("user_id", user.id).order("created_at", { ascending: true });
+  const { statusFromEvents } = await import("@/lib/v2/tracking");
+  const before = app.status as string;
+  // Only statuses that came from the timeline are rebuilt; queued / needs-you / drafts stay as they are.
+  if (["submitted", "received", "under_review", "screening", "interview", "offer", "rejected"].includes(before)) {
+    const status = statusFromEvents("submitted", (rest ?? []).map((e) => e.kind as string));
+    if (status !== before) {
+      await supabase.from("applications").update({ status, status_updated_at: new Date().toISOString() }).eq("id", appId).eq("user_id", user.id);
+      await supabase.from("application_events").insert({ user_id: user.id, application_id: appId, kind: "note", source: "user", detail: `Removed a wrong email update — back to “${status.replace("_", " ")}”` });
+    }
+  }
+  revalidatePath("/applications");
+  revalidatePath("/dashboard");
 }
 
 /** Connect an inbox (Gmail app password) so the agent can track replies. */

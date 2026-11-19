@@ -85,7 +85,7 @@ async function runTool(name: string, args: Args, sb: SupabaseClient, userId: str
       const [{ data: runs }, { data: waiting }, { data: cool }] = await Promise.all([
         sb.from("agent_runs").select("started_at,ended_at,status,summary").eq("user_id", userId).order("started_at", { ascending: false }).limit(8),
         sb.from("applications").select("error,pending_questions").eq("user_id", userId).eq("status", "needs_user"),
-        serviceClient().from("site_cooldowns").select("host,reason,until").gt("until", new Date().toISOString()),
+        serviceClient().from("site_cooldowns").select("host,reason,until").gt("until", new Date().toISOString()).not("host", "like", "pwreset:%"),
       ]);
       const done = (runs ?? []).filter((r) => r.status !== "running");
       const last = done.find((r) => Object.keys((r.summary as { applications?: object })?.applications ?? {}).length) ?? done[0];

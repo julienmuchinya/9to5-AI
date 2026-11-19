@@ -1,8 +1,8 @@
 import Link from "next/link";
 import { Suspense } from "react";
-import { liveSearch } from "@/lib/v2/discovery/live-search";
+import { SearchEverywhere } from "./search-everywhere";
 import { requireUser } from "@/lib/v2/session";
-import { Badge, CompanyMark, Emphasis, EmptyState, FitBadge, PageHeader, buttonCls, inputCls } from "@/components/ui";
+import { Badge, CompanyMark, EmptyState, FitBadge, PageHeader, buttonCls, inputCls } from "@/components/ui";
 import { loadLibrary } from "@/lib/v2/resume-library";
 import { PrepareDialog } from "./prepare-dialog";
 import { Icon } from "@/components/sidebar";
@@ -78,15 +78,16 @@ type SP = {
   src?: string;
   msg?: string;
   added?: string;
+  pick?: string;
 };
 
 type DbPosting = Posting & { id: string; title: string; company_name: string };
 
 export default async function JobsPage({ searchParams }: { searchParams: Promise<SP> }) {
   const sp = await searchParams;
-  const scope = sp.scope === "all" ? "all" : "mine";
+  const scope = sp.scope === "all" ? "all" : sp.scope === "web" ? "web" : "mine";
   const show = SHOWS.some(([k]) => k === sp.show) && !(scope === "all" && sp.show === "saved") ? sp.show! : "verified";
-  const sort = sp.sort ?? (scope === "all" ? "newest" : "priority");
+  const sort = sp.sort ?? (scope === "mine" ? "priority" : "newest");
   const term = (sp.q ?? "").replace(/[,()%*]/g, " ").trim().slice(0, 100);
   // Extra filters (the "More filters" panel).
   const posted = POSTED.some(([v]) => v === sp.posted) ? (sp.posted ?? "") : "";
@@ -104,7 +105,7 @@ export default async function JobsPage({ searchParams }: { searchParams: Promise
       if (!v) continue;
       if (k === "scope" && v === "mine") continue;
       if (k === "show" && v === "verified") continue;
-      if (k === "sort" && v === ((merged.scope ?? scope) === "all" ? "newest" : "priority")) continue;
+      if (k === "sort" && v === ((merged.scope ?? scope) === "mine" ? "priority" : "newest")) continue;
       p.set(k, v);
     }
     const s = p.toString();
@@ -150,7 +151,7 @@ export default async function JobsPage({ searchParams }: { searchParams: Promise
             : priorityScore(b.fit_score, b.job_postings.posted_at, now) - priorityScore(a.fit_score, a.job_postings.posted_at, now)
       )
       .slice(0, 150);
-  } else {
+  } else if (scope === "all") {
     // ── All jobs: every posting the agent has found, for anyone, in any field ──
     let query = supabase
       .from("job_postings")
@@ -191,7 +192,7 @@ export default async function JobsPage({ searchParams }: { searchParams: Promise
 
   const ready = rows.filter((r) => !appBy.has(r.id) && agentCanSubmit(r.job_postings)).length;
   const count = scope === "mine" ? rows.length : all.length;
-  const chips = SHOWS.filter(([k]) => (k !== "saved" || (savedOn && scope === "mine")));
+  const chips = SHOWS.filter(([k]) => (scope === "web" ? ["verified", "remote", "new"].includes(k) : k !== "saved" || (savedOn && scope === "mine")));
 
   // How many resumes the agent can choose from (shown in the Prepare dialog).
   let resumeCount = 0;
@@ -208,8 +209,8 @@ export default async function JobsPage({ searchParams }: { searchParams: Promise
   return (
     <div>
       <PageHeader
-        eyebrow={scope === "mine" ? "Explore / your next chapter" : "Explore / every role we’ve found"}
-        aside={scope === "mine" ? "A curated feed" : "The whole archive"}
+        eyebrow={scope === "mine" ? "Explore / your next chapter" : scope === "web" ? "Explore / search every job" : "Explore / every role we’ve found"}
+        aside={scope === "mine" ? "A curated feed" : scope === "web" ? "Job sites + employers, live" : "The whole archive"}
         title="Good work, *ahead.*"
         description="Opportunities worth considering. Select a role to read the whole story."
         action={
@@ -239,6 +240,7 @@ export default async function JobsPage({ searchParams }: { searchParams: Promise
       <div className="mb-6 inline-flex border border-[var(--border-strong)]" role="tablist" aria-label="What to search">
         {(
           [
+            ["web", "Search everywhere"],
             ["mine", "My matches"],
             ["all", "All roles we’ve found"],
           ] as const
@@ -256,9 +258,10 @@ export default async function JobsPage({ searchParams }: { searchParams: Promise
       </div>
 
       <form role="search" className="relative max-w-[820px]">
-        <input type="hidden" name="scope" value={scope === "all" ? "all" : ""} />
+        {/* The search box searches everywhere (job sites too); on "All roles" it narrows that archive. */}
+        <input type="hidden" name="scope" value={scope === "all" ? "all" : "web"} />
         <input type="hidden" name="show" value={show === "verified" ? "" : show} />
-        <input type="hidden" name="sort" value={sp.sort ?? ""} />
+        {scope !== "web" && <input type="hidden" name="sort" value={sp.sort ?? ""} />}
         {posted && <input type="hidden" name="posted" value={posted} />}
         {level && <input type="hidden" name="level" value={level} />}
         {minpay && <input type="hidden" name="minpay" value={minpay} />}
@@ -273,11 +276,11 @@ export default async function JobsPage({ searchParams }: { searchParams: Promise
           name="q"
           defaultValue={term}
           autoFocus={sp.focus === "1"}
-          placeholder="Try a title, company, or skill"
+          placeholder="Search any job — title, company, or skill"
           className="h-16 w-full border-0 border-b-2 border-[var(--foreground)] bg-transparent pl-9 pr-28 font-serif text-[22px] outline-none placeholder:text-[var(--muted)]/70 focus:border-[var(--orange)] sm:text-[28px]"
         />
         <span className="kicker absolute right-0 top-1/2 -translate-y-1/2" aria-live="polite">
-          {count} {scope === "mine" ? (count === 1 ? "match" : "matches") : count === 1 ? "role" : "roles"}
+          {scope === "web" ? "Search ↵" : `${count} ${scope === "mine" ? (count === 1 ? "match" : "matches") : count === 1 ? "role" : "roles"}`}
         </span>
       </form>
 
@@ -292,7 +295,7 @@ export default async function JobsPage({ searchParams }: { searchParams: Promise
             </Link>
           ))}
         </div>
-        <span className="ml-auto flex shrink-0 items-center gap-1 text-sm">
+        <span className={`ml-auto shrink-0 items-center gap-1 text-sm ${scope === "web" ? "hidden" : "flex"}`}>
           <span className="kicker mr-1">Sort</span>
           {(scope === "mine"
             ? [
@@ -316,7 +319,7 @@ export default async function JobsPage({ searchParams }: { searchParams: Promise
       <details className="no-marker mt-4" open={extra > 0}>
         <summary className="inline-flex min-h-[40px] cursor-pointer items-center text-sm font-semibold underline underline-offset-4">More preferences{extra ? ` (${extra} on)` : ""} ↗</summary>
         <form className="mt-4 grid gap-4 border-t border-[var(--border)] pt-5 sm:grid-cols-2 lg:grid-cols-5">
-          <input type="hidden" name="scope" value={scope === "all" ? "all" : ""} />
+          <input type="hidden" name="scope" value={scope === "mine" ? "" : scope} />
           <input type="hidden" name="show" value={show === "verified" ? "" : show} />
           <input type="hidden" name="sort" value={sp.sort ?? ""} />
           <input type="hidden" name="q" value={term} />
@@ -390,7 +393,25 @@ export default async function JobsPage({ searchParams }: { searchParams: Promise
       )}
 
       <div className="mt-6">
-        {error ? (
+        {scope === "web" ? (
+          term ? (
+            <Suspense
+              key={`${term}|${show}|${posted}|${minpay}|${loc}`}
+              fallback={
+                <div className="mt-2 space-y-2" aria-busy="true">
+                  <p className="text-sm text-[var(--muted)]">Searching job sites and 60+ employers for “{term}”…</p>
+                  {[0, 1, 2, 3].map((i) => (
+                    <div key={i} className="h-16 animate-pulse bg-[var(--hover)]" />
+                  ))}
+                </div>
+              }
+            >
+              <SearchEverywhere term={term} pick={sp.pick ?? ""} base={qs({ pick: undefined, job: undefined })} sinceIso={sinceIso} remoteOnly={show === "remote"} minpay={Number(minpay) || 0} loc={loc} />
+            </Suspense>
+          ) : (
+            <EmptyState title="Search any job." message="Type a title, company or skill above — nurse, data analyst, Chevron, forklift. You’ll see jobs from job sites and employers’ career pages, not only your matches, with what each one asks for. Apply now or queue it for the agent." />
+          )
+        ) : error ? (
           <EmptyState icon="!" message="We couldn’t load roles. Your search is safe — refresh the page to try again." />
         ) : scope === "all" ? (
           all.length === 0 ? (
@@ -524,97 +545,18 @@ export default async function JobsPage({ searchParams }: { searchParams: Promise
         )}
       </div>
 
-      {/* Live results from job sites, streamed in after everything above. */}
-      {term && (
-        <Suspense
-          fallback={
-            <section className="mt-14 border-t-2 border-[var(--foreground)] pt-6" aria-busy="true">
-              <h2 className="display text-[30px]">Further afield.</h2>
-              <p className="mt-1 text-sm text-[var(--muted)]">Searching job sites and 60+ employers for “{term}”…</p>
-              <div className="mt-5 space-y-2">
-                {[0, 1, 2].map((i) => (
-                  <div key={i} className="h-16 animate-pulse bg-[var(--hover)]" />
-                ))}
-              </div>
-            </section>
-          }
-        >
-          <WebResults term={term} back={here} sinceIso={sinceIso} remoteOnly={show === "remote"} minpay={Number(minpay) || 0} loc={loc} userId={user.id} />
-        </Suspense>
+      {/* Searching only your matches or the archive: one tap to search job sites too. */}
+      {term && scope !== "web" && (
+        <div className="mt-10 flex flex-wrap items-center justify-between gap-3 border-t-2 border-[var(--foreground)] pt-6">
+          <p className="text-sm">
+            Looking beyond what the agent found? <span className="text-[var(--muted)]">Search job sites and 60+ employers for “{term}”, read each job’s requirements, and apply or queue it.</span>
+          </p>
+          <Link href={qs({ scope: "web", job: undefined, sort: undefined, show: show === "remote" || show === "new" ? show : undefined })} className={buttonCls("primary")}>
+            Search everywhere for “{term}” →
+          </Link>
+        </div>
       )}
     </div>
-  );
-}
-
-/** Live search results (job sites + employer career sites), with "Add to explore". */
-async function WebResults({ term, back, sinceIso, remoteOnly, minpay, loc, userId }: { term: string; back: string; sinceIso: string; remoteOnly: boolean; minpay: number; loc: string; userId: string }) {
-  const { supabase } = await requireUser();
-  const { hits, failed } = await liveSearch(term, { timeoutMs: 8000 });
-  const shown = hits.filter(
-    (h) =>
-      (!sinceIso || !h.posted_at || h.posted_at >= sinceIso) &&
-      (!remoteOnly || h.is_remote) &&
-      (!minpay || (h.salary_max ?? 0) >= minpay) &&
-      (!loc || h.location.toLowerCase().includes(loc.toLowerCase()))
-  );
-  const keys = shown.slice(0, 80).map((h) => h.key);
-  const { data: mine } = keys.length ? await supabase.from("jobs").select("id,idempotency_key").eq("user_id", userId).in("idempotency_key", keys) : { data: [] };
-  const have = new Map((mine ?? []).map((j) => [j.idempotency_key as string, j.id as string]));
-  const SRC: Record<string, string> = { remotive: "Remotive", jobicy: "Jobicy", workday: "Employer site" };
-  return (
-    <section className="mt-14 border-t-2 border-[var(--foreground)] pt-6" aria-labelledby="web-results">
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <h2 id="web-results" className="display text-[30px]">
-          Further <Emphasis text="*afield.*" />
-        </h2>
-        <p className="kicker">{shown.length} live result{shown.length === 1 ? "" : "s"}</p>
-      </div>
-      <p className="mt-2 max-w-3xl text-sm text-[var(--muted)]">
-        {shown.length ? `Live results for “${term}”` : `No live results for “${term}”`} from Remotive, Jobicy and 60+ employers’ career sites — energy, healthcare, banking, retail, government and tech. They aren’t checked yet: adding one runs the employer check and describes the fit against your profile.
-        {failed.length ? ` (${failed.join(", ")} didn’t answer in time.)` : ""}
-      </p>
-      {shown.length > 0 && (
-        <ul aria-label="Live results" className="mt-4 border-t border-[var(--border)]">
-          {shown.slice(0, 80).map((h) => {
-            const mineId = have.get(h.key);
-            const age = h.posted_label ?? ago(h.posted_at);
-            const salary = pay(h.salary_min ?? null, h.salary_max ?? null);
-            return (
-              <li key={h.key} className="flex flex-wrap items-start gap-4 border-b border-[var(--border)] py-5 sm:flex-nowrap">
-                <CompanyMark name={h.company} />
-                <div className="min-w-0 flex-1">
-                  <p className="kicker">
-                    {h.company} · {SRC[h.source]}
-                  </p>
-                  <p className="mt-0.5 text-[17px] font-semibold leading-snug">{h.title}</p>
-                  <p className="mt-1 text-sm text-[var(--muted)]">
-                    {h.location} · {salary ?? "Pay not listed"}
-                    {age ? ` · posted ${age}` : ""}
-                  </p>
-                </div>
-                <div className="flex w-full shrink-0 items-center gap-2 sm:w-auto">
-                  <a href={h.url} target="_blank" rel="noopener noreferrer" className={buttonCls("ghost", "sm")}>
-                    Posting ↗
-                  </a>
-                  {mineId ? (
-                    <Link href={`/jobs?job=${mineId}&show=all`} className={buttonCls("secondary", "sm")}>
-                      Open role →
-                    </Link>
-                  ) : (
-                    <form action={addSearchedJob}>
-                      <input type="hidden" name="live_key" value={h.key} />
-                      <input type="hidden" name="term" value={term} />
-                      <input type="hidden" name="back" value={back} />
-                      <button className={buttonCls("primary", "sm")}>+ Add to explore</button>
-                    </form>
-                  )}
-                </div>
-              </li>
-            );
-          })}
-        </ul>
-      )}
-    </section>
   );
 }
 

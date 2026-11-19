@@ -6,7 +6,7 @@
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { geminiJson, FreeTierLimitError } from "../../src/lib/v2/gemini";
-import { isJobSpecific, memoryKey, pickOption, type AppAnswers, type PendingQuestion } from "../../src/lib/v2/app-questions";
+import { isFollowUp, isJobSpecific, memoryKey, pickOption, type AppAnswers, type PendingQuestion } from "../../src/lib/v2/app-questions";
 import { answerPrompt, salaryFacts } from "./answer-ai";
 
 interface Waiting {
@@ -41,7 +41,9 @@ export async function answerWaitingQuestions(
   const generic = new Map<string, PendingQuestion>();
   for (const w of waiting)
     for (const q of w.pending_questions ?? []) {
-      if (needsHuman(q) || isJobSpecific(q.label, w.jobs?.company_name ?? "")) continue;
+      // Follow-ups ("If yes, please explain") depend on the question before them on THAT form: answered at
+      // apply time with the whole form in view, never saved as one answer for every "Please explain".
+      if (needsHuman(q) || isJobSpecific(q.label, w.jobs?.company_name ?? "") || isFollowUp(q.label)) continue;
       const k = memoryKey(q.label);
       if (out.memory[k] || ctx.custom[k] || generic.has(k)) continue;
       generic.set(k, q);

@@ -311,6 +311,60 @@ export interface PendingQuestion {
   kind: string;
   options: string[];
   required: boolean;
+  /**
+   * The question(s) just before it on the form, with what was answered — set when this one only makes
+   * sense after them ("If yes, please explain", "Please specify", "Which one?").
+   */
+  context?: { label: string; answer?: string }[];
+}
+
+/** Does this question depend on the one before it? ("If yes, please explain", "Please specify", "Other — which?") */
+export function isFollowUp(label: string): boolean {
+  const l = label.replace(/[*:]+\s*$/, "").trim();
+  if (!l) return true;
+  return (
+    /^(if\b|please (explain|specify|describe|provide|list|elaborate|indicate|share|tell us more)|explain|describe|specify|elaborate|details?\b|provide (details|more)|more (details|information)|additional (details|information|comments)|other\b|which (one|ones|company|companies|position|role|location)|when\b|where\b|why\b|how long|list (them|the)|name(s)? of|comments?\b|(their|the) (name|title|relationship)|reason\b|dates?\b)/i.test(l) ||
+    /\b(if (yes|so|no|applicable|other)|from (the|your) (previous|above) (question|answer)|above question|previous question)\b/i.test(l) ||
+    (l.length <= 25 && !/\?/.test(l) && /^(explain|details|specify|other|comments|reason|description)/i.test(l))
+  );
+}
+
+/**
+ * A required follow-up whose condition wasn't met: "If yes, please explain" after a "No", "If other, please
+ * specify" after a normal choice. Answers "N/A" instead of sending the application to the user.
+ * Only for free-text boxes; null when it can't be sure.
+ */
+export function autoFollowUpAnswer(fields: { id: string; label: string; kind: string }[], id: string, answers: Record<string, string>): string | null {
+  const i = fields.findIndex((f) => f.id === id);
+  if (i <= 0) return null;
+  const f = fields[i];
+  if (f.kind !== "text" && f.kind !== "textarea") return null;
+  const l = f.label.toLowerCase();
+  const prev = [...fields.slice(0, i)].reverse().find((x) => x.kind !== "file" && answers[x.id]);
+  if (!prev) return null;
+  const a = String(answers[prev.id]).trim().toLowerCase();
+  const no = /^(no\b|none|n\/a|not applicable|i have not|i do not|i don.t|never)/.test(a);
+  const yes = /^(yes\b|i have\b|i do\b)/.test(a);
+  if (/\bif (yes|so)\b|if you (answered|selected|checked) .?yes|if applicable/.test(l) && no) return "N/A";
+  if (/\bif no\b|if you (answered|selected) .?no/.test(l) && yes) return "N/A";
+  if (/\bif other\b|^other\b|please specify( other)?$/.test(l.replace(/[*:]+\s*$/, "").trim()) && a && !/other/.test(a)) return "N/A";
+  return null;
+}
+
+/** For a follow-up question: the two questions before it on the form and their answers (for the user to see). */
+export function questionContext(
+  fields: { id: string; label: string; kind: string }[],
+  id: string,
+  answers: Record<string, string>
+): PendingQuestion["context"] {
+  const i = fields.findIndex((f) => f.id === id);
+  if (i <= 0 || !isFollowUp(fields[i].label)) return undefined;
+  const before = fields
+    .slice(0, i)
+    .filter((f) => f.kind !== "file" && f.label && !/password/i.test(f.label))
+    .slice(-2);
+  if (!before.length) return undefined;
+  return before.map((f) => ({ label: f.label.slice(0, 300), answer: answers[f.id] && answers[f.id] !== "__RESUME__" ? String(answers[f.id]).slice(0, 200) : undefined }));
 }
 /** The user's answers to such questions: memoryKey → { q: question as asked, a: answer }. */
 export type CustomAnswers = Record<string, { q: string; a: string; at?: string }>;

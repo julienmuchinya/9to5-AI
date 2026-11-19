@@ -887,6 +887,14 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
     applicant.memory = { ...memory, ...reuse };
     const t0 = Date.now();
     const r = await applyToJob(browser, sb, { url: applyUrl, ats: p.ats, applicant, resumePath, jobTitle: job.title, company: job.company_name, userId: u.id, dryRun, jobDescription: p.description, emailCode, emailLink, accountExists: Boolean(acct?.account_created),
+      // One password reset per portal per week, remembered across runs (it used to reset on every run).
+      passwordReset: {
+        allowed: !cooldowns.has(`pwreset:${u.id.slice(0, 8)}:${host}`),
+        record: async () => {
+          cooldowns.set(`pwreset:${u.id.slice(0, 8)}:${host}`, "password reset sent");
+          if (!dryRun) await coolDown(sb, `pwreset:${u.id.slice(0, 8)}:${host}`, 24 * 7, "password reset sent");
+        },
+      },
       coverLetter: async () => {
         const who = { name: `${applicant.first_name} ${applicant.last_name}`, email: applicant.email, phone: applicant.phone, company: job.company_name };
         const body = await writeCoverLetter(sb, { ...who, title: job.title, resume: applicant.resume_text, jobDescription: p.description ?? "", userId: u.id });

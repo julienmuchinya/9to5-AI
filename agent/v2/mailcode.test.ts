@@ -51,6 +51,7 @@ describe("connect with Google", () => {
         { id: "1", from: "Newsletter <news@x.com>", subject: "Weekly digest", date: new Date(), body: async () => ({ text: "code 999999", html: "" }) },
         { id: "2", from: "Greenhouse <no-reply@us.greenhouse-mail.io>", subject: "Security code for your application to Acme", date: new Date(), body: async () => ({ text: "Paste this code into the security code field: Xy7Kp2Qa", html: "" }) },
       ],
+      get: async () => null,
       close: async () => {
         closed = true;
       },

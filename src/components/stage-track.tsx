@@ -19,13 +19,17 @@ export function StageTrack({ status, history = [] }: { status: string; history?:
   // Furthest stage before the decision (from the timeline), so "rejected after interview" shows the interview.
   const reachedBefore = Math.max(0, ...history.map(stageIndex).filter((i) => i >= 0 && i < 4), final ? 0 : current);
   const reached = final ? reachedBefore : current;
+  // A stage counts as done only if it really happened (on the timeline, or it's the current one). Jumping
+  // straight from Submitted to Interview no longer paints "In review" and "Screening" as done.
+  const seen = new Set([...history.map(stageIndex), final ? -1 : current, 0]);
+  const happened = (i: number) => seen.has(i);
   const endTone = status === "offer" ? "bg-emerald-500 border-emerald-500" : status === "rejected" ? "bg-red-500 border-red-500" : "bg-slate-500 border-slate-500";
 
   return (
     <ol className="mt-3 flex items-start" aria-label={`Progress: ${status}`}>
       {STEPS.map((label, i) => {
         const isEnd = i === 4;
-        const done = isEnd ? final : i <= reached;
+        const done = isEnd ? final : i <= reached && happened(i);
         const isCurrent = !final && i === current;
         const line = i < 4 ? (final ? i < reached : i < current) : false;
         return (
@@ -40,6 +44,7 @@ export function StageTrack({ status, history = [] }: { status: string; history?:
             </span>
             <span className={`mt-1 text-[10px] leading-tight ${isCurrent || (isEnd && final) ? "font-medium text-[var(--foreground)]" : "text-[var(--muted)]"}`}>
               {isEnd && status === "offer" ? "Offer" : isEnd && status === "rejected" ? "Rejected" : isEnd && status === "withdrawn" ? "Withdrawn" : label}
+              {!isEnd && i < reached && !happened(i) && <span className="block text-[9px] text-[var(--muted)]">skipped</span>}
             </span>
           </li>
         );

@@ -411,6 +411,36 @@ export async function searchRemotive(term: string, timeoutMs = 9000): Promise<Po
     });
 }
 
+/** Himalayas' keyword search: remote jobs in any field (free, no key). */
+export async function searchHimalayas(term: string, timeoutMs = 9000): Promise<Posting[]> {
+  const r = await getJson<{
+    jobs?: { guid?: string; title?: string; companyName?: string; applicationLink?: string; locationRestrictions?: (string | { name?: string })[]; minSalary?: number | null; maxSalary?: number | null; pubDate?: number | string; description?: string; excerpt?: string; seniority?: string[] }[];
+  }>(`https://himalayas.app/jobs/api/search?q=${encodeURIComponent(term)}&limit=40`, timeoutMs);
+  return (r?.jobs ?? [])
+    .filter((j) => j.title && j.companyName && j.applicationLink)
+    .map((j) => {
+      const locs = (j.locationRestrictions ?? []).map((l) => (typeof l === "string" ? l : (l.name ?? ""))).filter(Boolean);
+      const when = typeof j.pubDate === "number" ? new Date(j.pubDate * (j.pubDate < 1e12 ? 1000 : 1)).toISOString() : j.pubDate;
+      const id = (j.guid ?? j.applicationLink!).replace(/[^\w.-]+/g, "-").slice(-120);
+      return finish({
+        source: "himalayas",
+        source_key: `himalayas:${id}`,
+        company_name: plain(j.companyName!),
+        title: plain(j.title!),
+        level: detectLevel(j.title!, (j.seniority ?? []).join(" ")),
+        locations: locs.length ? locs : ["Remote"],
+        is_remote: true,
+        url: j.applicationLink!,
+        apply_url: j.applicationLink!,
+        salary_min: j.minSalary ?? undefined,
+        salary_max: j.maxSalary ?? undefined,
+        description: stripHtml(j.description ?? j.excerpt ?? ""),
+        posted_at: when,
+      });
+    })
+    .filter((p) => !p.locations.length || p.locations.some((l) => usOk(l) || /remote|anywhere|worldwide/i.test(l)));
+}
+
 /** Jobicy's keyword (tag) search, US remote jobs. */
 export async function searchJobicy(term: string, timeoutMs = 9000): Promise<Posting[]> {
   const r = await getJson<{

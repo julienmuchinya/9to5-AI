@@ -3,7 +3,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { geminiJson, FreeTierLimitError } from "../../src/lib/v2/gemini";
 import { applyWorkday } from "./workday";
 import { answerPrompt, salaryFacts } from "./answer-ai";
-import { answerFromProfile, commonSenseAnswer, findSimilarAnswer, memoryKey, pickOption, questionFor, type AppAnswers, type PendingQuestion } from "../../src/lib/v2/app-questions";
+import { answerFromProfile, autoFollowUpAnswer, commonSenseAnswer, findSimilarAnswer, isFollowUp, memoryKey, pickOption, questionContext, questionFor, type AppAnswers, type PendingQuestion } from "../../src/lib/v2/app-questions";
 
 export interface Applicant {
   first_name: string;
@@ -56,6 +56,8 @@ export interface ApplyOpts {
   emailLink?: (since: Date, match: RegExp, host?: string, waitMs?: number) => Promise<string | null>;
   /** True when this portal account was already created on an earlier run. */
   accountExists?: boolean;
+  /** Whether a "Forgot password" reset may be sent for this portal now, and how to remember that one was. */
+  passwordReset?: { allowed: boolean; record: () => Promise<void> };
   /** Fields whose earlier answer the site rejected: skip saved answers and ask the AI with the real options. */
   forceAi?: (f: Field) => boolean;
   /** Writes a cover letter PDF for this job (only called when a form requires one). */
@@ -628,7 +630,8 @@ export function knownValue(f: Field, a: Applicant): string | null {
   // Before remembered AI answers, so an old AI guess (e.g. "Referral") can't keep coming back.
   const sense = commonSenseAnswer(f.label, opts, f.kind);
   if (sense) return sense;
-  const remembered = findSimilarAnswer(f.label, opts, a.memory ?? {}, 0.85);
+  // An AI answer to "Please explain" was about some other form's question: never reuse it for a follow-up.
+  const remembered = isFollowUp(f.label) ? null : findSimilarAnswer(f.label, opts, a.memory ?? {}, 0.85);
   if (remembered) return remembered;
   return null;
 }
@@ -1122,6 +1125,11 @@ async function fillAndSubmit(
     aiCalls += ans.aiCalls;
     const usedPortalLogin = fields.some((f) => /password/i.test(f.label) && answers[f.id]);
 
+    // "If yes, please explain" after a "No": N/A, instead of stopping for the user.
+    for (const f of fields) if (f.required && !answers[f.id] && !f.filled) {
+      const na = autoFollowUpAnswer(fields, f.id, answers);
+      if (na) answers[f.id] = na;
+    }
     const missing = fields.filter((f) => f.required && !answers[f.id] && !f.filled);
     if (missing.length) {
       const pending: PendingQuestion[] = missing.map((m) => ({
@@ -1130,6 +1138,7 @@ async function fillAndSubmit(
         kind: m.kind,
         options: m.kind === "checkbox" ? ["Yes", "No"] : m.options.slice(0, 60),
         required: true,
+        context: questionContext(fields, m.id, answers),
       }));
       return {
         status: "needs_user",
@@ -1330,6 +1339,7 @@ export function questionsFor(labels: string[], fields: Field[]): PendingQuestion
       kind: f?.kind ?? "text",
       options: f ? (f.kind === "checkbox" ? ["Yes", "No"] : f.options.slice(0, 60)) : [],
       required: true,
+      context: f ? questionContext(fields, f.id, {}) : undefined,
     });
   }
   return out;
