@@ -40,15 +40,15 @@ const RULES: { stage: Stage; re: RegExp }[] = [
   {
     // Real interviews with the team: onsite / virtual onsite / technical or final rounds.
     stage: "interview",
-    re: /(technical interview|final (round|interview)|on-?site interview|virtual on-?site|panel interview|interview (with|loop)|meet (with )?the (team|hiring manager)|hiring manager interview|schedule (an? |your )interview|interview (invitation|request)|invite you to (an? )?interview|next round)/i,
+    re: /(technical interview|final (round|interview)|on-?site interview|virtual on-?site|panel interview|interview (with|loop)|meet (with )?the (team|hiring manager)|hiring manager interview|schedule (an? |your )interview|interview (invitation|request)|invite you to (an? )?interview|next round|interview (is |has been )?(scheduled|confirmed)|(your|an|the) interview (on|at|for) )/i,
   },
   {
     // First filter: recruiter / phone screen, online assessment, coding test, recorded video.
     stage: "screening",
-    re: /(phone screen|recruiter (call|screen|chat)|screening (call|interview)|initial (call|conversation|chat)|intro(ductory)? call|online assessment|coding (challenge|assessment|test)|technical (screen|assessment)|take-?home|hirevue|codesignal|hackerrank|codility|karat|schedule (a |your )?(call|chat|time)|availability for (an? )?(call|chat)|(are you|you are|you.re) available for (an? )?(quick )?(call|chat|phone))/i,
+    re: /(phone screen|recruiter (call|screen|chat)|screening (call|interview)|initial (call|conversation|chat)|intro(ductory)? call|online assessment|coding (challenge|assessment|test)|technical (screen|assessment)|take-?home|hirevue|codesignal|hackerrank|codility|karat|schedule (a |your )?(call|chat|time)|(set up|arrange|book) (a |an )?(quick |brief |short )?(call|chat|phone)|availability for (an? )?(call|chat)|(are you|you are|you.re) available for (an? )?(quick )?(call|chat|phone))/i,
   },
   { stage: "under_review", re: /(under (review|consideration)|reviewing your (application|profile)|moved to the next (step|stage)|shortlisted)/i },
-  { stage: "received", re: /(thank(s| you) for (applying|your application|your interest)|we('ve| have) received your application|application (has been )?(received|submitted)|application confirmation)/i },
+  { stage: "received", re: /(thank(s| you) for (applying|your application|your interest)|we('ve| have) received your application|received your application|application (has been )?(received|submitted)|application confirmation|we('ve| have) got (it|your)|application [^.\n]{0,120}\bis underway)/i },
 ];
 
 /** Job boards, alerts and newsletters: they mention companies and "interview" but say nothing about YOUR application. */
@@ -62,7 +62,7 @@ const ALERT_SUBJECT = /(jobs? (alert|for you|recommendation)|new jobs?|recommend
  * "thanks for applying" emails as interviews; they're removed before looking for a stage.
  */
 const HYPOTHETICAL =
-  /(\bif (you|your|we|selected|there|our|it|qualified|chosen)\b|\bshould (you|your|we|there)\b|\bin the event\b|\bmay (be )?(contact|reach|invite|ask|include|schedule)|\bmight\b|\bwould be (contacted|invited)|\bwill (contact|reach out to|be in touch with) (you|candidates|applicants)[^.]{0,60}\b(if|whose|who|should)\b|\b(typically|usually|generally|often) (include|involve|consist)|\bour (hiring|interview|recruiting) process\b|\bnext steps (may|could|will) include\b|\bselected (candidates|applicants)\b|\bunable to (respond|reply)|\b(every|each) (applicant|candidate|application) individually\b|\bdue to the (high )?volume\b|\bshortlisted candidates\b|\bonly (those|candidates)\b)/i;
+  /((?<!\b(?:know|see|check|confirm)\s)\bif (you|your|we|selected|there|our|it|qualified|chosen)\b|\bshould (you|your|we|there)\b|\bin the event\b|\bmay (be )?(contact|reach|invite|ask|include|schedule)|\bmight\b|\bwould be (contacted|invited)|\bwill (contact|reach out to|be in touch with) (you|candidates|applicants)[^.]{0,60}\b(if|whose|who|should)\b|\b(typically|usually|generally|often) (include|involve|consist)|\bour (hiring|interview|recruiting) process\b|\bnext steps (may|could|will) include\b|\bselected (candidates|applicants)\b|\bunable to (respond|reply)|\b(every|each) (applicant|candidate|application) individually\b|\bdue to the (high )?volume\b|\bshortlisted candidates\b|\bonly (those|candidates)\b)/i;
 
 /** Proof of an actual invitation: a booking link or a direct ask for your time. */
 const REAL_INVITE =
@@ -70,6 +70,14 @@ const REAL_INVITE =
 
 const STRONG_HYPOTHETICAL =
   /(\bif (you are |you're |you have been )?(selected|chosen|shortlisted|qualified|a (good |strong )?(fit|match))|\bif your (background|experience|skills|qualifications|profile|application)|\bshould (you|your) (be|background|experience|skills|qualifications|profile|application)|\bin the event\b|\bselected (candidates|applicants)\b|\bshortlisted candidates\b|\bonly (those|candidates)\b|\bmay (be )?(contact|invite)|\bmight\b)/i;
+
+/**
+ * A sentence that puts a condition on what follows ("If we determine you're a match, we'll invite you to
+ * interview", "Once we've reviewed it, we'd love to schedule a call") is never a real invitation, even when it
+ * contains invitation words. "Let us know if you're available" is a question, not a condition, so it stays.
+ */
+const CONDITION =
+  /((?<!\b(?:know|see|check|wonder|wondering|ask|asking|confirm|tell us|tell me)\s)\bif\b|\bonce (?:we|we've|we have|we've|our|your|the|you|you've)\b|\bshould (?:we|you|your|there|it)\b|\bin the event\b|\bwhenever\b|\bprovided (?:that )?(?:you|your|we)\b|\b(?:candidates|applicants) (?:who|that|whose)\b|\bafter (?:we|our|the team) (?:review|have reviewed|reviewed)\b)/i;
 
 const sentences = (s: string) => s.split(/(?<=[.!?])\s+|\n+/).map((x) => x.trim()).filter(Boolean);
 
@@ -79,7 +87,7 @@ export function classifyEmail(subject: string, body: string, from = ""): Stage |
   if (ALERT_SUBJECT.test(subject)) return null;
   // Keep only sentences that state a fact about this application.
   // "Let us know if you're available Tuesday" has an "if" but is a real invite; "if selected, we'll invite you" isn't.
-  const facts = sentences(`${subject}\n${body}`.slice(0, 6000)).filter((x) => !STRONG_HYPOTHETICAL.test(x) && (!HYPOTHETICAL.test(x) || REAL_INVITE.test(x)));
+  const facts = sentences(`${subject}\n${body}`.slice(0, 6000)).filter((x) => !STRONG_HYPOTHETICAL.test(x) && !CONDITION.test(x) && (!HYPOTHETICAL.test(x) || REAL_INVITE.test(x)));
   const text = facts.join("\n");
   const confirmation = RULES[RULES.length - 1].re.test(`${subject}\n${body.slice(0, 800)}`);
   for (const r of RULES) {
