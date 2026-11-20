@@ -1,11 +1,11 @@
-import { searchHimalayas, searchJobicy, searchRemotive, type Posting } from "./sources";
+import { searchHimalayas, searchJobicy, searchRemotive, searchUsajobs, usajobsEnabled, type Posting } from "./sources";
 import { WORKDAY_BOARDS, fetchWorkdayBoard, listJobsStatus, postedDaysAgo, workdayKey, type ListRow, type WorkdayBoard } from "./workday";
 import { isUsLocation } from "./filters";
 
 /** One job found by a live search, before it's saved anywhere. */
 export interface LiveHit {
   key: string;
-  source: "remotive" | "jobicy" | "workday" | "himalayas";
+  source: "remotive" | "jobicy" | "workday" | "himalayas" | "usajobs";
   title: string;
   company: string;
   location: string;
@@ -36,21 +36,66 @@ const fromPosting = (p: Posting): LiveHit => ({
   level: p.level,
 });
 
+/**
+ * Industry words → the employers in that industry. "oil" should bring every opening at Chevron, Shell,
+ * Transocean… (roustabouts, accountants, truck drivers, engineers), not only titles that contain "oil".
+ */
+const INDUSTRY: { re: RegExp; sectors: WorkdayBoard["sector"][] }[] = [
+  { re: /\b(oil|gas|petroleum|energy|offshore|drilling|rig|refiner(y|ies)|pipelines?|midstream|upstream|downstream|lng|oilfield|oil ?field|fracking|frac)\b/i, sectors: ["energy"] },
+  { re: /\b(mining|mine|minerals?)\b/i, sectors: ["mining", "energy"] },
+  { re: /\b(utilit(y|ies)|power|electric company|waste|water)\b/i, sectors: ["utilities", "energy"] },
+  { re: /\b(bank|banking|finance|financial|insurance|credit|investment|accounting)\b/i, sectors: ["finance"] },
+  { re: /\b(health ?care|hospital|medical|pharma(cy|ceutical)?|clinic(al)?|nursing|insurance)\b/i, sectors: ["healthcare"] },
+  { re: /\b(retail|store|stores|shop|merchandis(e|ing))\b/i, sectors: ["retail"] },
+  { re: /\b(government|federal|defen[cs]e|military|clearance|public sector)\b/i, sectors: ["government"] },
+  { re: /\b(manufacturing|plant|factory|industrial|chemicals?|aerospace)\b/i, sectors: ["industrial"] },
+  { re: /\b(tech|technology|software|it)\b/i, sectors: ["tech"] },
+];
+/** Job words → the kind of employer that hires for them (read their newest openings, keep matching titles). */
+const ROLE_HINTS: { re: RegExp; sectors: WorkdayBoard["sector"][] }[] = [
+  { re: /\b(cashier|stocker|store|sales associate|retail|merchandiser|warehouse|forklift|picker|packer|team member|customer service)\b/i, sectors: ["retail"] },
+  { re: /\b(nurse|nursing|rn|lpn|cna|medical assistant|pharmac(y|ist)|phlebotom|caregiver|patient|clinical|therapist|technologist)\b/i, sectors: ["healthcare"] },
+  { re: /\b(teller|banker|loan|underwriter|claims|accountant|accounting|auditor|analyst|insurance agent|financial advisor)\b/i, sectors: ["finance"] },
+  { re: /\b(roustabout|roughneck|driller|floorhand|operator|lease|welder|electrician|mechanic|technician|truck driver|cdl|driver)\b/i, sectors: ["energy", "industrial", "utilities"] },
+  { re: /\b(security officer|clearance|intelligence|logistics)\b/i, sectors: ["government"] },
+];
+export const roleHintSectors = (term: string) => [...new Set(ROLE_HINTS.filter((x) => x.re.test(term)).flatMap((x) => x.sectors))];
+
+export const industrySectors = (term: string) => [...new Set(INDUSTRY.filter((x) => x.re.test(term)).flatMap((x) => x.sectors))];
+
 /** Keyword search on every Workday employer the agent knows (energy, healthcare, banking, retail, government, tech…). */
 async function searchWorkday(term: string, perBoard: number, timeoutMs: number, onThrottled: (n: number) => void): Promise<LiveHit[]> {
   // At most 12 employers at a time: all 61 at once is what got the search throttled (HTTP 429).
   const lists: { b: WorkdayBoard; rows: ListRow[] }[] = [];
   let throttled = 0;
-  const queue = [...WORKDAY_BOARDS];
+  // Each employer's own search (it looks in the whole posting, not just the title), plus — for an industry
+  // word — that industry's employers' newest openings of every kind.
+  const sectors = industrySectors(term);
+  type Job = { b: WorkdayBoard; q: string; n: number; titleOnly?: boolean };
+  // A job word ("cashier", "teller", "nurse") also reads the newest openings at employers that hire for it,
+  // keeping the ones whose title has the word; an industry word ("oil") keeps all of them.
+  const roleSectors = roleHintSectors(term).filter((x) => !sectors.includes(x));
+  const jobs: Job[] = [
+    ...WORKDAY_BOARDS.filter((b) => sectors.includes(b.sector)).map((b) => ({ b, q: "", n: 20 })),
+    ...WORKDAY_BOARDS.filter((b) => roleSectors.includes(b.sector)).map((b) => ({ b, q: "", n: 20, titleOnly: true })),
+    ...WORKDAY_BOARDS.map((b) => ({ b, q: term, n: perBoard })),
+  ];
+  let skipped = 0;
   await Promise.all(
     Array.from({ length: 12 }, async () => {
-      for (let b = queue.shift(); b; b = queue.shift()) {
-        const r = await listJobsStatus(b, term, perBoard, timeoutMs);
+      for (let j = jobs.shift(); j; j = jobs.shift()) {
+        // Workday throttles by address: after a few refusals, asking the rest only makes it last longer.
+        if (throttled >= 6) {
+          skipped++;
+          continue;
+        }
+        const r = await listJobsStatus(j.b, j.q, j.n, timeoutMs);
         if (r.status === "throttled") throttled++;
-        lists.push({ b, rows: r.rows });
+        lists.push({ b: j.b, rows: j.titleOnly ? r.rows.filter((x) => titleMatches(x.title, term, "any")) : r.rows });
       }
     })
   );
+  throttled += skipped;
   if (throttled) onThrottled(throttled);
   const out: LiveHit[] = [];
   for (const { b, rows } of lists) {
@@ -110,29 +155,69 @@ export async function liveSearch(term: string, opts: { timeoutMs?: number; perBo
       return [];
     }
   };
-  const [remotive, jobicy, himalayas, workday] = await Promise.all([
+  const [remotive, jobicy, himalayas, usajobs, workday] = await Promise.all([
     guard("Remotive", searchRemotive(t, timeoutMs).then((ps) => ps.map(fromPosting))),
     guard("Jobicy", searchJobicy(t, timeoutMs).then((ps) => ps.map(fromPosting))),
     guard("Himalayas", searchHimalayas(t, timeoutMs).then((ps) => ps.map(fromPosting))),
+    usajobsEnabled() ? guard("USAJOBS", searchUsajobs(t, timeoutMs).then((ps) => ps.map(fromPosting))) : Promise.resolve([] as LiveHit[]),
     guard(
       "employer sites",
-      searchWorkday(t, opts.perBoard ?? 6, timeoutMs, (n) => failed.push(`${n} employer site${n === 1 ? "" : "s"} (busy — try again in a few minutes)`))
+      searchWorkday(t, opts.perBoard ?? 6, timeoutMs, () => failed.push("some employer sites (busy — their jobs collected earlier are still included)"))
     ),
   ]);
   const seen = new Set<string>();
-  const all = [...workday, ...remotive, ...jobicy, ...himalayas];
-  // The sources match loosely ("nurse" also returns store jobs): keep titles that contain every search word,
-  // or — if that leaves nothing — any of them.
-  const strict = all.filter((h) => titleMatches(h.title, t, "all"));
-  const relevant = strict.length ? strict : all.filter((h) => titleMatches(h.title, t, "any"));
-  const hits = relevant.filter((h) => {
-    const k = `${h.title.toLowerCase().replace(/\W+/g, " ").trim()}|${h.company.toLowerCase()}`;
-    if (seen.has(k)) return false;
-    seen.add(k);
-    return true;
-  });
-  hits.sort((a, b) => Date.parse(b.posted_at ?? "0") - Date.parse(a.posted_at ?? "0"));
+  const all = [...workday, ...usajobs, ...remotive, ...jobicy, ...himalayas];
+  // Titles that contain the words come first, then everything else the sources found for them (the word in
+  // the company, the description, or an employer in that industry). Nothing is dropped for its field.
+  const hits = all
+    .map((h) => ({ h, rank: relevance(h, t) }))
+    .filter((x) => x.rank > 0)
+    .filter(({ h }) => {
+      const k = `${h.title.toLowerCase().replace(/\W+/g, " ").trim()}|${h.company.toLowerCase()}`;
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    })
+    .sort((a, b) => b.rank - a.rank || Date.parse(b.h.posted_at ?? "0") - Date.parse(a.h.posted_at ?? "0"))
+    .map((x) => x.h);
   return { hits, failed };
+}
+
+/**
+ * How well a hit answers the search: 3 = every word in the title, 2 = some, 1 = in the company or the
+ * description, or an employer in the industry searched for (an employer's own search already looked
+ * through the whole posting). 0 = unrelated (a loose match by a job board).
+ */
+export function relevance(h: Pick<LiveHit, "title" | "company" | "source" | "description">, term: string): number {
+  if (titleMatches(h.title, term, "all")) return 3;
+  if (titleMatches(h.title, term, "any")) return 2;
+  if (titleMatches(h.company, term, "any")) return 1;
+  if (h.source === "workday" || h.source === "usajobs") return 1;
+  const stems = searchStems(term);
+  const d = (h.description ?? "").toLowerCase();
+  if (stems.length && stems.every((s) => new RegExp(`\\b${s.replace(/[^a-z0-9]/g, "")}`).test(d))) return 1;
+  return 0;
+}
+
+/**
+ * Several live results at once (Search → select → Apply with agent): one search per source and one
+ * listing per employer, instead of one per job. Keys that can't be found any more are left out.
+ */
+export async function resolveLiveHits(keys: string[], term: string): Promise<Posting[]> {
+  const want = new Set(keys);
+  const by = (src: string) => keys.filter((k) => k.startsWith(`${src}:`));
+  const pick = (ps: Posting[]) => ps.filter((p) => want.has(p.source_key));
+  const tasks: Promise<Posting[]>[] = [];
+  if (by("remotive").length) tasks.push(searchRemotive(term, 12000).then(pick).catch(() => []));
+  if (by("jobicy").length) tasks.push(searchJobicy(term, 12000).then(pick).catch(() => []));
+  if (by("himalayas").length) tasks.push(searchHimalayas(term, 12000).then(pick).catch(() => []));
+  if (by("usajobs").length) tasks.push(searchUsajobs(term, 12000).then(pick).catch(() => []));
+  const tenants = [...new Set(by("workday").map((k) => k.split(":")[1]))];
+  for (const t of tenants) {
+    const board = WORKDAY_BOARDS.find((b) => b.tenant === t);
+    if (board) tasks.push(fetchWorkdayBoard(board, [term, ""], { maxAgeDays: 3650, perQuery: 20, skip: (k) => !want.has(k) }).then(pick).catch(() => []));
+  }
+  return (await Promise.all(tasks)).flat();
 }
 
 /**
@@ -143,11 +228,13 @@ export async function resolveLiveHit(key: string, term: string): Promise<Posting
   const [source, ...rest] = key.split(":");
   if (source === "remotive") return (await searchRemotive(term, 12000)).find((p) => p.source_key === key) ?? null;
   if (source === "jobicy") return (await searchJobicy(term, 12000)).find((p) => p.source_key === key) ?? null;
+  if (source === "usajobs") return (await searchUsajobs(term, 12000)).find((p) => p.source_key === key) ?? null;
   if (source === "himalayas") return (await searchHimalayas(term, 12000)).find((p) => p.source_key === key) ?? null;
   if (source === "workday") {
     const board = WORKDAY_BOARDS.find((b) => b.tenant === rest[0]);
     if (!board) return null;
-    const got = await fetchWorkdayBoard(board, [term], { maxAgeDays: 3650, perQuery: 20, skip: (k) => k !== key });
+    // "" too: a job listed because its employer is in the industry searched for ("oil") may not mention the word.
+    const got = await fetchWorkdayBoard(board, [term, ""], { maxAgeDays: 3650, perQuery: 20, skip: (k) => k !== key });
     return got.find((p) => p.source_key === key) ?? null;
   }
   return null;

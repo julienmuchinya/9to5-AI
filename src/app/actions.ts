@@ -343,7 +343,7 @@ export async function addSearchedJob(form: FormData) {
   const liveKey = String(form.get("live_key") ?? "");
   const term = String(form.get("term") ?? "").slice(0, 100);
   const back = String(form.get("back") ?? "/jobs");
-  const fail = (m: string) => redirect(`${back.startsWith("/jobs") ? back : "/jobs"}${back.includes("?") ? "&" : "?"}msg=${encodeURIComponent(m)}`);
+  const fail = (m: string) => redirect(`${back.startsWith("/jobs") || back.startsWith("/search") ? back : "/jobs"}${back.includes("?") ? "&" : "?"}msg=${encodeURIComponent(m)}`);
 
   type P = { id: string; source_key: string; title: string; company_name: string; url: string; apply_url: string | null; level: string | null; locations: string[]; is_remote: boolean; salary_min: number | null; salary_max: number | null; description: string | null; source: string; verification_score: number | null };
   const COLS = "id,source_key,title,company_name,url,apply_url,level,locations,is_remote,salary_min,salary_max,description,source,verification_score";
@@ -352,7 +352,7 @@ export async function addSearchedJob(form: FormData) {
   if (/^[0-9a-f-]{36}$/i.test(postingId)) {
     const { data } = await supabase.from("job_postings").select(COLS).eq("id", postingId).maybeSingle();
     posting = data as P | null;
-  } else if (/^(remotive|jobicy|workday|himalayas):[\w.:-]{1,200}$/.test(liveKey)) {
+  } else if (/^(remotive|jobicy|workday|himalayas|usajobs):[\w.:-]{1,200}$/.test(liveKey)) {
     const db = (await import("@/lib/v2/session")).serviceClient();
     const { data: existing } = await db.from("job_postings").select(COLS).eq("source_key", liveKey).maybeSingle();
     posting = existing as P | null;
@@ -418,7 +418,19 @@ export async function addSearchedJob(form: FormData) {
   // Search → "Queue it" / "Apply now": hand it straight to the agent (Apply now also starts a run).
   const then = String(form.get("then") ?? "");
   if (then === "queue" || then === "apply") {
-    const { data: full } = await supabase.from("job_postings").select("ats,apply_url,url,verification_status").eq("id", p.id).maybeSingle();
+    let { data: full } = await supabase.from("job_postings").select("ats,apply_url,url,verification_status").eq("id", p.id).maybeSingle();
+    // A job board's page often links to the employer's own form on a site the agent can use: switch to it.
+    if (full && !agentCanSubmit(full)) {
+      const { isAggregator, resolveDirectLink } = await import("@/lib/v2/discovery/resolve");
+      const direct = isAggregator(full.apply_url || full.url) ? await resolveDirectLink(full.apply_url || full.url, 8000) : null;
+      if (direct) {
+        const { verifyPosting } = await import("@/lib/v2/verify");
+        const { serviceClient } = await import("@/lib/v2/session");
+        const v = verifyPosting({ source: "search", source_key: p.source_key, company_name: p.company_name, title: p.title, level: (p.level ?? "mid") as never, locations: p.locations, is_remote: p.is_remote, url: p.url, apply_url: direct.url, ats: direct.ats, description: p.description ?? undefined });
+        const { error: e3 } = await serviceClient().from("job_postings").update({ apply_url: direct.url, ats: direct.ats, verification_status: v.status, verification_score: v.score, verification_signals: v.signals, verified_at: new Date().toISOString() }).eq("id", p.id);
+        if (!e3) full = { ...full, apply_url: direct.url, ats: direct.ats, verification_status: v.status };
+      }
+    }
     const can = full && full.verification_status === "verified" && agentCanSubmit(full as { ats: string | null; apply_url: string | null; url: string; verification_status: string });
     const { data: existing } = await supabase.from("applications").select("id,status").eq("user_id", user.id).eq("job_id", job!.id).maybeSingle();
     if (existing && !["draft", "ignored", "failed"].includes(existing.status as string)) redirect(`/applications?tab=all&app=${existing.id}`);

@@ -127,12 +127,12 @@ export async function listJobs(b: WorkdayBoard, searchText: string, limit: numbe
  * Same, also saying whether the board answered. Workday answers keyword searches with 429 when asked
  * too often; that used to look exactly like "no jobs here".
  */
-export async function listJobsStatus(b: WorkdayBoard, searchText: string, limit: number, timeoutMs = 15_000): Promise<{ rows: ListRow[]; status: "ok" | "throttled" | "error" }> {
+export async function listJobsStatus(b: WorkdayBoard, searchText: string, limit: number, timeoutMs = 15_000, offset = 0): Promise<{ rows: ListRow[]; status: "ok" | "throttled" | "error" }> {
   try {
     const res = await fetch(`${base(b)}/jobs`, {
       method: "POST",
       headers: { ...UA, "Content-Type": "application/json", Accept: "application/json" },
-      body: JSON.stringify({ appliedFacets: {}, limit: Math.min(20, limit), offset: 0, searchText }),
+      body: JSON.stringify({ appliedFacets: {}, limit: Math.min(20, limit), offset, searchText }),
       signal: AbortSignal.timeout(timeoutMs),
     });
     if (res.status === 429) return { rows: [], status: "throttled" };
@@ -141,6 +141,20 @@ export async function listJobsStatus(b: WorkdayBoard, searchText: string, limit:
   } catch {
     return { rows: [], status: "error" };
   }
+}
+
+/** The plain-text description of one job, from its posting link (https://host.myworkdayjobs.com/<site>/job/…). */
+export async function workdayDescription(url: string): Promise<string | null> {
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return null;
+  }
+  const b = WORKDAY_BOARDS.find((x) => u.hostname === `${x.host}.myworkdayjobs.com` && u.pathname.startsWith(`/${x.site}/`));
+  if (!b) return null;
+  const info = await jobDetail(b, u.pathname.slice(b.site.length + 1));
+  return info?.jobDescription ? stripHtml(info.jobDescription) : null;
 }
 
 async function jobDetail(b: WorkdayBoard, path: string): Promise<Detail["jobPostingInfo"] | null> {

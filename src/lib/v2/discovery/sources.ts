@@ -4,7 +4,6 @@ import {
   domainOf,
   isGeorgia,
   isRemoteText,
-  isStemTitle,
   isUsLocation,
   isUsRemote,
   parseSalary,
@@ -50,9 +49,13 @@ async function getJson<T>(url: string, timeoutMs = 30000): Promise<T | null> {
 const recent = (iso?: string) =>
   !iso || Date.now() - new Date(iso).getTime() < MAX_AGE_DAYS * 86400_000;
 
-/** Keep jobs located in (or remote-open to) the US whose title is technical or one a user asked for. */
+/**
+ * Keep recent jobs located in (or remote-open to) the US — in ANY field. (It used to keep only technical
+ * titles, so nurses, drivers, store and office jobs never reached anyone's matches or search.) Which of
+ * these suit a person is decided per user by their resume and target roles (match.ts).
+ */
 export function keepPosting(p: Posting): boolean {
-  if (!isStemTitle(p.title)) return false;
+  if (!p.title?.trim()) return false;
   if (!recent(p.posted_at)) return false;
   const locs = p.locations.join(" | ");
   if (p.is_remote) return isUsRemote(locs) || p.locations.some(isUsLocation);
@@ -409,6 +412,63 @@ export async function searchRemotive(term: string, timeoutMs = 9000): Promise<Po
         posted_at: j.publication_date,
       });
     });
+}
+
+/**
+ * USAJOBS (federal government jobs of every kind — mechanics, nurses, clerks, engineers, police…), on-site
+ * across the US. Free, but needs a key: set USAJOBS_API_KEY and USAJOBS_EMAIL (the address the key was
+ * issued to; USAJOBS requires it as the User-Agent). Off when they aren't set.
+ */
+export const usajobsEnabled = () => Boolean(process.env.USAJOBS_API_KEY && process.env.USAJOBS_EMAIL);
+export async function searchUsajobs(term: string, timeoutMs = 9000): Promise<Posting[]> {
+  if (!usajobsEnabled()) return [];
+  type Item = {
+    MatchedObjectId: string;
+    MatchedObjectDescriptor: {
+      PositionTitle: string;
+      OrganizationName?: string;
+      DepartmentName?: string;
+      PositionURI: string;
+      ApplyURI?: string[];
+      PositionLocation?: { LocationName?: string }[];
+      PositionRemuneration?: { MinimumRange?: string; MaximumRange?: string; RateIntervalCode?: string }[];
+      PublicationStartDate?: string;
+      QualificationSummary?: string;
+      UserArea?: { Details?: { JobSummary?: string; MajorDuties?: string[] } };
+    };
+  };
+  // A failure throws, so the search page says "USAJOBS didn't answer" instead of showing nothing.
+  const res = await fetch(`https://data.usajobs.gov/api/search?Keyword=${encodeURIComponent(term)}&ResultsPerPage=50&SortField=opendate&SortDirection=desc`, {
+    headers: { Host: "data.usajobs.gov", "User-Agent": process.env.USAJOBS_EMAIL!, "Authorization-Key": process.env.USAJOBS_API_KEY! },
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!res.ok) throw new Error(`USAJOBS ${res.status}`);
+  const r = (await res.json()) as { SearchResult?: { SearchResultItems?: Item[] } } | null;
+  return (r?.SearchResult?.SearchResultItems ?? []).map((it) => {
+    const d = it.MatchedObjectDescriptor;
+    const pay = d.PositionRemuneration?.[0];
+    const hourly = pay?.RateIntervalCode === "PH";
+    const num = (v?: string) => (v && Number(v) ? Math.round(Number(v) * (hourly ? 2080 : 1)) : undefined);
+    const locs = (d.PositionLocation ?? []).map((l) => l.LocationName ?? "").filter(Boolean);
+    const desc = [d.UserArea?.Details?.JobSummary, (d.UserArea?.Details?.MajorDuties ?? []).length ? `Duties:\n${(d.UserArea?.Details?.MajorDuties ?? []).join("\n")}` : "", d.QualificationSummary ? `Qualifications:\n${d.QualificationSummary}` : ""]
+      .filter(Boolean)
+      .join("\n");
+    return finish({
+      source: "usajobs",
+      source_key: `usajobs:${it.MatchedObjectId}`,
+      company_name: d.OrganizationName || d.DepartmentName || "US Government",
+      title: d.PositionTitle,
+      level: detectLevel(d.PositionTitle),
+      locations: locs.length ? locs : ["United States"],
+      is_remote: locs.some(isRemoteText),
+      url: d.PositionURI,
+      apply_url: d.ApplyURI?.[0] ?? d.PositionURI,
+      salary_min: num(pay?.MinimumRange),
+      salary_max: num(pay?.MaximumRange),
+      description: stripHtml(desc),
+      posted_at: d.PublicationStartDate,
+    });
+  });
 }
 
 /** Himalayas' keyword search: remote jobs in any field (free, no key). */

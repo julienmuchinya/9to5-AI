@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { HelpDrawer, NotificationsDrawer, ProfileDrawer, ShortcutsDrawer, type DeskTab } from "./desk-drawers";
+import { SearchBox } from "./search-box";
 
 const ICONS: Record<string, string> = {
   dashboard: "M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z",
@@ -43,16 +44,18 @@ export function Icon({ name, className = "h-4 w-4" }: { name: string; className?
   );
 }
 
-/** The three primary destinations. Everything else is a drawer or lives inside these. */
+/** The primary destinations. Everything else is a drawer or lives inside these. */
 const NAV = [
-  { n: "01", href: "/dashboard", label: "Your day", short: "Today", also: ["/chat"] },
-  { n: "02", href: "/jobs", label: "Explore roles", short: "Explore", also: [] as string[] },
+  { n: "01", href: "/dashboard", label: "Overview", short: "Overview", also: ["/chat"] },
+  // Explore = search every job; the agent's matches and saved jobs are tabs inside it (/jobs).
+  { n: "02", href: "/search", label: "Explore", short: "Explore", also: ["/jobs"] },
   { n: "03", href: "/applications", label: "Applications", short: "Applications", also: [] as string[] },
 ];
 
 const TITLES: Record<string, string> = {
-  "/dashboard": "Your day",
-  "/jobs": "Explore roles",
+  "/dashboard": "Overview",
+  "/jobs": "Explore · your matches",
+  "/search": "Explore",
   "/applications": "Applications",
   "/chat": "Chat with agent",
   "/profile": "Profile & job types",
@@ -123,14 +126,14 @@ export function AppShell({ email, name = "", needs = 0, today = "", children }: 
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
         if (search.current && search.current.offsetParent !== null) search.current.focus();
-        else router.push("/jobs?focus=1");
+        else router.push("/search");
         return;
       }
       if (typing || e.ctrlKey || e.metaKey || e.altKey || drawer) return;
       const k = e.key.toLowerCase();
       if (g && Date.now() - g < 1200) {
         g = 0;
-        const to = { d: "/dashboard", e: "/jobs", a: "/applications" }[k];
+        const to = { d: "/dashboard", o: "/dashboard", s: "/search", e: "/search", m: "/jobs", a: "/applications" }[k];
         if (to) {
           e.preventDefault();
           router.push(to);
@@ -141,7 +144,7 @@ export function AppShell({ email, name = "", needs = 0, today = "", children }: 
       else if (k === "/") {
         e.preventDefault();
         if (search.current && search.current.offsetParent !== null) search.current.focus();
-        else router.push("/jobs?focus=1");
+        else router.push("/search");
       } else if (k === "?") setDrawer("shortcuts");
       else if (k === "p") setDrawer("profile");
       else if (k === "n") setDrawer("alerts");
@@ -163,7 +166,7 @@ export function AppShell({ email, name = "", needs = 0, today = "", children }: 
       {/* Desktop pine rail */}
       <aside className="sticky top-0 hidden h-screen w-[226px] shrink-0 flex-col bg-[var(--rail)] text-[var(--rail-text)] md:flex">
         <div className="border-b border-white/10 px-6 pb-7 pt-8">
-          <Link href="/dashboard" aria-label="9to5 — Your day">
+          <Link href="/dashboard" aria-label="9to5 — Overview">
             <Wordmark light />
           </Link>
           <p className="kicker mt-3 !text-[var(--rail-muted)]">Your career desk</p>
@@ -234,7 +237,7 @@ export function AppShell({ email, name = "", needs = 0, today = "", children }: 
       <div className="flex min-w-0 flex-1 flex-col">
         {/* Top bar */}
         <header className="sticky top-0 z-30 flex h-[66px] items-center gap-3 border-b border-[var(--border)] bg-[var(--background)]/95 px-4 backdrop-blur md:h-[76px] md:px-10 lg:px-16">
-          <Link href="/dashboard" className="md:hidden" aria-label="9to5 — Your day">
+          <Link href="/dashboard" className="md:hidden" aria-label="9to5 — Overview">
             <Wordmark />
           </Link>
           <nav aria-label="Breadcrumb" className="hidden min-w-0 items-center gap-6 md:flex">
@@ -247,21 +250,10 @@ export function AppShell({ email, name = "", needs = 0, today = "", children }: 
             </span>
           </nav>
           <div className="ml-auto flex items-center gap-1.5">
-            <form action="/jobs" role="search" className="relative hidden lg:block">
-              <label htmlFor="global-search" className="sr-only">
-                Search roles
-              </label>
-              <Icon name="search" className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--muted)]" />
-              <input
-                id="global-search"
-                ref={search}
-                name="q"
-                placeholder="Search roles"
-                className="h-10 w-56 rounded-sm border border-[var(--border-strong)] bg-[var(--card)] pl-8 pr-12 font-mono text-xs outline-none transition placeholder:text-[var(--foreground)] focus:w-72 focus:border-[var(--accent)]"
-              />
-              <kbd className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 font-mono text-[10px] text-[var(--muted)]">⌘ K</kbd>
-            </form>
-            <Link href="/jobs?focus=1" className="grid h-11 w-11 place-items-center rounded-sm hover:bg-[var(--hover)] lg:hidden" aria-label="Search roles">
+            <div className="hidden w-[22rem] lg:block">
+              <SearchBox action="/search" size="sm" id="global-search" inputRef={search} placeholder="Search any job  (⌘ K)" label="Search jobs" />
+            </div>
+            <Link href="/search" className="grid h-11 w-11 place-items-center rounded-sm hover:bg-[var(--hover)] lg:hidden" aria-label="Search jobs">
               <Icon name="search" className="h-5 w-5" />
             </Link>
             <button type="button" onClick={() => setDrawer("help")} className="hidden h-11 w-11 place-items-center rounded-sm hover:bg-[var(--hover)] sm:grid" aria-label="Help and how it works">
@@ -300,7 +292,7 @@ export function AppShell({ email, name = "", needs = 0, today = "", children }: 
         </main>
       </div>
 
-      {/* Mobile: exactly the three destinations. */}
+      {/* Mobile: the same destinations. */}
       <nav aria-label="Main" className="fixed inset-x-0 bottom-0 z-40 grid grid-cols-3 border-t border-[var(--border)] bg-[var(--background)] pb-[env(safe-area-inset-bottom)] md:hidden">
         {NAV.map((item) => {
           const active = isActive(pathname, item.href) || item.also.some((a) => isActive(pathname, a));

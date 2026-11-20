@@ -1,13 +1,20 @@
 import Link from "next/link";
 import { unstable_cache } from "next/cache";
-import { liveSearch, resolveLiveHit, type LiveHit } from "@/lib/v2/discovery/live-search";
+import { industrySectors, liveSearch, relevance, resolveLiveHit, type LiveHit } from "@/lib/v2/discovery/live-search";
+import { WORKDAY_BOARDS, workdayDescription } from "@/lib/v2/discovery/workday";
+import { usajobsEnabled } from "@/lib/v2/discovery/sources";
 import { requireUser } from "@/lib/v2/session";
 import { Badge, CompanyMark, Emphasis, FitBadge, buttonCls } from "@/components/ui";
 import { PendingButton } from "./pending-button";
 import { ago } from "@/lib/v2/priority";
 import { agentCanSubmit } from "@/lib/v2/verify";
 import { jobBrief } from "@/lib/v2/job-brief";
+import { parseSalary } from "@/lib/v2/discovery/filters";
 import { addSearchedJob } from "../actions";
+import { applySearchResults } from "../search-actions";
+import { PickBar } from "./pick-bar";
+
+const PICK_FORM = "search-pick";
 
 /**
  * "Search everywhere": one list of every job that matches the words — the jobs the agent has already
@@ -36,7 +43,7 @@ type Result = {
   appStatus?: string;
 };
 
-const SRC: Record<string, string> = { remotive: "Remotive", jobicy: "Jobicy", himalayas: "Himalayas", workday: "Employer site", db: "Found by the agent" };
+const SRC: Record<string, string> = { remotive: "Remotive", jobicy: "Jobicy", himalayas: "Himalayas", usajobs: "USAJOBS", workday: "Employer site", db: "Found by the agent" };
 const pay = (a: number | null, b: number | null) => (b ? `$${Math.round((a ?? b) / 1000)}k${a && a !== b ? `–$${Math.round(b / 1000)}k` : ""}` : null);
 /**
  * The same words searched again within 10 minutes (clicking through results re-renders the page) reuse
@@ -50,7 +57,7 @@ const cachedLiveSearch = (term: string) =>
       if (!r.hits.length) throw Object.assign(new Error("no live results"), { r });
       return r;
     },
-    ["live-search-v1", term],
+    ["live-search-v2", term],
     { revalidate: 600 }
   )().catch((e: { r?: Awaited<ReturnType<typeof liveSearch>> }) => e.r ?? { hits: [] as LiveHit[], failed: ["job sites"] });
 
@@ -64,6 +71,7 @@ export async function SearchEverywhere({
   remoteOnly,
   minpay,
   loc,
+  agentOnly = false,
 }: {
   term: string;
   pick: string;
@@ -73,6 +81,8 @@ export async function SearchEverywhere({
   remoteOnly: boolean;
   minpay: number;
   loc: string;
+  /** Only jobs on sites the agent can apply on. */
+  agentOnly?: boolean;
 }) {
   const { supabase, user } = await requireUser();
   const like = term.replace(/[,()%*]/g, " ").trim();
@@ -84,9 +94,15 @@ export async function SearchEverywhere({
     .eq("active", true)
     .neq("verification_status", "rejected")
     .order("posted_at", { ascending: false, nullsFirst: false })
-    .limit(80);
+    .limit(200);
   const words = like.split(/\s+/).filter((w) => w.length >= 2).slice(0, 4);
-  for (const w of words) dbq = dbq.or(`title.ilike.%${w}%,company_name.ilike.%${w}%`);
+  // A word can be in the title, the company or the description; an industry word ("oil", "bank",
+  // "hospital") also matches every job at the employers in that industry.
+  const sectors = industrySectors(like);
+  const industryCompanies = new Set(WORKDAY_BOARDS.filter((b) => sectors.includes(b.sector)).map((b) => b.company.toLowerCase()));
+  const inIndustry = WORKDAY_BOARDS.filter((b) => sectors.includes(b.sector)).map((b) => `"${b.company.replace(/"/g, "")}"`);
+  const industryOr = inIndustry.length ? `,company_name.in.(${inIndustry.join(",")})` : "";
+  for (const w of words) dbq = dbq.or(`title.ilike.%${w}%,company_name.ilike.%${w}%,description.ilike.%${w}%${industryOr}`);
   if (sinceIso) dbq = dbq.gte("posted_at", sinceIso);
   if (remoteOnly) dbq = dbq.eq("is_remote", true);
   if (minpay) dbq = dbq.gte("salary_max", minpay);
@@ -134,13 +150,25 @@ export async function SearchEverywhere({
   const seen = new Set<string>();
   const results = [...fromDb, ...fromLive]
     .filter((r) => !loc || r.location.toLowerCase().includes(loc.toLowerCase()))
+    .filter((r) => !agentOnly || r.agentCan)
     .filter((r) => {
       const k = `${r.title.toLowerCase().replace(/\W+/g, " ").trim()}|${r.company.toLowerCase().replace(/\W+/g, "")}`;
       if (seen.has(k)) return false;
       seen.add(k);
       return true;
     })
-    .sort((a, b) => Date.parse(b.posted_at ?? "0") - Date.parse(a.posted_at ?? "0"))
+    // Jobs with the words in the title first, then the rest (employer in that industry, word in the
+    // description); newest first within each.
+    .map((r) => {
+      // Saved jobs: the database matched letters ("oil" inside "soil"), so check whole words here. An
+      // employer in the industry searched for counts even when the word isn't in the job.
+      const own = relevance({ title: r.title, company: r.company, source: r.source === "db" ? "remotive" : (r.source as LiveHit["source"]), description: r.description ?? undefined }, term);
+      const industry = r.source === "db" && industryCompanies.has(r.company.toLowerCase()) ? 1 : 0;
+      return { r, rank: r.source === "db" ? Math.max(own, industry) : Math.max(1, own) };
+    })
+    .filter((x) => x.rank > 0)
+    .sort((a, b) => b.rank - a.rank || Date.parse(b.r.posted_at ?? "0") - Date.parse(a.r.posted_at ?? "0"))
+    .map((x) => x.r)
     .slice(0, 120);
 
   // Which of these are already yours (in your roles / applied).
@@ -173,26 +201,36 @@ export async function SearchEverywhere({
           Everywhere, for <Emphasis text={`*“${term}”*`} />
         </h2>
         <p className="kicker">
-          {results.length} result{results.length === 1 ? "" : "s"} · {fromDb.length} collected, {fromLive.length} live
+          {results.length} result{results.length === 1 ? "" : "s"} · {results.filter((r) => r.source === "db").length} collected by the agent, {results.filter((r) => r.source !== "db").length} live
         </p>
       </div>
       <p className="mt-2 max-w-3xl text-sm text-[var(--muted)]">
-        Jobs the agent has already collected plus live results from Remotive, Jobicy, Himalayas and 60+ employers’ career sites (energy, healthcare, banking, retail, government, tech) — including jobs that aren’t in your matches.
-        {live.failed.length ? ` ${live.failed.join(", ")} didn’t answer in time.` : ""}
+        Every field, not only your matches: jobs the agent has already collected plus live results from Remotive, Jobicy, Himalayas{usajobsEnabled() ? ", USAJOBS" : ""} and 60+ employers’ career sites. An industry word (oil, bank, hospital, retail) also brings every opening at employers in that industry.
+        {live.failed.length ? ` Not answering right now: ${live.failed.join(", ")}.` : ""}
       </p>
 
       {results.length === 0 ? (
         <p className="mt-8 text-sm text-[var(--muted)]">Nothing found for “{term}”. Try fewer or broader words (“nurse” rather than “registered nurse night shift”).</p>
       ) : (
         <div className="mt-4 grid items-start lg:grid-cols-[minmax(0,1fr)_minmax(0,1.05fr)]">
-          <ul aria-label="Search results" className={`lg:border-r lg:border-[var(--border)] ${picked ? "hidden lg:block" : ""}`}>
+          <div className={`lg:border-r lg:border-[var(--border)] ${picked ? "hidden lg:block" : ""}`}>
+          {/* Tick jobs, then apply to all of them with the agent in one go. */}
+          <form id={PICK_FORM} action={applySearchResults}>
+            <input type="hidden" name="term" value={term} />
+            <input type="hidden" name="back" value={base} />
+            <PickBar formId={PICK_FORM} total={results.filter((r) => !r.appStatus).length} />
+          </form>
+          <ul aria-label="Search results">
             {results.map((r) => {
               const isSel = selected?.key === r.key;
               const age = r.posted_label ?? ago(r.posted_at);
               return (
-                <li key={r.key} className={`relative border-b border-[var(--border)] ${isSel ? "bg-[var(--accent-soft)]" : "hover:bg-[var(--hover)]"}`}>
+                <li key={r.key} className={`relative flex items-stretch border-b border-[var(--border)] ${isSel ? "bg-[var(--accent-soft)]" : "hover:bg-[var(--hover)]"}`}>
                   {isSel && <span className="absolute inset-y-0 left-0 w-[3px] bg-[var(--orange)]" aria-hidden />}
-                  <Link href={hrefFor(r.key)} scroll={false} aria-current={isSel ? "true" : undefined} className="flex gap-4 py-4 pl-3 pr-3 lg:pr-5">
+                  <label className="flex w-12 shrink-0 cursor-pointer items-start justify-center pt-6" title={r.appStatus ? "Already applied or queued" : "Select to apply with the agent"}>
+                    <input type="checkbox" name="pick" value={r.key} form={PICK_FORM} disabled={Boolean(r.appStatus)} className="h-5 w-5 accent-[var(--accent)] disabled:opacity-40" aria-label={`Select ${r.title} at ${r.company}`} />
+                  </label>
+                  <Link href={hrefFor(r.key)} scroll={false} aria-current={isSel ? "true" : undefined} className="flex min-w-0 flex-1 gap-4 py-4 pr-3 lg:pr-5">
                     <CompanyMark name={r.company} />
                     <span className="min-w-0 flex-1">
                       <span className="kicker block">
@@ -215,6 +253,7 @@ export async function SearchEverywhere({
               );
             })}
           </ul>
+          </div>
           {selected && <ResultBrief r={selected} term={term} back={hrefFor(selected.key)} listHref={base} picked={picked} />}
         </div>
       )}
@@ -226,7 +265,8 @@ async function ResultBrief({ r, term, back, listHref, picked }: { r: Result; ter
   const { supabase, user } = await requireUser();
   // Employer career sites don't send the description with search results: fetch this one job.
   let description = r.description;
-  if (!description && r.source === "workday") description = (await resolveLiveHit(r.key, term).catch(() => null))?.description ?? null;
+  // One small request for this job's page (not a search, which employer sites often refuse).
+  if (!description && r.source === "workday") description = (await workdayDescription(r.url).catch(() => null)) ?? (await resolveLiveHit(r.key, term).catch(() => null))?.description ?? null;
   const brief = jobBrief(description);
   const { data: prof } = await supabase.from("profiles").select("*").eq("id", user.id).maybeSingle();
   const { matchPosting, profileToMatch } = await import("@/lib/v2/match");
@@ -240,7 +280,8 @@ async function ResultBrief({ r, term, back, listHref, picked }: { r: Result; ter
     salary_max: r.salary_max,
     description,
   });
-  const salary = pay(r.salary_min, r.salary_max);
+  const parsed = r.salary_max == null && description ? parseSalary(description) : {};
+  const salary = pay(r.salary_min ?? parsed.min ?? null, r.salary_max ?? parsed.max ?? null);
   const hidden = (name: string, value: string) => <input type="hidden" name={name} value={value} />;
   const ids = r.key.startsWith("db:") ? hidden("posting_id", r.key.slice(3)) : (
     <>
@@ -351,14 +392,18 @@ async function ResultBrief({ r, term, back, listHref, picked }: { r: Result; ter
       <div className="mt-6 border-t border-[var(--border)] pt-5">
         <h3 className="kicker !text-[var(--foreground)]">How you match</h3>
         <ul className="mt-2 space-y-1.5 text-sm">
-          {fit.reasons.slice(0, 6).map((x) => (
-            <li key={x} className="flex gap-2">
-              <span className={fit.eligible ? "text-emerald-400" : "text-amber-400"} aria-hidden>
-                {fit.eligible ? "✓" : "!"}
-              </span>
-              {x}
-            </li>
-          ))}
+          {fit.reasons.slice(0, 6).map((x) => {
+            // A reason against the job ("Title isn't one of your target roles") gets "!", not a tick.
+            const good = fit.eligible && !/\b(isn.t|not|below|looks senior|excluded|doesn.t)\b/i.test(x);
+            return (
+              <li key={x} className="flex gap-2">
+                <span className={good ? "text-emerald-400" : "text-amber-400"} aria-hidden>
+                  {good ? "✓" : "!"}
+                </span>
+                {x}
+              </li>
+            );
+          })}
           {!fit.reasons.length && <li className="text-[var(--muted)]">Not enough in the posting to compare with your profile.</li>}
         </ul>
       </div>

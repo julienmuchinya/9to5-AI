@@ -40,7 +40,7 @@ import { isAggregator, resolveDirectLink } from "../../src/lib/v2/discovery/reso
 import { domainAgeYears, employerDomain } from "../../src/lib/v2/company-age";
 import { EXTRA_BOARDS } from "../../src/lib/v2/discovery/extra-boards";
 import { fetchWorkdayBoard, WORKDAY_BOARDS } from "../../src/lib/v2/discovery/workday";
-import { isStemTitle, setWantedRoles } from "../../src/lib/v2/discovery/filters";
+import { setWantedRoles } from "../../src/lib/v2/discovery/filters";
 import { coverLetterPdf, writeCoverLetter } from "../../src/lib/v2/cover-letter";
 import { minutesPlan } from "../../src/lib/v2/minutes";
 import { sendRunDigest } from "./digest";
@@ -213,7 +213,7 @@ async function discoverWorkday(sb: SupabaseClient, roles: string[]): Promise<Pos
     if (Date.now() > deadline) break;
     scanned += group.length;
     const res = await Promise.all(
-      group.map((b) => fetchWorkdayBoard(b, queries, { maxAgeDays: TUNING_LIMITS.max_age_days[1], keepTitle: isStemTitle, skip: (k) => (known.has(k) ? (stillListed.push(k), true) : false) }))
+      group.map((b) => fetchWorkdayBoard(b, queries, { maxAgeDays: TUNING_LIMITS.max_age_days[1], skip: (k) => (known.has(k) ? (stillListed.push(k), true) : false) }))
     );
     for (const list of res) out.push(...list);
   }

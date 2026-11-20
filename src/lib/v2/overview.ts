@@ -34,6 +34,43 @@ export function weekActivity(submittedAt: (string | null)[], tz: string, now = n
   return days;
 }
 
+export interface DayOutcome {
+  key: string;
+  label: string;
+  sent: number;
+  needs: number;
+  failed: number;
+}
+
+/**
+ * The last `n` days (oldest first), each with what happened to applications that day: sent (submitted),
+ * came back to you (Needs you) or failed. An application counts on the day its status last changed.
+ */
+export function dailyOutcomes(
+  apps: { status: string; submitted_at: string | null; status_updated_at: string | null; created_at: string }[],
+  tz: string,
+  n = 14,
+  now = new Date()
+): DayOutcome[] {
+  const days: DayOutcome[] = [];
+  for (let i = n - 1; i >= 0; i--) {
+    const d = new Date(now.getTime() - i * 86400_000);
+    days.push({ key: dayKey(d, tz), label: new Intl.DateTimeFormat("en-US", { timeZone: tz, month: "numeric", day: "numeric" }).format(d), sent: 0, needs: 0, failed: 0 });
+  }
+  const idx = new Map(days.map((d, i) => [d.key, i]));
+  for (const a of apps) {
+    if (a.submitted_at) {
+      const i = idx.get(dayKey(new Date(a.submitted_at), tz));
+      if (i !== undefined) days[i].sent++;
+    }
+    if (a.status === "needs_user" || a.status === "failed") {
+      const i = idx.get(dayKey(new Date(a.status_updated_at ?? a.created_at), tz));
+      if (i !== undefined) days[i][a.status === "failed" ? "failed" : "needs"]++;
+    }
+  }
+  return days;
+}
+
 /** Statuses that only happen after the employer (or its system) replied — set from the inbox or by you. */
 export const RESPONDED = ["received", "under_review", "screening", "interview", "offer", "rejected"] as const;
 /** Statuses that mean a human at the employer moved it forward or decided. */

@@ -364,10 +364,11 @@ export function HelpDrawer({ open, onClose, onShortcuts }: { open: boolean; onCl
 }
 
 export const SHORTCUTS: [string, string][] = [
-  ["Ctrl / ⌘ K", "Search roles"],
-  ["/", "Search roles"],
-  ["G then D", "Your day"],
-  ["G then E", "Explore roles"],
+  ["Ctrl / ⌘ K", "Search any job"],
+  ["/", "Search any job"],
+  ["G then O", "Overview"],
+  ["G then E", "Explore (search every job)"],
+  ["G then M", "Your matches"],
   ["G then A", "Applications"],
   ["P", "Profile & preferences"],
   ["N", "Alerts"],

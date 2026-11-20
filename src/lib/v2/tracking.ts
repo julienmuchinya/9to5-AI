@@ -151,8 +151,17 @@ export function roleFamily(title: string): string {
   if (/(back ?end|server|api)/.test(t)) return "Backend";
   if (/(mobile|ios|android)/.test(t)) return "Mobile";
   if (/(hardware|electrical|embedded|firmware|mechanical|robotics)/.test(t)) return "Hardware / Embedded";
-  if (/(software|developer|engineer|swe|programmer)/.test(t)) return "Software (general)";
-  return "Other STEM";
+  if (/(software|developer|swe|programmer)/.test(t)) return "Software (general)";
+  if (/(nurse|\brn\b|lpn|cna|medical|clinical|pharm|therap|patient|health|caregiver|dental|physician)/.test(t)) return "Healthcare";
+  if (/(oil|gas|petroleum|drill|roustabout|offshore|pipeline|refinery|operator|field service|mining|energy)/.test(t)) return "Energy / Field";
+  if (/(technician|mechanic|electrician|welder|maintenance|hvac|plumber|carpenter|construction|installer)/.test(t)) return "Skilled trades";
+  if (/(driver|cdl|warehouse|logistics|forklift|delivery|supply chain|dispatcher)/.test(t)) return "Logistics / Driving";
+  if (/(account|finance|financial|bank|teller|audit|tax|loan|underwrit|insurance|claims)/.test(t)) return "Finance / Banking";
+  if (/(sales|retail|store|cashier|customer|associate|merchandis)/.test(t)) return "Retail / Customer";
+  if (/(admin|office|assistant|receptionist|clerk|coordinator|\bhr\b|human resources|recruit)/.test(t)) return "Office / Admin";
+  if (/(teacher|tutor|instructor|education|school)/.test(t)) return "Education";
+  if (/engineer/.test(t)) return "Engineering";
+  return "Other";
 }
 
 /** Short label of what the tailored resume led with, e.g. "Python · React · AWS". */

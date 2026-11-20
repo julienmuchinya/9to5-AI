@@ -6,7 +6,7 @@ import { atsFromUrl } from "./filters";
  * shows such a link, use it. One plain HTTP request per posting, no AI. Boards that hide the link
  * behind scripts or a login (RemoteOK, Jobicy) are left as they are.
  */
-export const AGGREGATOR_HOSTS = /(^|\.)(themuse\.com|simplify\.jobs|builtin\.com|builtin[a-z]+\.com|weworkremotely\.com|remotive\.com|wellfound\.com|ycombinator\.com|workatastartup\.com|dice\.com|ziprecruiter\.com|glassdoor\.com|indeed\.com)$/i;
+export const AGGREGATOR_HOSTS = /(^|\.)(himalayas\.app|themuse\.com|simplify\.jobs|builtin\.com|builtin[a-z]+\.com|weworkremotely\.com|remotive\.com|wellfound\.com|ycombinator\.com|workatastartup\.com|dice\.com|ziprecruiter\.com|glassdoor\.com|indeed\.com)$/i;
 
 const ATS_LINK = /https?:\/\/(?:[a-z0-9-]+\.)*(?:greenhouse\.io|lever\.co|ashbyhq\.com|myworkdayjobs\.com|apply\.workable\.com)\/[^"'\s<>\)]+/gi;
 

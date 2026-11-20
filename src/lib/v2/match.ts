@@ -147,11 +147,10 @@ export function matchPosting(profile: MatchProfile, p: MatchPosting): MatchResul
     titleAdj -= 25;
     reasons.push("Title looks senior");
   } else if (earlyTitle && wantsEarly) titleAdj += 8;
-  // Engineering roles only: sales, recruiting, support-desk and similar titles rank far down.
-  // …unless it's a title the user asked for ("Field Service Technician").
-  if (roleScore < 0.5 && /\b(sales|account executive|recruit\w*|marketing|customer success|technician|nurse|counsel|attorney|accountant|teacher|driver)\b/.test(title)) {
-    titleAdj -= 30;
-    reasons.push("Not an engineering title");
+  // Any field is fine; what counts is whether it's the kind of job THIS person asked for.
+  if ((profile.target_roles ?? []).length && roleScore < 0.34 && !focus) {
+    titleAdj -= 15;
+    reasons.push("Title isn't one of your target roles");
   }
 
   const include = (profile.keywords_include ?? []).filter((k) => hasTerm(text, k));

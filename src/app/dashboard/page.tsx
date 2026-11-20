@@ -10,7 +10,8 @@ import { countPipeline, statusRows } from "@/lib/v2/pipeline";
 import { aiStatus } from "@/lib/v2/ai-status";
 import { AiStatus } from "@/components/ai-status";
 import { ago, priorityScore } from "@/lib/v2/priority";
-import { funnel, greeting, hourIn, pct, weekActivity } from "@/lib/v2/overview";
+import { dailyOutcomes, funnel, greeting, hourIn, pct, weekActivity } from "@/lib/v2/overview";
+import { STAGE_LABEL } from "@/lib/v2/tracking";
 import { toggleSavedJob } from "../actions";
 
 export const dynamic = "force-dynamic";
@@ -52,6 +53,18 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
     supabase.from("jobs").select("id").eq("user_id", user.id).not("saved_at", "is", null).limit(1000),
     supabase.from("applications").select("id,status,status_updated_at,submitted_at,created_at,jobs(title,company_name)").eq("user_id", user.id).in("status", ["interview", "screening", "offer"]).order("status_updated_at", { ascending: false, nullsFirst: false }).limit(3),
   ]);
+  // Overview: the last 14 days of outcomes and the latest updates.
+  const since14 = new Date(Date.now() - 14 * 86400_000).toISOString();
+  const [{ data: recentApps }, { data: updates }] = await Promise.all([
+    supabase.from("applications").select("status,submitted_at,status_updated_at,created_at").eq("user_id", user.id).or(`submitted_at.gte.${since14},status_updated_at.gte.${since14}`).limit(5000),
+    supabase
+      .from("application_events")
+      .select("id,kind,source,detail,created_at,application_id, applications(status, jobs(title,company_name))")
+      .eq("user_id", user.id)
+      .neq("kind", "queued")
+      .order("created_at", { ascending: false })
+      .limit(8),
+  ]);
   // Self-heal accounts created before the sign-up trigger existed.
   if (!p || !s) {
     await Promise.all([
@@ -76,6 +89,9 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
   const top = [...fresh].sort((a, b) => priorityScore(b.fit_score, b.job_postings.posted_at, now) - priorityScore(a.fit_score, a.job_postings.posted_at, now)).slice(0, 5);
   const newThisWeek = fresh.filter((j) => j.job_postings.posted_at && j.job_postings.posted_at >= weekAgo).length;
 
+  const outcomes = dailyOutcomes((recentApps ?? []) as { status: string; submitted_at: string | null; status_updated_at: string | null; created_at: string }[], t.tz, 14);
+  const today = outcomes[outcomes.length - 1];
+  const maxOutcome = Math.max(1, ...outcomes.map((d) => d.sent + d.needs + d.failed));
   const days = weekActivity((week ?? []).map((r) => r.submitted_at as string | null), t.tz);
   const weekTotal = days.reduce((n, d) => n + d.count, 0);
   const maxDay = Math.max(1, ...days.map((d) => d.count));
@@ -134,6 +150,104 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
           Your email is confirmed and you’re in. The list below shows what to do first.
         </p>
       )}
+
+      {/* Overview: today at a glance, the last two weeks, and the latest updates. */}
+      <section aria-labelledby="overview" className="mb-14">
+        <div className="flex flex-wrap items-end justify-between gap-3">
+          <h2 id="overview" className="display text-[30px]">
+            Today at a glance.
+          </h2>
+          <Link href="/applications?tab=all" className="min-h-[44px] text-sm font-semibold underline underline-offset-4">
+            All applications ↗
+          </Link>
+        </div>
+        <div className="mt-4">
+          <StatStrip
+            items={[
+              { value: today.sent, label: "Sent today", href: "/applications?tab=sent" },
+              { value: today.needs, label: "Came back to you today", href: "/applications?tab=needs", tone: today.needs ? "warning" : undefined },
+              { value: today.failed, label: "Failed today", href: "/applications?tab=failed" },
+              { value: c.queued, label: "Queued for the agent", href: "/applications?tab=queued" },
+              { value: c.needs, label: "Need you in total", href: "/applications?tab=needs", tone: c.needs ? "warning" : undefined },
+            ]}
+          />
+        </div>
+        <div className="mt-8 grid gap-10 lg:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)]">
+          <div>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <p className="kicker">Last 14 days · what happened each day</p>
+              <p className="flex flex-wrap gap-3 text-xs text-[var(--muted)]">
+                <span className="inline-flex items-center gap-1.5">
+                  <span className="h-2.5 w-2.5 bg-[var(--accent)]" aria-hidden /> Sent
+                </span>
+                <span className="inline-flex items-center gap-1.5">
+                  <span className="h-2.5 w-2.5 bg-[var(--orange)]" aria-hidden /> Needs you
+                </span>
+                <span className="inline-flex items-center gap-1.5">
+                  <span className="h-2.5 w-2.5 bg-red-400" aria-hidden /> Failed
+                </span>
+              </p>
+            </div>
+            <div
+              className="mt-4 flex h-44 items-end gap-1.5 border-b border-[var(--border)]"
+              role="img"
+              aria-label={`Last 14 days: ${outcomes.map((d) => `${d.label}: ${d.sent} sent, ${d.needs} need you, ${d.failed} failed`).join("; ")}`}
+            >
+              {outcomes.map((d, i) => {
+                const total = d.sent + d.needs + d.failed;
+                const h = (n: number) => `${(n / maxOutcome) * 140}px`;
+                return (
+                  <div key={d.key} className="flex min-w-0 flex-1 flex-col items-center justify-end gap-1" title={`${d.label}: ${d.sent} sent, ${d.needs} need you, ${d.failed} failed`}>
+                    <span className="font-mono text-[10px] text-[var(--muted)]">{total || ""}</span>
+                    <div className="flex w-full max-w-7 flex-col-reverse">
+                      <div className="bg-[var(--accent)]" style={{ height: h(d.sent) }} />
+                      <div className="bg-[var(--orange)]" style={{ height: h(d.needs) }} />
+                      <div className="bg-red-400" style={{ height: h(d.failed) }} />
+                      {!total && <div className="h-[3px] bg-[var(--border)]" />}
+                    </div>
+                    <span className={`font-mono text-[9px] sm:text-[10px] ${i === outcomes.length - 1 ? "font-semibold text-[var(--foreground)]" : "text-[var(--muted)]"}`}>
+                      {i === outcomes.length - 1 ? "Today" : d.label}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+            <p className="mt-3 text-xs text-[var(--muted)]">
+              Two weeks: {outcomes.reduce((n, d) => n + d.sent, 0)} sent · {outcomes.reduce((n, d) => n + d.needs, 0)} came back to you · {outcomes.reduce((n, d) => n + d.failed, 0)} failed.
+            </p>
+          </div>
+          <div>
+            <p className="kicker">Latest updates</p>
+            <ul className="mt-3 border-t border-[var(--foreground)]">
+              {(updates ?? []).length === 0 && <li className="py-5 text-sm text-[var(--muted)]">Updates appear here as the agent applies and employers reply.</li>}
+              {(
+                (updates ?? []) as unknown as {
+                  id: string;
+                  kind: string;
+                  source: string;
+                  detail: string | null;
+                  created_at: string;
+                  application_id: string;
+                  applications: { status: string; jobs: { title: string; company_name: string } | null } | null;
+                }[]
+              ).map((u) => (
+                <li key={u.id} className="border-b border-[var(--border)]">
+                  <Link href={`/applications?tab=all&app=${u.application_id}`} className="block py-3 hover:bg-[var(--hover)]">
+                    <span className="flex items-baseline justify-between gap-3">
+                      <span className="truncate text-sm font-semibold">{u.applications?.jobs?.company_name ?? "Application"}</span>
+                      <span className="shrink-0 font-mono text-[10px] text-[var(--muted)]">{ago(u.created_at, now) || t.date(u.created_at)}</span>
+                    </span>
+                    <span className="block truncate text-sm text-[var(--muted)]">
+                      {u.kind === "note" && u.detail ? u.detail : (STAGE_LABEL[u.kind] ?? u.kind)}
+                      {u.source === "email" ? " · from your inbox" : u.source === "agent" ? " · by the agent" : ""} — {u.applications?.jobs?.title ?? ""}
+                    </span>
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      </section>
 
       {/* Hero: shortlist (cream) + agent (pine) */}
       <section className="grid border border-[var(--border)] lg:grid-cols-[minmax(0,1.78fr)_minmax(0,1fr)]">
