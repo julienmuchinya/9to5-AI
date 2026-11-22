@@ -574,7 +574,15 @@ export function knownValue(f: Field, a: Applicant): string | null {
   if (/website|portfolio|personal (site|url)/.test(l) && f.kind === "text" && l.length < 60 && !/\?/.test(l)) return a.website_url ?? a.github_url ?? null;
   // "Please provide a link to your GitHub profile, portfolio, personal website, or a demonstration of your work":
   // a request for a link (not a yes/no about having one) → the best link the applicant has.
-  if ((f.kind === "text" || f.kind === "textarea") && /\b(link|url|urls)\b/.test(l) && /(github|portfolio|website|personal site|work samples?|demonstration|projects?)/.test(l) && !/\b(do you|have you|are you)\b/.test(l))
+  // Not an essay that merely says "include links" ("Please describe an AI-related project you've worked on… include
+  // links") — that got a bare GitHub URL as its whole answer.
+  if (
+    (f.kind === "text" || f.kind === "textarea") &&
+    /\b(link|url|urls)\b/.test(l) &&
+    /(github|portfolio|website|personal site|work samples?|demonstration|projects?)/.test(l) &&
+    !/\b(do you|have you|are you)\b/.test(l) &&
+    !/\b(describe|explain|tell us|walk us|share (an?|one|your)|what|why|how)\b/.test(l)
+  )
     return a.website_url ?? a.github_url ?? a.linkedin_url ?? null;
   // Your own address (never one copied from the employer's page): street from Profile → Common questions + city/state/ZIP.
   if ((f.kind === "text" || f.kind === "textarea") && /\b(physical|home|permanent|current|mailing|residential|street)? ?address\b/.test(l) && !/e-?mail|ip address|company|employer|office|work address|web/.test(l)) {

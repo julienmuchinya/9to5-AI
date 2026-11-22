@@ -44,6 +44,16 @@ describe("government-employee questions (were answered with the ZIP code)", () =
   });
 });
 
+describe("link questions", () => {
+  const withLinks = { ...applicant, github_url: "https://github.com/example" };
+  it("an essay that says 'include links' is not answered with a bare URL", () => {
+    expect(knownValue(field("Please describe an AI-related project you've worked on, including the tools or models you used. Include links if you can.", "textarea", []), withLinks)).toBeNull();
+  });
+  it("a plain request for a link still gets one", () => {
+    expect(knownValue(field("Please provide a link to your GitHub profile or portfolio", "text", []), withLinks)).toBe("https://github.com/example");
+  });
+});
+
 describe("sensitive questions", () => {
   it("spots requests for secrets", () => {
     expect(sensitiveField("Social Security Number")?.level).toBe("scam");

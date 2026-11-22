@@ -235,8 +235,30 @@ async function workdayAuth(page: Page, opts: ApplyOpts): Promise<AuthResult> {
       await chooseEmailSignIn(page);
       await trace(page, "after Sign In link");
     }
-    await fillVisible(page, WD("email"), portal.email);
-    await fillVisible(page, WD("password"), portal.password);
+    // Workday now sends "Apply" to a separate /login page that draws its form a few seconds later. Typing before
+    // it appeared filled nothing, clicked Sign In on an empty form, and every sign-in ended in "didn't move past
+    // Sign In". Wait for the boxes, type, and check the values stuck before pressing Sign In.
+    // On that page some portals first show "Sign in with Apple / Google / LinkedIn — or — with email" and a cookie
+    // notice (Valeo): decline the optional cookies, pick email, then wait for the boxes.
+    for (let waited = 0; waited < 15000; waited += 1000) {
+      if (await visible(page, WD("legalNoticeDeclineButton"))) await mouseClick(page, WD("legalNoticeDeclineButton"));
+      if (await visible(page, EMAIL_SIGN_IN)) await chooseEmailSignIn(page);
+      if ((await visible(page, WD("email"))) || (await visible(page, WD("signInSubmitButton")))) break;
+      await page.waitForTimeout(1000);
+    }
+    await page.waitForTimeout(500);
+    for (let tries = 0; tries < 3; tries++) {
+      await fillVisible(page, WD("email"), portal.email);
+      await fillVisible(page, WD("password"), portal.password);
+      const got = await page
+        .evaluate(() => {
+          const shown = (sel: string) => Array.from(document.querySelectorAll<HTMLInputElement>(sel)).find((e) => e.getBoundingClientRect().width > 0);
+          return { email: shown('[data-automation-id="email"]')?.value ?? "", pw: (shown('[data-automation-id="password"]')?.value ?? "").length };
+        })
+        .catch(() => ({ email: "", pw: 0 }));
+      if (got.email && got.pw) break;
+      await page.waitForTimeout(1500);
+    }
     await trace(page, "sign-in filled");
     await clickWd(page, "signInSubmitButton", "Sign In");
     await settle(page);
@@ -269,9 +291,15 @@ async function workdayAuth(page: Page, opts: ApplyOpts): Promise<AuthResult> {
   const resetKey = `wd-reset:${opts.userId}:${host}`;
   const resetAllowed = () => !RESETS_THIS_RUN.has(resetKey) && !!opts.emailLink && opts.passwordReset?.allowed !== false;
   const resetOnce = async () => {
-    if (!resetAllowed()) return false;
+    if (!resetAllowed()) {
+      // A reset was already requested this week: its email is probably in the inbox by now — use that link
+      // instead of giving up until next week (the link used to be awaited only 45 s, right after asking).
+      if (!opts.emailLink || RESETS_THIS_RUN.has(resetKey)) return false;
+      RESETS_THIS_RUN.add(resetKey);
+      return resetPassword(false);
+    }
     RESETS_THIS_RUN.add(resetKey);
-    const requested = await resetPassword();
+    const requested = await resetPassword(true);
     if (requested) await opts.passwordReset?.record().catch(() => {});
     return requested;
   };
@@ -298,21 +326,27 @@ async function workdayAuth(page: Page, opts: ApplyOpts): Promise<AuthResult> {
    * Saved password rejected → "Forgot your password?": request the reset email, open its link (or type its
    * code), set the password to the saved portal password, then come back to the job and sign in.
    */
-  const resetPassword = async (): Promise<boolean> => {
+  const resetPassword = async (requestNew: boolean): Promise<boolean> => {
     if (!opts.emailLink) return false;
-    const forgot = `${WD("forgotPasswordLink")}, button:has-text('Forgot your password'), a:has-text('Forgot your password'), a:has-text('Forgot Password')`;
-    if (!(await visible(page, forgot))) return false;
-    await mouseClick(page, forgot);
-    await page.waitForTimeout(1500);
-    await fillVisible(page, `${WD("email")}, input[type=email]`, portal.email);
-    const since = new Date();
-    const send = `${WD("resetPasswordButton")}, ${WD("forgotPasswordSubmitButton")}, button:has-text('Reset'), button:has-text('Submit'), button:has-text('Send'), button:has-text('Continue')`;
-    await mouseClick(page, send);
-    await settle(page, 8000);
-    await trace(page, "reset requested");
+    let since = new Date(Date.now() - 7 * 86400_000);
+    if (requestNew) {
+      const forgot = `${WD("forgotPasswordLink")}, button:has-text('Forgot your password'), a:has-text('Forgot your password'), a:has-text('Forgot Password')`;
+      if (!(await visible(page, forgot))) return false;
+      await mouseClick(page, forgot);
+      await page.waitForTimeout(1500);
+      await fillVisible(page, `${WD("email")}, input[type=email]`, portal.email);
+      since = new Date();
+      const send = `${WD("resetPasswordButton")}, ${WD("forgotPasswordSubmitButton")}, button:has-text('Reset'), button:has-text('Submit'), button:has-text('Send'), button:has-text('Continue')`;
+      await mouseClick(page, send);
+      await settle(page, 8000);
+      await trace(page, "reset requested");
+    }
     const link = await opts
-      .emailLink(since, new RegExp(`reset|password|workday|${host.split(".")[0]}`, "i"), host)
-      .catch(() => null);
+      .emailLink(since, new RegExp(`reset|password|workday|${host.split(".")[0]}`, "i"), host, requestNew ? 90_000 : 15_000)
+      .catch((e) => {
+        console.log(`[9to5]   reset link lookup failed: ${(e as Error).message}`);
+        return null;
+      });
     if (link) {
       await page.goto(link, { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
       await settle(page, 10000);
@@ -368,7 +402,9 @@ async function workdayAuth(page: Page, opts: ApplyOpts): Promise<AuthResult> {
     if (r === "unverified") {
       // Look back far enough to find the email sent when the account was created on an earlier run.
       // Looking back for an email from an earlier run: it is either there already or not — a quick look.
-      if ((await confirmByEmail(new Date(Date.now() - 3 * 86400_000), 12_000)) && (await signIn()) === "ok") return { ok: true, created: false };
+      // 14 days back: accounts made a week ago were stuck "not verified" forever with a 3-day window. If the old
+      // email is gone, confirmByEmail presses "Resend" and waits for the new one.
+      if ((await confirmByEmail(new Date(Date.now() - 14 * 86400_000), 30_000)) && (await signIn()) === "ok") return { ok: true, created: false };
       return {
         ok: false,
         // With Gmail connected the agent looks again next run (the email is often late); after 3 tries it comes to the user.
@@ -386,7 +422,14 @@ async function workdayAuth(page: Page, opts: ApplyOpts): Promise<AuthResult> {
       await page.goto(opts.url, { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
       await page.waitForTimeout(2500);
       await startApplication(page);
-      if ((await visible(page, NEXT)) || (await signIn()) === "ok") return { ok: true, created: false };
+      if (await visible(page, NEXT)) return { ok: true, created: false };
+      const again = await signIn();
+      if (again === "ok") return { ok: true, created: false };
+      // The second try can show the real reason ("wrong email address or password"): handle it like the first.
+      if (again === "bad_password") {
+        if ((await resetOnce()) && (await signIn()) === "ok") return { ok: true, created: false };
+        return { ok: false, result: { status: "needs_user", detail: `Workday (${host}) rejected the saved password. Use "Forgot your password?" there and set it to the password shown under Portal logins, then click Retry.` } };
+      }
       const why = (await errorsOnPage(page)) || "the page didn't move past Sign In";
       return { ok: false, result: { status: "failed", detail: `Couldn't sign in to Workday (${host}) this time: ${why} — will retry next run` } };
     }
@@ -788,11 +831,21 @@ export async function applyWorkday(page: Page, db: SupabaseClient, opts: ApplyOp
               const target = `[data-9to5="${f.id}_${idx}"]`;
               const already = await page.locator(target).isChecked().catch(() => false);
               if (already) continue;
+              // An open dropdown from the previous field can sit on top of the choice: close it first.
+              await page.keyboard.press("Escape").catch(() => {});
               // Click the visible label for the choice (the input itself is often a styled 0-size element).
               const id = await page.getAttribute(target, "id").catch(() => null);
               const ok = (id && (await mouseClick(page, `label[for="${id}"]`))) || (await mouseClick(page, target));
               if (!ok) await page.check(target, { force: true }).catch(() => {});
-              await page.waitForTimeout(200);
+              await page.waitForTimeout(250);
+              // Make sure it took (CVS "Have you ever been employed by…" stayed empty after a label click):
+              // check it directly, then fall back to the element's own click() so React sees the change.
+              if (!(await page.locator(target).isChecked().catch(() => true))) {
+                await page.check(target, { force: true, timeout: 2000 }).catch(() => {});
+                if (!(await page.locator(target).isChecked().catch(() => true)))
+                  await page.locator(target).evaluate((e) => (e as HTMLInputElement).click()).catch(() => {});
+                await page.waitForTimeout(200);
+              }
             }
             continue;
           }

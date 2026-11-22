@@ -165,6 +165,17 @@ async function portalLogin(sb: SupabaseClient, userId: string, url: string): Pro
 
 const chunk = <T,>(a: T[], n: number) => Array.from({ length: Math.ceil(a.length / n) }, (_, i) => a.slice(i * n, i * n + n));
 
+/** Every row of a query, 1,000 at a time (the database never returns more than 1,000 rows per request, whatever .limit() says). */
+async function allRows<T>(page: (from: number, to: number) => PromiseLike<{ data: unknown[] | null }>, max: number): Promise<T[]> {
+  const out: T[] = [];
+  for (let from = 0; from < max; from += 1000) {
+    const { data } = await page(from, from + 999);
+    out.push(...((data ?? []) as T[]));
+    if (!data || data.length < 1000) break;
+  }
+  return out;
+}
+
 /**
  * Claims one job for this run for 20 minutes (applications.applying_until), so the scheduled run and a
  * "Run now" run never fill the same form twice. Already-sent applications can't be claimed.
@@ -195,7 +206,8 @@ async function claimJob(sb: SupabaseClient, base: { user_id: string; job_id: str
 async function discoverWorkday(sb: SupabaseClient, roles: string[]): Promise<Posting[]> {
   // Newest postings + up to 10 of the roles users asked for (focus first). Titles are checked before details are fetched.
   const queries = ["", ...roles.slice(0, 10)];
-  const { data: seen } = await sb.from("job_postings").select("source_key").eq("source", "workday").gte("last_seen_at", new Date(Date.now() - 3 * 86400_000).toISOString()).limit(5000);
+  const seen = await allRows<{ source_key: string }>((from, to) =>
+    sb.from("job_postings").select("source_key").eq("source", "workday").gte("last_seen_at", new Date(Date.now() - 3 * 86400_000).toISOString()).order("id").range(from, to), 10000);
   const known = new Set((seen ?? []).map((r) => r.source_key as string));
   const stillListed: string[] = [];
   const out: Posting[] = [];
@@ -229,7 +241,8 @@ async function discover(sb: SupabaseClient, roles: string[]): Promise<(Posting &
   // Boards: companies on the curated lists + every Greenhouse/Lever/Ashby company already seen in the
   // database (from any source) + a starter list of well-known employers. Wider net, same verification.
   const known = new Map(boardsFrom(simplifyAll).map((b) => [`${b.ats}:${b.board.toLowerCase()}`, b]));
-  const { data: dbBoards } = await sb.from("job_postings").select("ats,ats_board,company_name").in("ats", ["greenhouse", "lever", "ashby"]).not("ats_board", "is", null).limit(5000);
+  const dbBoards = await allRows<{ ats: "greenhouse" | "lever" | "ashby"; ats_board: string; company_name: string }>((from, to) =>
+    sb.from("job_postings").select("ats,ats_board,company_name").in("ats", ["greenhouse", "lever", "ashby"]).not("ats_board", "is", null).order("id").range(from, to), 20000);
   for (const r of dbBoards ?? []) {
     const k = `${r.ats}:${String(r.ats_board).toLowerCase()}`;
     if (!known.has(k)) known.set(k, { ats: r.ats, board: r.ats_board });
@@ -405,19 +418,28 @@ async function matchUser(
   fresh: (Posting & { id: string; verification_status: string; verification_score: number })[],
   lastRunAt: string | null
 ): Promise<number> {
-  let pool = fresh;
-  // Profile changed since last run → re-match against the stored pool, not just new postings.
+  // This run's postings are ALWAYS matched. When the profile changed, the stored pool is matched too.
+  // (It used to REPLACE this run's postings with the stored pool, and the database returns at most 1,000 rows
+  // per request — so with the profile "changed" on most runs (the agent saves its answer memory to the profile
+  // every run), thousands of new postings a day were never matched: ~1,000 matches/day fell to ~20.)
+  const byKey = new Map(fresh.map((p) => [p.source_key, p]));
   const changed = !lastRunAt || [u.updated_at, u.resume_updated_at].some((t) => t && t > lastRunAt);
   if (changed) {
-    const { data } = await sb
-      .from("job_postings")
-      .select("id,source,source_key,company_name,title,level,locations,is_remote,url,apply_url,ats,salary_min,salary_max,description,verification_status,verification_score,posted_at")
-      .eq("active", true)
-      .neq("verification_status", "rejected")
-      .order("last_seen_at", { ascending: false })
-      .limit(4000);
-    pool = (data ?? []) as typeof fresh;
+    const cutoff = new Date(Date.now() - TUNING_LIMITS.max_age_days[1] * 86400_000).toISOString();
+    for (let from = 0; from < Number(env("REMATCH_POOL", "8000")); from += 1000) {
+      const { data } = await sb
+        .from("job_postings")
+        .select("id,source,source_key,company_name,title,level,locations,is_remote,url,apply_url,ats,salary_min,salary_max,description,verification_status,verification_score,posted_at")
+        .eq("active", true)
+        .neq("verification_status", "rejected")
+        .or(`posted_at.is.null,posted_at.gte.${cutoff}`)
+        .order("last_seen_at", { ascending: false })
+        .range(from, from + 999);
+      for (const p of (data ?? []) as typeof fresh) if (!byKey.has(p.source_key)) byKey.set(p.source_key, p);
+      if (!data || data.length < 1000) break;
+    }
   }
+  const pool = [...byKey.values()];
   const profile = toMatchProfile(u);
   const matches = pool
     .filter((p) => p.verification_status !== "rejected")
