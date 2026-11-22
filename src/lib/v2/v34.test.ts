@@ -129,6 +129,20 @@ describe("resume PDFs", () => {
   });
 });
 
+describe("employer-site jobs", () => {
+  it("applies to Greenhouse jobs listed on the employer's own page through Greenhouse's form", async () => {
+    const { greenhouseApplyUrl } = await import("./discovery/sources");
+    expect(greenhouseApplyUrl("stripe", 8387820, "https://stripe.com/jobs/search?gh_jid=8387820")).toBe("https://job-boards.greenhouse.io/embed/job_app?for=stripe&token=8387820");
+    expect(greenhouseApplyUrl("acme", 1, "https://job-boards.greenhouse.io/acme/jobs/1")).toBe("https://job-boards.greenhouse.io/acme/jobs/1");
+  });
+  it("knows which sites need an account before applying", async () => {
+    const { needsAccountSite } = await import("../../../agent/v2/resolve-apply");
+    expect(needsAccountSite("https://amazon.jobs/en/jobs/123")).toBe(true);
+    expect(needsAccountSite("https://careers-acme.icims.com/jobs/1/job")).toBe(true);
+    expect(needsAccountSite("https://forge-nano.breezy.hr/p/1/apply")).toBe(false);
+  });
+});
+
 describe("free-tier budget", () => {
   it("uses 99% of each free limit", () => {
     expect(SAFETY_RATIO).toBe(0.99);

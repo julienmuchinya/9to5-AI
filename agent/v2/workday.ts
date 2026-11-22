@@ -24,16 +24,24 @@ async function chooseEmailSignIn(page: Page) {
   await page.waitForTimeout(600);
 }
 
-/** Debug trace of the Workday flow (only with APPLY_DEBUG_DIR). */
+/**
+ * Step-by-step record of each Workday attempt (sign-in, reset, which page it reached). Kept per browser context and
+ * saved with the result into the user's PRIVATE log (agent_logs) when the attempt didn't go through — the GitHub
+ * log of a public repo hides everything, so this is how failed sign-ins are diagnosed. Printed too with APPLY_DEBUG_DIR.
+ */
+export const TRACES = new WeakMap<object, string[]>();
 async function trace(page: Page, what: string) {
-  if (!process.env.APPLY_DEBUG_DIR) return;
   const st = await page
     .evaluate(() => {
       const vis = (sel: string) => Array.from(document.querySelectorAll(sel)).some((e) => (e as HTMLElement).getBoundingClientRect().width > 0);
       return `create=${vis('[data-automation-id="createAccountSubmitButton"]')} signin=${vis('[data-automation-id="signInSubmitButton"]')} next=${vis('[data-automation-id="pageFooterNextButton"], [data-automation-id="bottom-navigation-next-button"]')} step=${(document.querySelector('[data-automation-id="progressBarActiveStep"]')?.textContent ?? "").replace(/\s+/g, " ").slice(0, 40)}`;
     })
     .catch(() => "?");
-  console.log(`[9to5]   wd: ${what} → ${st} ${page.url().replace(/^https:\/\/[^/]+/, "").slice(0, 70)}`);
+  const line = `${what} → ${st} ${page.url().replace(/^https:\/\/[^/]+/, "").slice(0, 70)}`;
+  const list = TRACES.get(page.context()) ?? [];
+  list.push(line);
+  TRACES.set(page.context(), list.slice(-40));
+  if (process.env.APPLY_DEBUG_DIR) console.log(`[9to5]   wd: ${line}`);
 }
 
 const text = async (page: Page) => ((await page.innerText("body").catch(() => "")) ?? "").replace(/\s+/g, " ");
@@ -219,6 +227,25 @@ async function fillPrompt(page: Page, sel: string, value: string, label = ""): P
 type AuthResult = { ok: true; created: boolean } | { ok: false; result: ApplyResult };
 /** Portals whose password was reset during this run (one reset per portal per run). */
 const RESETS_THIS_RUN = new Set<string>();
+
+/**
+ * Is this job on the company's Workday "My Applications" page (signed in)? A second confirmation when the screen after
+ * Submit showed no thank-you message.
+ */
+async function onMyApplications(page: Page, jobTitle: string): Promise<boolean> {
+  try {
+    const u = new URL(page.url());
+    const site = u.pathname.split("/").filter(Boolean).find((x) => !/^[a-z]{2}-[A-Z]{2}$/.test(x));
+    if (!site) return false;
+    await page.goto(`${u.origin}/${site}/userHome`, { waitUntil: "domcontentloaded", timeout: 20000 });
+    await page.waitForTimeout(4000);
+    const body = ((await page.innerText("body").catch(() => "")) ?? "").replace(/\s+/g, " ").toLowerCase();
+    const want = jobTitle.toLowerCase().replace(/\s+/g, " ").slice(0, 60);
+    return Boolean(want) && body.includes(want);
+  } catch {
+    return false;
+  }
+}
 
 /** Gets past the Create Account / Sign In step. */
 async function workdayAuth(page: Page, opts: ApplyOpts): Promise<AuthResult> {
@@ -701,7 +728,7 @@ export async function applyWorkday(page: Page, db: SupabaseClient, opts: ApplyOp
       if (/you('|’)ve already applied|already applied (for|to) this (job|position)|you have already applied/i.test(body))
         return { status: "submitted", detail: "Already applied to this job on Workday", answers: allAnswers, learned, aiCalls, usedPortalLogin: true, accountCreated };
       if (step > 0 && submittedClick && SUCCESS.test(body))
-        return { status: "submitted", detail: "Application submitted on Workday", answers: allAnswers, learned, aiCalls, usedPortalLogin: true, accountCreated };
+        return { status: "submitted", detail: "Application submitted on Workday — confirmed by: thank-you message on screen", confirmation: ["thank-you message on screen"], answers: allAnswers, learned, aiCalls, usedPortalLogin: true, accountCreated };
       if (await captchaVisible(page)) return { status: "needs_user", detail: "Workday shows a CAPTCHA — please finish this one yourself", answers: allAnswers, learned, aiCalls, usedPortalLogin: true, accountCreated };
 
       if (await visible(page, AUTH_FORM)) {
@@ -903,7 +930,11 @@ export async function applyWorkday(page: Page, db: SupabaseClient, opts: ApplyOp
       await page.waitForTimeout(6000);
       const after = await text(page);
       if (SUCCESS.test(after) || /application (was )?submitted|you('|’)ve applied|congratulations/i.test(after))
-        return { status: "submitted", detail: "Application submitted on Workday", answers: allAnswers, learned, aiCalls, usedPortalLogin: true, accountCreated };
+        return { status: "submitted", detail: "Application submitted on Workday — confirmed by: thank-you message on screen", confirmation: ["thank-you message on screen"], answers: allAnswers, learned, aiCalls, usedPortalLogin: true, accountCreated };
+      // No message: Workday's own "My Applications" list for this company is the second witness.
+      const listed = await onMyApplications(page, opts.jobTitle);
+      if (listed)
+        return { status: "submitted", detail: "Application submitted on Workday — confirmed by: listed under My Applications", confirmation: ["listed under My Applications on Workday"], answers: allAnswers, learned, aiCalls, usedPortalLogin: true, accountCreated };
     }
     return { status: "needs_user", detail: `Workday flow didn't finish (last step "${lastStep}") — open the application to check`, answers: allAnswers, learned, aiCalls, usedPortalLogin: true, accountCreated };
   } catch (e) {

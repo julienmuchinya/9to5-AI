@@ -27,6 +27,7 @@ import { renderClassicResume } from "../../src/lib/v2/resume-render";
 import { aiTailorResume, boldJobKeywords, jobSkillCoverage, loadLibrary, rankResumes, resumeMatchScore, TAILOR_BELOW, type ResumeEntry } from "../../src/lib/v2/resume-library";
 import { tailorResume, resumeToText, type ParsedResume } from "../../src/lib/v2/resume";
 import { applyToJob, cleanMemory, type Applicant } from "./apply";
+import { needsAccountSite, resolveApplyTarget } from "./resolve-apply";
 import { scanInbox } from "./inbox";
 import { waitForVerification } from "./mailcode";
 import { openMailbox } from "./mailbox";
@@ -715,6 +716,29 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
     }
     items.push({ job: j, company: j.company_name, fit: j.fit_score ?? 50, postedAt: j.job_postings.posted_at, userRequested: false, routeBonus: verdict.bonus, focus: isFocus(j) });
   }
+  // Jobs on employers' own careers sites (and other sites without a dedicated filler): the agent opens them and
+  // follows "Apply" (resolve-apply.ts). A slice per run, after the known sites (each look costs ~10 s).
+  if (env("OPEN_SITES", "true") !== "false") {
+    const { data: ownSite } = await sb
+      .from("jobs")
+      .select(JOB_COLS)
+      .eq("user_id", u.id)
+      .eq("dismissed", false)
+      .gte("fit_score", minFit)
+      .eq("job_postings.verification_status", "verified")
+      .eq("job_postings.ats", "other")
+      .order("fit_score", { ascending: false })
+      .limit(Number(env("OWN_SITE_PER_RUN", "150")));
+    let added = 0;
+    for (const j of (ownSite ?? []) as unknown as JobRow[]) {
+      const url = j.job_postings.apply_url || j.job_postings.url;
+      if (taken.has(j.id) || old(j.job_postings.posted_at) || ACCOUNT_SITES.test(url) || needsAccountSite(url) || /smartrecruiters\.com/i.test(url)) continue;
+      if (canAutoSubmit({ ats: j.job_postings.ats, verification_status: j.job_postings.verification_status, apply_url: j.job_postings.apply_url, url: j.job_postings.url })) continue; // already in the pool above
+      items.push({ job: j, company: j.company_name, fit: (j.fit_score ?? 50) - 10, postedAt: j.job_postings.posted_at, userRequested: false, routeBonus: 0, focus: isFocus(j) });
+      added++;
+    }
+    if (added) log(`  ${added} job(s) on employers' own sites to try (the agent follows their Apply button)`);
+  }
 
   // The same job often appears as two postings (curated list + company board): apply once.
   const seenJob = new Set<string>();
@@ -877,9 +901,32 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
       return "next";
     }
     const p = job.job_postings;
-    const applyUrl = p.apply_url || p.url;
+    let applyUrl = p.apply_url || p.url;
+    const knownSite = () => (WORKDAY_ON && /myworkday(jobs|site)\.com/i.test(applyUrl) && p.verification_status === "verified") || canAutoSubmit({ ats: p.ats, verification_status: p.verification_status, apply_url: p.apply_url, url: p.url });
+    let siteNote: string | null = null;
+    let resolved = false;
+    // An employer's own careers site, or any site without its own filler: open it and follow "Apply" — to a known
+    // form (Greenhouse, Lever, Ashby, Workday, Workable…), a plain form the generic filler can do, or a sign-in wall.
+    if (!knownSite() && p.verification_status === "verified" && !ACCOUNT_SITES.test(applyUrl) && !/smartrecruiters\.com/i.test(applyUrl) && env("OPEN_SITES", "true") !== "false") {
+      const t = await resolveApplyTarget(browser, applyUrl);
+      bump(`own_site_${t.kind}`);
+      if (t.kind === "ats" || t.kind === "form") {
+        log(`  ${job.company_name}: their site leads to ${t.kind === "ats" ? t.ats : "a plain application form"} (${new URL(t.url).hostname})`);
+        applyUrl = t.url;
+        p.apply_url = t.url;
+        p.ats = t.kind === "ats" ? t.ats : "other";
+        resolved = true;
+        if (!dryRun) await sb.from("job_postings").update({ apply_url: t.url, ats: p.ats }).eq("id", job.posting_id);
+      } else if (t.kind === "closed") {
+        await save({ user_id: u.id, job_id: job.id, posting_id: job.posting_id, apply_url: applyUrl, ats: p.ats, requested_by: appId ? "user" : "agent", status: "closed", error: `Posting is closed: ${t.why}` });
+        if (!dryRun) await sb.from("job_postings").update({ active: false }).eq("id", job.posting_id);
+        bump("closed");
+        return "next";
+      } else siteNote = t.why;
+    }
     const isWorkday = WORKDAY_ON && /myworkday(jobs|site)\.com/i.test(applyUrl) && p.verification_status === "verified";
-    const auto = isWorkday || canAutoSubmit({ ats: p.ats, verification_status: p.verification_status, apply_url: p.apply_url, url: p.url });
+    // A plain form found on the employer's own site goes to the generic filler (security screen and confirmation apply).
+    const auto = isWorkday || canAutoSubmit({ ats: p.ats, verification_status: p.verification_status, apply_url: p.apply_url, url: p.url }) || resolved;
     const base = { user_id: u.id, job_id: job.id, posting_id: job.posting_id, apply_url: applyUrl, ats: p.ats, requested_by: appId ? "user" : "agent" };
     if (!auto) {
       const needsAccount = ACCOUNT_SITES.test(applyUrl);
@@ -888,9 +935,14 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
         ? "This site needs an account. The email and password to use are on this card and under Portal logins — create the account, then apply."
         : /smartrecruiters\.com/i.test(applyUrl)
           ? "SmartRecruiters shows a CAPTCHA to automated browsers, so the agent can't apply here — open this one and apply yourself"
-          : "The agent can submit Greenhouse, Lever, Ashby, Workday, Workable, Rippling, JazzHR and Jobvite jobs — open this one and apply yourself (no account needed unless the site asks)";
-      await save({ ...base, status: "needs_user", error: why });
-      bump("needs_user");
+          : siteNote
+            ? `The agent opened the employer's site and stopped: ${siteNote} — open it and apply yourself`
+            : "The agent couldn't find a form it can fill on this site — open it and apply yourself";
+      // A job the agent picked itself (not one you asked for) on a site it can't do: filed under Closed / ignored with
+      // the reason, instead of filling Needs you with jobs you never chose.
+      const mine = Boolean(appId);
+      await save({ ...base, status: mine ? "needs_user" : "ignored", error: why });
+      bump(mine ? "needs_user" : "own_site_skipped");
       return "next";
     }
     const key = siteKey(applyUrl);
@@ -1042,6 +1094,15 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
       memory = rememberAnswers(memory, r.learned.map((x) => ({ ...x, company: job.company_name })));
       memoryChanged = true;
     }
+    // Private diagnosis (agent_logs is per user; the public GitHub log shows nothing): what happened, step by step.
+    if (r.status !== "submitted" && !dryRun)
+      await sb
+        .from("agent_logs")
+        .insert({ user_id: u.id, level: "warn", message: `Apply ${r.status}: ${job.company_name} / ${job.title} — ${r.detail.slice(0, 300)}`, metadata: { area: "apply-trace", host, ats: p.ats, url: applyUrl, trace: r.trace ?? [] } })
+        .then(
+          () => undefined,
+          () => undefined
+        );
     // A timeout or crash on a queued job goes back in the queue (up to 3 tries) instead of being lost.
     let status: string = r.status;
     let detail = r.detail;
@@ -1070,7 +1131,12 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
         cooldowns.set(host, "CAPTCHA shown on several jobs");
         if (!dryRun) await coolDown(sb, host, 12, `CAPTCHA on ${captchaByHost[host]} jobs this run`);
       }
-      if (!dryRun) {
+      if (resolved && !appId) {
+        // An employer's own site the agent tried on its own initiative: a CAPTCHA there means skip it, not retry it
+        // three times and then ask you.
+        status = "ignored";
+        detail = `${host} shows a CAPTCHA to automated browsers — skipped (the answers were filled in; open it to apply yourself)`;
+      } else if (!dryRun) {
         const { data: row } = await sb.from("applications").select("id,attempts").eq("user_id", u.id).eq("job_id", job.id).maybeSingle();
         const tries = (row?.attempts ?? 0) + 1;
         if (row) await sb.from("applications").update({ attempts: tries }).eq("id", row.id);
@@ -1125,8 +1191,12 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
       perCompanyToday[company] = (perCompanyToday[company] ?? 0) + 1;
       if (!dryRun) {
         const { data: appRow } = await sb.from("applications").select("id").eq("user_id", u.id).eq("job_id", job.id).maybeSingle();
-        if (appRow)
-          await sb.from("application_events").insert({ user_id: u.id, application_id: appRow.id, kind: "submitted", source: "agent", detail: focus ? `Resume led with ${focus}` : null });
+        if (appRow) {
+          // How it was confirmed (thank-you screen, confirmation page, site accepted the form, Workday's My
+          // Applications list); the confirmation email, when it comes, is added by the inbox scan as "received".
+          const how = r.confirmation?.length ? `Confirmed by: ${r.confirmation.join(", ")}` : "Confirmed by the site";
+          await sb.from("application_events").insert({ user_id: u.id, application_id: appRow.id, kind: "submitted", source: "agent", detail: [how, focus ? `Resume led with ${focus}` : null].filter(Boolean).join(" · ") });
+        }
         await bumpUsage(sb, "applications_submitted", 1);
         await bumpUsage(sb, "applications_submitted", 1, u.id);
       }

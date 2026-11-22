@@ -1,7 +1,7 @@
 import type { Browser, Page } from "playwright";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { geminiJson, FreeTierLimitError } from "../../src/lib/v2/gemini";
-import { applyWorkday } from "./workday";
+import { applyWorkday, TRACES } from "./workday";
 import { answerPrompt, salaryFacts } from "./answer-ai";
 import { scrubFacts, sensitiveField, suspiciousPassword, type SensitiveHit } from "../../src/lib/v2/sensitive";
 import { answerFromProfile, autoFollowUpAnswer, commonSenseAnswer, findSimilarAnswer, isFollowUp, memoryKey, pickOption, questionContext, questionFor, type AppAnswers, type PendingQuestion } from "../../src/lib/v2/app-questions";
@@ -81,6 +81,56 @@ export interface ApplyResult {
   accountCreated?: boolean;
   /** The form asked for something no real employer asks on an application (SSN, bank details, an account password): likely a fake posting. */
   suspicious?: string;
+  /** How the submission was confirmed: "thank-you message on screen", "confirmation page", "site accepted the form"… */
+  confirmation?: string[];
+  /** Step-by-step record of the attempt (Workday sign-in etc.), saved privately when it didn't go through. */
+  trace?: string[];
+}
+
+/** Text of the page AND its frames (embedded application forms show their thank-you inside an iframe). */
+export async function pageAndFramesText(page: Page): Promise<string> {
+  const parts = await Promise.all(page.frames().map((f) => f.evaluate(() => document.body?.innerText ?? "").catch(() => "")));
+  return parts.join("\n");
+}
+
+/** Visible form controls right now (a sent form disappears or shrinks to nothing). */
+const visibleControls = (page: Page) =>
+  page
+    .evaluate(() => Array.from(document.querySelectorAll("input:not([type=hidden]), textarea, select")).filter((e) => (e as HTMLElement).getBoundingClientRect().width > 0).length)
+    .catch(() => 0);
+
+/**
+ * Several independent signs that an application went through — no single one is reliable on every site:
+ *   1. a thank-you / "application received" message on the page or inside its form frame,
+ *   2. the address changed to a confirmation / thank-you / success page,
+ *   3. the site's own server accepted the form (a 2xx answer to the POST the Submit button sent) AND the form is gone.
+ * The confirmation email is the 4th sign; it's matched later by the inbox scan and shown on the timeline.
+ */
+export async function submissionEvidence(page: Page, opts: { controlsBefore: number; responses: { url: string; status: number; method: string }[]; startUrl: string }): Promise<{ confirmed: boolean; signs: string[]; accepted: boolean; formGone: boolean; shrunk: boolean }> {
+  const signs: string[] = [];
+  const text = await pageAndFramesText(page);
+  if (SUCCESS.test(text)) signs.push("thank-you message on screen");
+  const url = page.url();
+  if (url !== opts.startUrl && /(confirm|thank|success|submitted|complete|applied)/i.test(url)) signs.push("confirmation page");
+  const accepted = opts.responses.some((r) => r.method !== "GET" && r.status >= 200 && r.status < 300 && !/(analytics|collect|track|segment|sentry|log|beacon|metrics|hotjar|google|facebook|doubleclick|recaptcha|hcaptcha)/i.test(r.url));
+  const now = await visibleControls(page);
+  const formGone = opts.controlsBefore >= 3 && now <= Math.max(1, Math.floor(opts.controlsBefore * 0.2));
+  const shrunk = opts.controlsBefore >= 3 && now <= Math.floor(opts.controlsBefore * 0.6);
+  if (accepted && formGone) signs.push("the site accepted the form and closed it");
+  return { confirmed: signs.length > 0, signs, accepted, formGone, shrunk };
+}
+
+/** After Submit: wait (up to `ms`) until the page shows an outcome instead of a fixed 6-second sleep. */
+async function waitForOutcome(page: Page, ms = 15000) {
+  const t0 = Date.now();
+  await page.waitForTimeout(1500);
+  while (Date.now() - t0 < ms) {
+    const t = await pageAndFramesText(page);
+    if (SUCCESS.test(t) || ASKS_CODE.test(t) || /(confirm|thank|success|submitted)/i.test(page.url())) return;
+    const errs = await page.locator("[aria-invalid=true], [role=alert]").count().catch(() => 0);
+    if (errs > 0 && Date.now() - t0 > 4000) return;
+    await page.waitForTimeout(1000);
+  }
 }
 
 export interface Field {
@@ -1143,6 +1193,8 @@ export async function applyToJob(
   });
   try {
     const r = await Promise.race([fillAndSubmit(context, db, opts), timeout]);
+    const steps = TRACES.get(context);
+    if (steps?.length) r.trace = steps.slice(-40);
     await saveDebug(context, opts.company, r);
     return r;
   } finally {
@@ -1322,13 +1374,21 @@ async function fillAndSubmit(
     const submit = (await visibleSubmits.count()) ? visibleSubmits.last() : submits.last();
     if ((await submit.count()) === 0) return { status: "needs_user", detail: "Couldn't find the Submit button", answers: labelled(fields, answers), learned, usedPortalLogin, aiCalls };
     const submittedAt = new Date();
+    // Listen to what the Submit button sends: the site's own "accepted" answer is one of the confirmation signs.
+    const responses: { url: string; status: number; method: string }[] = [];
+    page.on("response", (r) => {
+      const req = r.request();
+      if (["xhr", "fetch", "document"].includes(req.resourceType())) responses.push({ url: r.url(), status: r.status(), method: req.method() });
+    });
+    const controlsBefore = await visibleControls(page);
+    const startUrl = page.url();
     await submit.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
     // Covered by a sticky footer / chat widget: click it anyway, then as a last resort fire the click event.
     await submit
       .click({ timeout: 8000 })
       .catch(() => submit.click({ force: true, timeout: 4000 }))
       .catch(() => submit.dispatchEvent("click"));
-    await page.waitForTimeout(6000);
+    await waitForOutcome(page);
 
     // Some sites (Greenhouse especially) email a security code after Submit and wait for it.
     const code = await enterEmailCode(page, opts.emailCode && ((since: Date) => opts.emailCode!(since, opts.company)), submittedAt);
@@ -1337,10 +1397,14 @@ async function fillAndSubmit(
     if (code === "not_found")
       return { status: "needs_user", detail: "The site emailed a security code but it didn't arrive in time — open the application and enter it yourself.", answers: labelled(fields, answers), learned, usedPortalLogin, aiCalls };
 
-    const after = (await page.innerText("body").catch(() => "")) ?? "";
+    if (code === "entered") await waitForOutcome(page, 10000);
+    const after = await pageAndFramesText(page);
     if (code === "entered" && !SUCCESS.test(after) && ASKS_CODE.test(after) && /(incorrect|invalid|expired|wrong|doesn.t match|try again)/i.test(after))
       return { status: "needs_user", detail: "The site rejected the emailed security code — open the application and finish it (the answers are listed below).", answers: labelled(fields, answers), learned, usedPortalLogin, aiCalls };
-    if (SUCCESS.test(after) || /confirmation|thank/i.test(page.url())) return { status: "submitted", detail: "Application submitted", answers: labelled(fields, answers), learned, usedPortalLogin, aiCalls };
+    const proof = await submissionEvidence(page, { controlsBefore, responses, startUrl });
+    if (code === "entered" && proof.confirmed) proof.signs.push("emailed security code accepted");
+    if (proof.confirmed)
+      return { status: "submitted", detail: `Application submitted — confirmed by: ${proof.signs.join(", ")}`, confirmation: proof.signs, answers: labelled(fields, answers), learned, usedPortalLogin, aiCalls };
     if (await captchaVisible(page)) return { status: "needs_user", detail: "CAPTCHA appeared on submit — please submit this one yourself", answers: labelled(fields, answers), learned, usedPortalLogin, aiCalls };
     // Real validation messages only — not helper text like "please select all that apply".
     // The fields the page itself marks invalid, by their question — not question text that merely says "please provide…".
@@ -1373,10 +1437,16 @@ async function fillAndSubmit(
       ? `needs ${[...new Set(invalid)].slice(0, 3).join("; ")}`
       : shownErrors.length
         ? [...new Set(shownErrors)].slice(0, 3).join("; ")
-        : after.match(/(your form needs corrections[^.]{0,40}|missing entry for required field:?[^.?]{0,120}|this field is required|(field|question|answer) is required|please (enter|fill in|complete|provide)[^.]{0,80}|(is )?invalid (email|phone|format|value)[^.]{0,40})/i)?.[0];
+        : proof.accepted
+          ? undefined
+          : after.match(/(your form needs corrections[^.]{0,40}|missing entry for required field:?[^.?]{0,120}|this field is required|(field|question|answer) is required|please (enter|fill in|complete|provide)[^.]{0,80}|(is )?invalid (email|phone|format|value)[^.]{0,40})/i)?.[0];
     // The rejected fields as full questions (text + choices), so the user can answer them once on the Needs-you page.
     const rejectedLabels = invalid.length ? invalid : shownErrors.map((x) => x.split(": ")[0]).filter(Boolean);
     const pending = questionsFor(rejectedLabels, fields);
+    if (!err && proof.accepted && proof.shrunk)
+      // The server took it but the page showed no thank-you: very likely sent. The confirmation email (inbox scan)
+      // settles it; until then it's marked submitted with that caveat instead of going to Needs you.
+      return { status: "submitted", detail: "Application submitted — the site accepted the form (no thank-you message shown; the confirmation email will settle it)", confirmation: ["the site accepted the form"], answers: labelled(fields, answers), learned, usedPortalLogin, aiCalls };
     return { status: "needs_user", detail: err ? `Form rejected: ${err}` : "Submitted but no confirmation seen — please check", answers: labelled(fields, answers), learned, usedPortalLogin, aiCalls, pending: pending.length ? pending : undefined };
   } catch (e) {
     return { status: "failed", detail: (e as Error).message.slice(0, 300), aiCalls };

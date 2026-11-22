@@ -127,6 +127,16 @@ interface GhJob {
   company_name?: string;
 }
 
+/**
+ * Where to apply for a Greenhouse job. Many employers (Stripe, Databricks, Coinbase, Samsara…) list their own careers
+ * page as the job's link ("stripe.com/jobs/search?gh_jid=…"), where the form is hidden inside their site — the agent
+ * skipped 1,000+ such jobs as "not a site it can submit". Greenhouse's own form address always works.
+ */
+export function greenhouseApplyUrl(board: string, id: number | string, absoluteUrl: string): string {
+  if (/greenhouse\.io/i.test(absoluteUrl)) return absoluteUrl;
+  return `https://job-boards.greenhouse.io/embed/job_app?for=${encodeURIComponent(board)}&token=${encodeURIComponent(String(id))}`;
+}
+
 export async function fetchGreenhouse(board: string): Promise<Posting[]> {
   const data = await getJson<{ jobs: GhJob[] }>(
     `https://boards-api.greenhouse.io/v1/boards/${encodeURIComponent(board)}/jobs?content=true`
@@ -146,7 +156,7 @@ export async function fetchGreenhouse(board: string): Promise<Posting[]> {
         locations: loc ? loc.split(/;|\s\|\s/).map((s) => s.trim()) : [],
         is_remote: isRemoteText(loc),
         url: j.absolute_url,
-        apply_url: j.absolute_url,
+        apply_url: greenhouseApplyUrl(board, j.id, j.absolute_url),
         ats: "greenhouse",
         ats_board: board,
         salary_min: pay.min,
