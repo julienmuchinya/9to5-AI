@@ -43,7 +43,7 @@ jobs:
     # Public repo: unlimited minutes, so runs go up to ~2.5 h. A private repo's run stops itself at 42 min.
     timeout-minutes: 175
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Scheduled runs don't carry the repository in their event, so ask GitHub. Unknown counts as public
       # (logs stay hidden, no form screenshots uploaded).
@@ -53,7 +53,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: echo "public=$(gh api repos/${{ github.repository }} --jq 'if .private then "false" else "true" end' 2>/dev/null || echo true)" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: npm
@@ -61,7 +61,7 @@ jobs:
       - run: npm ci
 
       - name: Cache Playwright browser
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
@@ -99,7 +99,7 @@ jobs:
 
       - name: Keep evidence of applications that didn't go through
         if: always() && steps.vis.outputs.public == 'false'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: apply-debug
           path: debug
