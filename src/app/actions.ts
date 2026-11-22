@@ -177,7 +177,7 @@ async function requeueAnswered(supabase: Awaited<ReturnType<typeof requireUser>>
   const ready = (waiting ?? [])
     .filter((w) => {
       const qs = (w.pending_questions ?? []) as PendingQuestion[];
-      return qs.length > 0 && qs.every((q) => findSimilarAnswer(q.label, q.options ?? [], store));
+      return qs.length > 0 && qs.every((q) => store[q.key] || findSimilarAnswer(q.label, q.options ?? [], store));
     })
     .map((w) => w.id as string);
   if (ready.length)

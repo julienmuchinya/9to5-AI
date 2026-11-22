@@ -5,7 +5,8 @@ import { Badge, Button, Card, CompanyMark, Emphasis, EmptyState, Notice, PageHea
 import { DeskButton, Icon } from "@/components/sidebar";
 import { RouteDrawer } from "@/components/drawer";
 import { customStore, findSimilarAnswer, questionSimilarity, type CustomAnswers, type PendingQuestion } from "@/lib/v2/app-questions";
-import { PendingQuestions, type AskedQuestion } from "./pending-questions";
+import { type AskedQuestion } from "./pending-questions";
+import { ApplicationQuestions, type StuckApplication } from "./application-questions";
 import { BulkBar } from "./bulk-bar";
 import { AnswersEditor } from "./answers-editor";
 import { STAGE_LABEL, gmailLink, roleFamily } from "@/lib/v2/tracking";
@@ -70,7 +71,7 @@ export default async function ApplicationsPage({ searchParams }: { searchParams:
     statusRows(supabase, user.id),
     supabase.from("agent_runs").select("started_at,ended_at,status,summary").eq("user_id", user.id).order("started_at", { ascending: false }).limit(1).maybeSingle(),
     supabase.from("profiles").select("custom_answers,inbox_email,inbox_host").eq("id", user.id).maybeSingle(),
-    supabase.from("applications").select("id,error,pending_questions,jobs(company_name)").eq("user_id", user.id).eq("status", "needs_user").limit(500),
+    supabase.from("applications").select("id,error,pending_questions,answers,updated_at,jobs(company_name,title)").eq("user_id", user.id).eq("status", "needs_user").order("updated_at", { ascending: false }).limit(500),
     supabase.from("application_accounts").select("id,portal_host,email_used,account_created").eq("user_id", user.id),
     aiStatus(serviceClient()),
   ]);
@@ -84,8 +85,21 @@ export default async function ApplicationsPage({ searchParams }: { searchParams:
   const asked = new Map<string, AskedQuestion>();
   const kinds = new Map<string, NeedsKind>();
   const kindCount: Partial<Record<NeedsKind, number>> = {};
-  for (const r of (needRows ?? []) as unknown as { id: string; error: string | null; pending_questions: PendingQuestion[] | null; jobs: { company_name: string } | null }[]) {
-    const open = (r.pending_questions ?? []).filter((q) => !findSimilarAnswer(q.label, q.options ?? [], mine));
+  const stuck: StuckApplication[] = [];
+  for (const r of (needRows ?? []) as unknown as { id: string; error: string | null; pending_questions: PendingQuestion[] | null; answers: Record<string, string> | null; jobs: { company_name: string; title: string } | null }[]) {
+    const open = (r.pending_questions ?? []).filter((q) => !mine[q.key] && !findSimilarAnswer(q.label, q.options ?? [], mine));
+    // The whole form as the agent filled it, so each open question is seen with everything answered before it.
+    if (open.length)
+      stuck.push({
+        id: r.id,
+        company: r.jobs?.company_name ?? "A company",
+        title: r.jobs?.title ?? "",
+        answered: readable(r.answers ?? null)
+          .filter(([q2]) => !open.some((o) => o.label === q2))
+          .map(([q2, a2]) => [q2, String(a2)] as [string, string]),
+        open,
+        alsoAsking: 0,
+      });
     const k = needsKind(r.error, open.length);
     kinds.set(r.id, k);
     kindCount[k] = (kindCount[k] ?? 0) + 1;
@@ -100,6 +114,15 @@ export default async function ApplicationsPage({ searchParams }: { searchParams:
     }
   }
   const questions = [...asked.values()].sort((a, b) => b.companies.length - a.companies.length);
+  // How many OTHER waiting applications the same answers unblock.
+  for (const a of stuck) {
+    const others = new Set<string>();
+    for (const q of a.open) {
+      const same = asked.get(q.key) ?? [...asked.values()].find((x) => questionSimilarity(x.label, q.label) >= 0.75);
+      for (const c2 of same?.companies ?? []) if (c2 !== a.company) others.add(c2);
+    }
+    a.alsoAsking = others.size;
+  }
 
   // Only the rows on screen are loaded.
   const statuses = FILTER[tab];
@@ -214,7 +237,7 @@ export default async function ApplicationsPage({ searchParams }: { searchParams:
           </Notice>
         </div>
       )}
-      {tab === "needs" && <PendingQuestions questions={questions} />}
+      {tab === "needs" && <ApplicationQuestions apps={stuck.slice(0, 40)} />}
 
       {c.queued > 0 && tab === "queued" && (
         <Card className="mb-5 border-[var(--accent)]/30 bg-gradient-to-r from-[var(--accent-soft)] to-transparent p-4">

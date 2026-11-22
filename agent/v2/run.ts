@@ -128,9 +128,25 @@ async function coolDown(sb: SupabaseClient, key: string, hours: number, reason: 
   log(`cooldown ${key} for ${hours}h: ${reason}`);
 }
 
+/**
+ * The portal a login belongs to. Every company has its own Workday account even though it's all "Workday":
+ * acme.wd5.myworkdayjobs.com is Acme's own address, but on the shared myworkdaysite.com address the company is
+ * in the path (wd1.myworkdaysite.com/recruiting/acme/...), so the key includes it — two companies never share a login.
+ */
+export function portalKey(url: string): string {
+  try {
+    const u = new URL(url);
+    const host = u.hostname.toLowerCase();
+    const tenant = /myworkdaysite\.com$/.test(host) ? u.pathname.match(/\/recruiting\/([^/]+)/i)?.[1]?.toLowerCase() : null;
+    return tenant ? `${host}/${tenant}` : host;
+  } catch {
+    return "";
+  }
+}
+
 /** Makes sure there's one saved login per company portal, so every job there reuses it. */
 async function ensurePortalLogin(sb: SupabaseClient, userId: string, email: string, company: string, url: string) {
-  const host = hostOf(url);
+  const host = portalKey(url);
   if (!host) return;
   const { data } = await sb.from("application_accounts").select("id").eq("user_id", userId).eq("portal_host", host).maybeSingle();
   if (data) return;
@@ -152,7 +168,7 @@ async function ensurePortalLogin(sb: SupabaseClient, userId: string, email: stri
 
 /** The saved login for this portal, decrypted, if there is one. */
 async function portalLogin(sb: SupabaseClient, userId: string, url: string): Promise<{ email: string; password: string } | null> {
-  const host = hostOf(url);
+  const host = portalKey(url);
   if (!host) return null;
   const { data } = await sb.from("application_accounts").select("email_used,password_enc").eq("user_id", userId).eq("portal_host", host).maybeSingle();
   if (!data?.password_enc) return null;
@@ -678,6 +694,8 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
     hostCount[h] = (hostCount[h] ?? 0) + 1;
   }
   let submittedThisRun = 0;
+  /** Tailored copies made this run, by resume + job title: similar jobs reuse one instead of a new AI resume each. */
+  const tailoredCache = new Map<string, { path: string; focus: string | null }>();
   /** CAPTCHAs per site host in this run (2 → the whole site pauses). */
   const captchaByHost: Record<string, number> = {};
   let memory: AppAnswers = cleanMemory({ ...(u.answer_memory ?? {}) } as Record<string, string>);
@@ -687,18 +705,35 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
   // Every resume the user keeps (Resume library); each job gets the one that fits it best.
   const library = await loadLibrary(sb, u.id, u).catch(() => ({ resumes: [] as ResumeEntry[] }));
   const originals = new Map<string, string | null>();
+  // One download per resume, shared by the parallel workers (a promise, so two workers never write the same
+  // file name for different resumes — "original-0.pdf" used to be overwritten mid-run).
+  const downloads = new Map<string, Promise<string | null>>();
+  const download = (path: string) => {
+    if (!downloads.has(path))
+      downloads.set(
+        path,
+        (async () => {
+          for (let tryNo = 0; tryNo < 3; tryNo++) {
+            const { data } = await sb.storage.from("resumes").download(path);
+            if (data) {
+              const local = join(dir, `original-${path.replace(/[^a-z0-9]+/gi, "_").slice(-60)}.pdf`);
+              writeFileSync(local, Buffer.from(await data.arrayBuffer()));
+              originals.set(path, local);
+              return local;
+            }
+            await sleep(1500);
+          }
+          return null;
+        })()
+      );
+    return downloads.get(path)!;
+  };
+  /** The chosen resume's PDF, else the main resume's — a failed download never stops the run. */
   const originalFor = async (entry: ResumeEntry | null): Promise<string | null> => {
-    const path = entry?.path ?? u.resume_path;
-    if (!path) return null;
-    if (originals.has(path)) return originals.get(path) ?? null;
-    const { data } = await sb.storage.from("resumes").download(path);
-    let local: string | null = null;
-    if (data) {
-      local = join(dir, `original-${originals.size}.pdf`);
-      writeFileSync(local, Buffer.from(await data.arrayBuffer()));
-    }
-    originals.set(path, local);
-    return local;
+    const first = entry?.path ?? u.resume_path;
+    const got = first ? await download(first) : null;
+    if (got || !u.resume_path || u.resume_path === first) return got;
+    return download(u.resume_path);
   };
   // RESUME_TAILOR: "ai" (reword bullets with the backup AI — never spends Gemini), "free" (reorder +
   // bold the job's keywords), "off" (always upload the original PDF untouched).
@@ -845,8 +880,14 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
     // resume is below 60 is the best one tailored: same layout, reworded in XYZ style toward the job.
     const tailorIt = score < TAILOR_BELOW && Boolean(parsed?.experience?.length) && tailorMode !== "off";
     if (!tailorIt) bump("resume_original");
-    if (tailorIt && parsed) {
-      bump("resume_tailored");
+    const tailorKey = `${entry?.id ?? "main"}|${titleKey(job.title)}`;
+    const reused = tailorIt ? tailoredCache.get(tailorKey) : undefined;
+    if (reused) {
+      // Same resume + same kind of title earlier in this run: reuse that copy instead of making another one.
+      bump("resume_tailored_reused");
+      resumePath = reused.path;
+      focus = reused.focus;
+    } else if (tailorIt && parsed) {
       const cover = jobSkillCoverage(parsed, jobText);
       if (cover.missing.length) log(`  best resume scores ${score}/100 (missing: ${cover.missing.slice(0, 6).join(", ")}) — tailoring it`);
       // Same layout: bullets and projects stay in the applicant's order; only the words (AI) and skill order change.
@@ -859,32 +900,46 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
           log(`  resume tailoring skipped: ${(e as Error).message.slice(0, 120)}`);
         }
       }
-      tailored = boldJobKeywords(tailored, jobText);
-      focus = `tailored · ${score}% → ${resumeMatchScore(tailored, jobText)}% match · ${resumeFocus(tailored.skills)}`;
-      // Same layout as the user's own resume, always one page; if it can't fit, send the original PDF.
-      const looksLikeUrl = (x?: string | null) => (x && /^https?:|\.(com|io|dev|me)\b/i.test(x) ? x : null);
-      const pdf = await renderClassicResume(tailored, {
-        name: parsed.name || `${applicant.first_name} ${applicant.last_name}`,
-        email: parsed.email || applicant.email,
-        phone: parsed.phone || applicant.phone,
-        location: parsed.location || [applicant.city, applicant.state].filter(Boolean).join(", "),
-        linkedin: u.linkedin_url || looksLikeUrl(parsed.links?.linkedin),
-        github: u.github_url || looksLikeUrl(parsed.links?.github),
-        website: u.website_url || looksLikeUrl(parsed.links?.website),
-        headline: parsed.headline ?? null,
-      }).catch(() => null);
-      if (pdf) {
-        // One folder per job: parallel workers must not overwrite each other's tailored PDF (same file name).
-        const jobDir = join(dir, job.id);
-        mkdirSync(jobDir, { recursive: true });
-        resumePath = join(jobDir, `${(applicant.first_name + "_" + applicant.last_name).replace(/[^a-z0-9_]/gi, "")}_Resume.pdf`);
-        writeFileSync(resumePath, pdf);
+      // Nothing of substance changed (every rewrite failed the checks and no skill was added): the applicant's own
+      // PDF reads better than a re-drawn copy that differs only in bold and order.
+      const plainBullets = (x: ParsedResume) => JSON.stringify([...(x.experience ?? []), ...(x.projects ?? [])].map((e) => e.bullets.map((b) => b.replace(/\*\*/g, ""))));
+      const skillSet = (x: ParsedResume) => JSON.stringify([...new Set([...(x.skills ?? []), ...(x.skill_groups ?? []).flatMap((g) => g.items)].map((k) => k.toLowerCase()))].sort());
+      const changed = plainBullets(tailored) !== plainBullets(parsed) || skillSet(tailored) !== skillSet(parsed);
+      if (!changed) {
+        bump("resume_original");
+        bump("tailoring_added_nothing");
+      } else {
+        bump("resume_tailored");
+        tailored = boldJobKeywords(tailored, jobText);
+        const tailoredFocus = `tailored · ${score}% → ${resumeMatchScore(tailored, jobText)}% match · ${resumeFocus(tailored.skills)}`;
+        // Same layout as the user's own resume, one page at 10 pt or more; if it can't fit, send the original PDF.
+        const looksLikeUrl = (x?: string | null) => (x && /^https?:|\.(com|io|dev|me)\b/i.test(x) ? x : null);
+        const pdf = await renderClassicResume(tailored, {
+          name: parsed.name || `${applicant.first_name} ${applicant.last_name}`,
+          email: parsed.email || applicant.email,
+          phone: parsed.phone || applicant.phone,
+          location: parsed.location || [applicant.city, applicant.state].filter(Boolean).join(", "),
+          linkedin: u.linkedin_url || looksLikeUrl(parsed.links?.linkedin),
+          github: u.github_url || looksLikeUrl(parsed.links?.github),
+          website: u.website_url || looksLikeUrl(parsed.links?.website),
+          headline: parsed.headline ?? null,
+        }).catch(() => null);
+        if (pdf) {
+          // One folder per job: parallel workers must not overwrite each other's tailored PDF (same file name).
+          const jobDir = join(dir, job.id);
+          mkdirSync(jobDir, { recursive: true });
+          resumePath = join(jobDir, `${(applicant.first_name + "_" + applicant.last_name).replace(/[^a-z0-9_]/gi, "")}_Resume.pdf`);
+          writeFileSync(resumePath, pdf);
+          focus = tailoredFocus;
+          tailoredCache.set(tailorKey, { path: resumePath, focus });
+        } else bump("tailored_did_not_fit_sent_original");
       }
     }
     if (library.resumes.length > 1 && entry) focus = focus ? `${entry.label} · ${focus}` : entry.label;
     if (!resumePath) {
-      result.no_resume = 1;
-      return "stop";
+      // Storage hiccup: skip this one job (it stays queued) instead of ending the whole run.
+      bump("resume_download_failed");
+      return "next";
     }
 
     attempts++;
@@ -895,7 +950,7 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
     // portal login (or none) overwrote another's mid-application — "No saved login for this Workday site" on
     // sites that had one, and the wrong site's password sent to Workday (followed by password resets).
     const who: Applicant = { ...applicant, portal: await portalLogin(sb, u.id, applyUrl) };
-    const { data: acct } = await sb.from("application_accounts").select("account_created").eq("user_id", u.id).eq("portal_host", host).maybeSingle();
+    const { data: acct } = await sb.from("application_accounts").select("account_created").eq("user_id", u.id).eq("portal_host", portalKey(applyUrl)).maybeSingle();
     // Retrying this job? Reuse the long written answers ("Why us?", project write-ups) from the last attempt
     // instead of paying for a new AI call. Short answers are re-derived so fixes to the rules apply.
     const { data: prevApp } = await sb.from("applications").select("answers").eq("user_id", u.id).eq("job_id", job.id).maybeSingle();
@@ -990,7 +1045,7 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
       resume_focus: focus,
     });
     if ((r.usedPortalLogin || r.accountCreated) && !dryRun)
-      await sb.from("application_accounts").update({ account_created: true, notes: `Used on the ${job.title} application` }).eq("user_id", u.id).eq("portal_host", host);
+      await sb.from("application_accounts").update({ account_created: true, notes: `Used on the ${job.title} application` }).eq("user_id", u.id).eq("portal_host", portalKey(applyUrl));
     // Back off from sites that push back, instead of retrying through them.
     if (!dryRun) {
       if (captcha) await coolDown(sb, key, 12, "CAPTCHA shown");

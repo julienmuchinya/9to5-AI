@@ -47,7 +47,13 @@ export async function loadLibrary(
   const others = lib.resumes.filter((r) => r.id !== "main");
   // Resume PDFs uploaded while the list couldn't be saved (the bucket refused library.json) still show up,
   // as "not read yet" cards the user can read with one click — instead of being silently ignored.
-  const { data: files } = await storage.storage.from("resumes").list(`${userId}/resumes`, { limit: 100 });
+  const { data: files, error: listError } = await storage.storage.from("resumes").list(`${userId}/resumes`, { limit: 100 });
+  // An entry whose PDF was deleted (e.g. removed on the Resumes page while another upload saved the list) is
+  // dropped: picking it made the agent stop the whole run for lack of a resume file.
+  if (!listError && files?.length) {
+    const present = new Set(files.map((f) => `${userId}/resumes/${f.name}`));
+    for (let i = others.length - 1; i >= 0; i--) if (others[i].path.startsWith(`${userId}/resumes/`) && !present.has(others[i].path)) others.splice(i, 1);
+  }
   for (const f of files ?? []) {
     const id = f.name.replace(/\.pdf$/i, "");
     if (!/^[a-z0-9]{1,12}$/.test(id) || id === "main" || others.some((r) => r.id === id)) continue;
@@ -241,6 +247,20 @@ Return JSON: {"experience":[{"bullets":[...]}...], "projects":[{"bullets":[...]}
     }
     return false;
   };
+  // Added skills look like the rest: the posting's own capitalisation ("Terraform", not "terraform"), placed at the
+  // END of their group (an AI-ordered list with new lowercase words in front gave the edit away).
+  const esc = (x: string) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const cased = (x: string) => {
+    const k = x.replace(/\*\*/g, "").trim();
+    if (allText.includes(k.toLowerCase())) return k;
+    const m = job.description.match(new RegExp(`(?<![\\w])${esc(k)}(?![\\w])`, "i"));
+    return m?.[0] && /[A-Z]/.test(m[0]) ? m[0] : k.charAt(0).toUpperCase() + k.slice(1);
+  };
+  const tidy = (items: string[]) => {
+    const own = items.filter((x) => allText.includes(x.replace(/\*\*/g, "").trim().toLowerCase()));
+    const fresh = items.filter((x) => !own.includes(x)).map(cased);
+    return [...new Set([...own, ...fresh])];
+  };
   let skill_groups = r.skill_groups;
   let skills = r.skills;
   if (r.skill_groups?.length && Array.isArray(out.skills)) {
@@ -248,11 +268,11 @@ Return JSON: {"experience":[{"bullets":[...]}...], "projects":[{"bullets":[...]}
     skill_groups = r.skill_groups.map((g) => {
       const match = next.find((n) => n?.name === g.name);
       const items = Array.isArray(match?.items) ? match!.items.filter((x) => typeof x === "string" && known(x)) : [];
-      return items.length >= g.items.length * 0.8 ? { ...g, items: [...new Set(items)] } : g;
+      return items.length >= g.items.length * 0.8 ? { ...g, items: tidy(items) } : g;
     });
   } else if (Array.isArray(out.skills) && out.skills.every((x) => typeof x === "string")) {
     const next = (out.skills as string[]).filter(known);
-    if (next.length >= (r.skills?.length ?? 0) * 0.8) skills = [...new Set(next)];
+    if (next.length >= (r.skills?.length ?? 0) * 0.8) skills = tidy(next);
   }
   return {
     ...r,

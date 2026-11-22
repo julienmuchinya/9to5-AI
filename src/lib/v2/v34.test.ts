@@ -98,6 +98,37 @@ describe("sensitive questions", () => {
   });
 });
 
+describe("resume PDFs", () => {
+  it("reads a PDF's text without any AI (backup path when Gemini is out)", async () => {
+    const { PDFDocument, StandardFonts } = await import("pdf-lib");
+    const { pdfText } = await import("./pdf-text");
+    const d = await PDFDocument.create();
+    const page = d.addPage([612, 792]);
+    const font = await d.embedFont(StandardFonts.Helvetica);
+    page.drawText("Sam Lee", { x: 50, y: 700, size: 14, font });
+    page.drawText("Software Engineer Intern at Acme (Python, React)", { x: 50, y: 680, size: 11, font });
+    const t = await pdfText(await d.save());
+    expect(t).toMatch(/Sam Lee/);
+    expect(t).toMatch(/Software Engineer Intern at Acme \(Python, React\)/);
+  });
+  it("keeps unicode hyphens instead of dropping them", async () => {
+    const { winAnsi } = await import("./resume-render");
+    expect(winAnsi("Role‑Based multi‐tenant")).toBe("Role-Based multi-tenant");
+  });
+  it("lays out long education / title lines without overlapping (stacks or shrinks instead)", async () => {
+    const { renderClassicResume } = await import("./resume-render");
+    const long: ParsedResume = {
+      education: [
+        { school: "Kennesaw State University", degree: "Master of Science", field: "Electrical and Computer Engineering", graduation: "Expected: Dec 2029", gpa: "3.9" },
+        { school: "Kennesaw State University", degree: "Bachelor of Science", field: "Software Engineering", graduation: "Dec 2026", gpa: "3.8" },
+      ],
+      experience: [{ title: "Junior Prompt Engineer & AI Model Evaluator — Generative AI Quality, Safety & Evaluation", company: "Example AI", start: "Jan 2026", end: "Present", bullets: ["Built things"] }],
+      skills: ["Python"],
+    };
+    expect(await renderClassicResume(long, { name: "Sam Lee" })).not.toBeNull();
+  });
+});
+
 describe("free-tier budget", () => {
   it("uses 99% of each free limit", () => {
     expect(SAFETY_RATIO).toBe(0.99);

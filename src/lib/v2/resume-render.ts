@@ -31,7 +31,11 @@ const BLACK = rgb(0, 0, 0);
 // Times (WinAnsi) covers curly quotes, dashes and bullets; replace anything else.
 const WIN_EXTRA = "“”‘’–—•…€™";
 export const winAnsi = (s: string) =>
-  [...(s ?? "")]
+  [...(s ?? "")
+    .replace(/[\u2010\u2011\u2012\u2043\u2212]/g, "-")
+    .replace(/[\u00a0\u2000-\u200a\u202f\u205f]/g, " ")
+    .replace(/[\u200b-\u200d\u2060\ufeff]/g, "")
+    .replace(/[\u2032\u02bc]/g, "'")]
     .map((c) => (c === "\t" || c === "\n" ? " " : c))
     .filter((c) => (c >= " " && c <= "~") || (c >= " " && c <= "ÿ") || WIN_EXTRA.includes(c))
     .join("");
@@ -83,7 +87,18 @@ async function draw(doc: PDFDocument, f: Fonts, r: ParsedResume, c: ResumeContac
     if (!overflow) page.drawText(winAnsi(s), { x, y, size: sz, font, color });
   };
   const tw = (s: string, font: PDFFont, sz = size) => font.widthOfTextAtSize(winAnsi(s), sz);
-  const centered = (s: string, cx: number, font: PDFFont, sz = size, color = BLACK) => text(s, cx - tw(s, font, sz) / 2, font, sz, color);
+  /** The largest size (down to 85%) at which `s` fits in `maxW`; text that still doesn't fit is shortened with "…". */
+  const fit = (s: string, font: PDFFont, maxW: number, sz = size): { s: string; sz: number } => {
+    for (let k = sz; k >= sz * 0.85; k -= 0.25) if (tw(s, font, k) <= maxW) return { s, sz: k };
+    const min = sz * 0.85;
+    let cut = s;
+    while (cut.length > 4 && tw(`${cut}…`, font, min) > maxW) cut = cut.slice(0, -1);
+    return { s: `${cut.trimEnd()}…`, sz: min };
+  };
+  const centered = (s: string, cx: number, font: PDFFont, sz = size, color = BLACK, maxW = width) => {
+    const t = fit(s, font, maxW, sz);
+    text(t.s, cx - tw(t.s, font, t.sz) / 2, font, t.sz, color);
+  };
   const underline = (x: number, w: number, color = BLACK) => page.drawLine({ start: { x, y: y - 1.5 }, end: { x: x + w, y: y - 1.5 }, thickness: 0.6, color });
   const rule = (thick = 0.8) => page.drawLine({ start: { x: MX, y }, end: { x: right, y }, thickness: thick, color: BLACK });
 
@@ -151,10 +166,13 @@ async function draw(doc: PDFDocument, f: Fonts, r: ParsedResume, c: ResumeContac
   };
   /** "Left bold-teal-underlined ....... right regular" line. */
   const leftRight = (left: string, leftFont: PDFFont, leftColor: ReturnType<typeof rgb>, rightText: string, rightFont: PDFFont, ul = false, href?: string | null) => {
-    text(left, MX, leftFont, size, leftColor);
-    if (ul) underline(MX, tw(left, leftFont), leftColor);
-    if (href && !overflow) linkAnnot(doc, page, MX, y - 2, tw(left, leftFont), size + 2, href);
-    if (rightText) text(rightText, right - tw(rightText, rightFont), rightFont);
+    const rw = rightText ? tw(rightText, rightFont) : 0;
+    const l = fit(left, leftFont, width - rw - (rightText ? 14 : 0));
+    text(l.s, MX, leftFont, l.sz, leftColor);
+    const lw = tw(l.s, leftFont, l.sz);
+    if (ul) underline(MX, lw, leftColor);
+    if (href && !overflow) linkAnnot(doc, page, MX, y - 2, lw, size + 2, href);
+    if (rightText) text(rightText, right - rw, rightFont);
     down(lh);
   };
 
@@ -162,14 +180,15 @@ async function draw(doc: PDFDocument, f: Fonts, r: ParsedResume, c: ResumeContac
   const lc = MX + width * 0.27;
   const rc = MX + width * 0.77;
   const top = y;
-  centered(c.name, lc, f.b, size + 0.5);
+  const half = width / 2 - 10;
+  centered(c.name, lc, f.b, size + 0.5, BLACK, half);
   down(lh);
   if (c.email) {
-    centered(c.email, lc, f.i);
+    centered(c.email, lc, f.i, size, BLACK, half);
     down(lh);
   }
   if (c.phone) {
-    centered(c.phone, lc, f.r);
+    centered(c.phone, lc, f.r, size, BLACK, half);
     down(lh);
   }
   const leftBottom = y;
@@ -194,11 +213,11 @@ async function draw(doc: PDFDocument, f: Fonts, r: ParsedResume, c: ResumeContac
     down(lh);
   }
   if (c.location) {
-    centered(c.location, rc, f.i);
+    centered(c.location, rc, f.i, size, BLACK, half);
     down(lh);
   }
   if (c.headline) {
-    centered(c.headline, rc, f.r);
+    centered(c.headline, rc, f.r, size, BLACK, half);
     down(lh);
   }
   y = Math.min(y, leftBottom);
@@ -207,21 +226,32 @@ async function draw(doc: PDFDocument, f: Fonts, r: ParsedResume, c: ResumeContac
   const edu = r.education ?? [];
   if (edu.length) {
     section("Education");
-    for (let i = 0; i < edu.length; i += 2) {
-      const row = edu.slice(i, i + 2);
-      const cols = row.length === 1 ? [MX + width / 2] : [MX + width * 0.27, MX + width * 0.75];
+    const degreeOf = (e: (typeof edu)[number]) => [e.degree, e.field].filter(Boolean).join(" in ");
+    const schoolLine = (e: (typeof edu)[number]) => {
+      // The resume's own date may already say "Expected: Dec 2026" — no "Graduation: Expected: Dec 2026".
+      const date = (e.graduation ?? "").replace(/^\s*(expected|anticipated|planned|est\.?|estimated)?\s*(graduation)?\s*(date)?\s*[:\-–]?\s*/i, "").trim();
+      const said = /expected|anticipated|planned|estimated/i.test(e.graduation ?? "");
+      const year = Number(date.match(/(\d{4})/)?.[1] ?? 0);
+      const future = said || year > new Date().getFullYear() || (year === new Date().getFullYear() && !/jan|feb|mar|apr|may/i.test(date));
+      return `${e.school}${date ? ` | ${future ? "Expected Graduation" : "Graduation"}: ${date}` : ""}${e.gpa ? ` | GPA ${e.gpa}` : ""}`;
+    };
+    // Side by side the two columns are ~265 pt wide; longer lines collided in the middle ("letters running into
+    // each other"), so a pair that doesn't fit goes one per row instead.
+    const colW = width / 2 - 12;
+    const pairFits = (row: typeof edu) => row.every((e) => tw(degreeOf(e), f.b) <= colW && tw(schoolLine(e), f.i) <= colW);
+    for (let i = 0; i < edu.length; ) {
+      const row = edu.length - i >= 2 && pairFits(edu.slice(i, i + 2)) ? edu.slice(i, i + 2) : edu.slice(i, i + 1);
+      i += row.length;
+      const cols = row.length === 1 ? [MX + width / 2] : [MX + width * 0.25, MX + width * 0.75];
+      const maxW = row.length === 1 ? width : colW;
       row.forEach((e, k) => {
-        const deg = [e.degree, e.field].filter(Boolean).join(" in ");
-        centered(deg, cols[k], f.b);
-        const w = tw(deg, f.b);
+        const t = fit(degreeOf(e), f.b, maxW);
+        centered(t.s, cols[k], f.b, t.sz, BLACK, maxW);
+        const w = tw(t.s, f.b, t.sz);
         underline(cols[k] - w / 2, w);
       });
       down(lh);
-      row.forEach((e, k) => {
-        const future = e.graduation && /(\d{4})/.test(e.graduation) && Number(e.graduation.match(/(\d{4})/)![1]) > new Date().getFullYear();
-        const line = `${e.school}${e.graduation ? ` | ${future ? "Expected Graduation" : "Graduation"}: ${e.graduation}` : ""}${e.gpa ? ` | GPA ${e.gpa}` : ""}`;
-        centered(line, cols[k], f.i);
-      });
+      row.forEach((e, k) => centered(schoolLine(e), cols[k], f.i, size, BLACK, maxW));
       down(lh * 1.15);
     }
   }
@@ -265,8 +295,14 @@ async function draw(doc: PDFDocument, f: Fonts, r: ParsedResume, c: ResumeContac
       leftRight(p.name, f.b, TEAL, p.org ?? "", f.i, true, p.url ?? null);
       const role = p.role ?? "";
       const tech = p.tech?.length ? `${role ? " " : ""}(${p.tech.join(", ")})` : "";
-      text(role, MX, f.bi);
-      text(tech, MX + tw(role, f.bi), f.i);
+      const dateW = p.date ? tw(p.date, f.r) + 14 : 0;
+      const r1 = fit(role, f.bi, width - dateW);
+      text(r1.s, MX, f.bi, r1.sz);
+      const used = tw(r1.s, f.bi, r1.sz);
+      if (tech) {
+        const t1 = fit(tech, f.i, Math.max(40, width - dateW - used));
+        text(t1.s, MX + used, f.i, t1.sz);
+      }
       if (p.date) text(p.date, right - tw(p.date, f.r), f.r);
       down(lh);
       for (const b of p.bullets) bullet(b);
@@ -284,7 +320,9 @@ async function draw(doc: PDFDocument, f: Fonts, r: ParsedResume, c: ResumeContac
 
 /** One-page PDF in the applicant's layout, or null if it can't fit on one page. */
 export async function renderClassicResume(r: ParsedResume, contact: ResumeContact): Promise<Uint8Array | null> {
-  for (const size of [11, 10.5, 10, 9.5, 9]) {
+  // Stepping down to 9 pt squeezed everything together and looked machine-made; below 10 pt the caller sends
+  // the applicant's original PDF instead.
+  for (const size of [11, 10.5, 10]) {
     const doc = await PDFDocument.create();
     doc.setTitle(`${contact.name} Resume`);
     doc.setAuthor(contact.name);

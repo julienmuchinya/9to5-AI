@@ -493,10 +493,16 @@ async function startApplication(page: Page) {
   const apply = page.locator(`${WD("adventureButton")}, a:has-text('Apply'), button:has-text('Apply')`).first();
   await apply.waitFor({ state: "visible", timeout: 10000 }).catch(() => {});
   if (await apply.isVisible().catch(() => false)) await apply.click().catch(() => {});
-  // The "Apply Manually / Autofill with Resume" pop-up can take a few seconds.
+  // The "Autofill with Resume / Apply Manually / Use My Last Application" pop-up can take a few seconds.
+  // "Use My Last Application" (shown once you've applied to that company before) pre-fills everything from the last
+  // application there — contact details, work history, answers — so the agent only fills what's left or different.
+  const last = page.locator(`${WD("useMyLastApplication")}, a:has-text('Use My Last Application'), button:has-text('Use My Last Application')`).first();
   const manual = page.locator(`${WD("applyManually")}, a:has-text('Apply Manually')`).first();
-  await manual.waitFor({ state: "visible", timeout: 8000 }).catch(() => {});
-  if (await manual.isVisible().catch(() => false)) await manual.click().catch(() => {});
+  await page.locator(`${WD("useMyLastApplication")}, ${WD("applyManually")}, a:has-text('Apply Manually'), a:has-text('Use My Last Application')`).first().waitFor({ state: "visible", timeout: 8000 }).catch(() => {});
+  if (await last.isVisible().catch(() => false)) {
+    await last.click().catch(() => {});
+    if (process.env.APPLY_DEBUG_DIR) console.log("[9to5]   wd: using my last application");
+  } else if (await manual.isVisible().catch(() => false)) await manual.click().catch(() => {});
   await page
     .locator(`${AUTH_FORM}, ${NEXT}, ${WD("progressBarActiveStep")}, ${WD("signInLink")}`)
     .first()

@@ -33,7 +33,8 @@ const num = (v: string | undefined, d: number) => (v && !Number.isNaN(Number(v))
 
 const groqModels = (): Model[] => {
   const list: Model[] = [
-    { id: "openai/gpt-oss-120b", extra: { reasoning_effort: "low" } },
+    // Strongest free model; "medium" reasoning for better answers (the per-minute token budget is waited out).
+    { id: "openai/gpt-oss-120b", extra: { reasoning_effort: "medium" } },
     { id: "qwen/qwen3.8-27b", extra: { reasoning_effort: "none" } },
     { id: "openai/gpt-oss-20b", extra: { reasoning_effort: "low" } },
   ];

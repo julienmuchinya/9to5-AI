@@ -8,7 +8,9 @@ const API = "https://generativelanguage.googleapis.com/v1beta/models";
  * now returns 404 for new keys) and busy models return 503, so we fall through the list
  * and remember whichever one answered.
  */
-const MODEL_CHAIN = ["gemini-3.5-flash", "gemini-flash-latest", "gemini-3.8-flash", "gemini-3.7-flash", "gemini-flash-lite-latest", "gemini-3.5-flash-lite"];
+// Newest Flash first (better answers, same free tier); each model has its own daily free quota, so falling through
+// the list also adds capacity. Pro models are left out: their free quota is tiny.
+const MODEL_CHAIN = ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-flash-latest", "gemini-3.5-flash-lite", "gemini-flash-lite-latest"];
 const deadModels = new Set<string>();
 /** Models whose free daily quota ran out in this process (429). */
 const exhausted = new Set<string>();

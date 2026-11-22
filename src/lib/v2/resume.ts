@@ -1,6 +1,8 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { PDFDocument, StandardFonts, rgb, type PDFFont } from "pdf-lib";
 import { geminiJson } from "./gemini";
+import { fallbackConfigured } from "./fallback-ai";
+import { pdfText } from "./pdf-text";
 
 export interface ParsedResume {
   name?: string;
@@ -37,14 +39,26 @@ target_roles[] (3-5 job titles this person is best suited for, in whatever field
 In bullets, wrap every phrase that is bold on the resume in **double asterisks**.
 Copy text faithfully. Never invent or embellish anything. Use null for missing fields.`;
 
-/** Read a resume PDF with Gemini (free tier). */
+/**
+ * Read a resume PDF. Gemini reads the PDF itself (it sees which phrases are bold). When Gemini is out of quota or
+ * down, the PDF's text is pulled out here (no AI) and the backup AI (Groq) parses it — uploading a resume never
+ * fails just because Gemini's daily quota is used up.
+ */
 export async function parseResumePdf(db: SupabaseClient, pdf: Buffer, userId: string): Promise<ParsedResume> {
-  return geminiJson<ParsedResume>(
-    db,
-    PARSE_PROMPT,
-    [{ inlineData: { mimeType: "application/pdf", data: pdf.toString("base64") } }],
-    userId
-  );
+  try {
+    return await geminiJson<ParsedResume>(db, PARSE_PROMPT, [{ inlineData: { mimeType: "application/pdf", data: pdf.toString("base64") } }], userId);
+  } catch (e) {
+    if (!fallbackConfigured()) throw e;
+    const text = await pdfText(pdf).catch(() => "");
+    if (text.replace(/\s+/g, " ").length < 200) throw e; // scanned image or unreadable: nothing for the backup to read
+    return geminiJson<ParsedResume>(
+      db,
+      `${PARSE_PROMPT}\n(Bold can't be seen in plain text: leave out the ** marks.)\n\nRESUME TEXT:\n${text.slice(0, 12000)}`,
+      [],
+      userId,
+      { prefer: "fallback-only", maxTokens: 4000 }
+    );
+  }
 }
 
 const plain = (s: string) => s.replace(/\*\*/g, "");

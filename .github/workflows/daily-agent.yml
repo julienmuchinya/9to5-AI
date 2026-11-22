@@ -81,7 +81,7 @@ jobs:
           # "Connect with Google" inboxes: refreshes Gmail access for reply tracking and emailed codes.
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
-          GEMINI_MODEL: gemini-3.5-flash
+          GEMINI_MODEL: gemini-3.8-flash
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPO_PUBLIC: ${{ steps.vis.outputs.public }}
           DISCOVER: ${{ github.event.inputs.discover || 'true' }}

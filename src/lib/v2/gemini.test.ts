@@ -17,14 +17,14 @@ describe("geminiGenerate model fallback", () => {
       const model = url.split("/models/")[1].split(":")[0];
       seen.push(model);
       if (model === "retired-model") return new Response("gone", { status: 404 });
-      if (model === "gemini-3.5-flash") return new Response("busy", { status: 503 });
+      if (model === "gemini-3.8-flash") return new Response("busy", { status: 503 });
       return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "thinking", thought: true }, { text: "hello" }] } }] }), { status: 200 });
     });
     const { geminiGenerate, geminiModels } = await import("./gemini");
     const out = await geminiGenerate({} as never, { contents: [{ role: "user", parts: [{ text: "hi" }] }] });
     expect(out.text).toBe("hello"); // reasoning parts are dropped
-    expect(seen.slice(0, 3)).toEqual(["retired-model", "gemini-3.5-flash", "gemini-flash-latest"]);
-    expect(geminiModels()[0]).toBe("gemini-flash-latest");
+    expect(seen.slice(0, 3)).toEqual(["retired-model", "gemini-3.8-flash", "gemini-3.7-flash"]);
+    expect(geminiModels()[0]).toBe("gemini-3.7-flash");
     expect(geminiModels()).not.toContain("retired-model");
   });
 
