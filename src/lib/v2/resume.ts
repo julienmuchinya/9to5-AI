@@ -80,14 +80,18 @@ function relevance(text: string, jobWords: Set<string>): number {
 }
 
 /** Reorders (never rewrites) the real resume so the most relevant content comes first. */
-export function tailorResume(r: ParsedResume, jobText: string): ParsedResume {
+/**
+ * Free tailoring: the job's most relevant skills first. With keepLayout (what the agent uses), bullets and
+ * projects stay exactly where the applicant put them — only skill order changes.
+ */
+export function tailorResume(r: ParsedResume, jobText: string, opts: { keepLayout?: boolean } = {}): ParsedResume {
   const jw = words(jobText);
   const byRel = <T,>(arr: T[], text: (t: T) => string) =>
     [...arr].map((x, i) => ({ x, i, s: relevance(text(x), jw) })).sort((a, b) => b.s - a.s || a.i - b.i).map((o) => o.x);
+  const skillsOnly = { ...r, skills: byRel(r.skills ?? [], (s) => s), skill_groups: r.skill_groups?.map((g) => ({ ...g, items: byRel(g.items, (s) => s) })) };
+  if (opts.keepLayout) return skillsOnly;
   return {
-    ...r,
-    skills: byRel(r.skills ?? [], (s) => s),
-    skill_groups: r.skill_groups?.map((g) => ({ ...g, items: byRel(g.items, (s) => s) })),
+    ...skillsOnly,
     experience: (r.experience ?? []).map((e) => ({ ...e, bullets: byRel(e.bullets, (b) => b) })),
     projects: byRel(r.projects ?? [], (p) => `${p.name} ${(p.tech ?? []).join(" ")} ${p.bullets.join(" ")}`).map((p) => ({
       ...p,

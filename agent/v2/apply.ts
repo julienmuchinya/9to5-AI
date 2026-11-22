@@ -3,6 +3,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { geminiJson, FreeTierLimitError } from "../../src/lib/v2/gemini";
 import { applyWorkday } from "./workday";
 import { answerPrompt, salaryFacts } from "./answer-ai";
+import { scrubFacts, sensitiveField, suspiciousPassword, type SensitiveHit } from "../../src/lib/v2/sensitive";
 import { answerFromProfile, autoFollowUpAnswer, commonSenseAnswer, findSimilarAnswer, isFollowUp, memoryKey, pickOption, questionContext, questionFor, type AppAnswers, type PendingQuestion } from "../../src/lib/v2/app-questions";
 
 export interface Applicant {
@@ -78,6 +79,8 @@ export interface ApplyResult {
   pending?: PendingQuestion[];
   /** A portal account was created (or confirmed working) during this attempt. */
   accountCreated?: boolean;
+  /** The form asked for something no real employer asks on an application (SSN, bank details, an account password): likely a fake posting. */
+  suspicious?: string;
 }
 
 export interface Field {
@@ -128,7 +131,9 @@ export async function collectFields(page: Page): Promise<Field[]> {
   return page.evaluate(() => {
     const out: Field[] = [];
     const seenGroup = new Set<string>();
-    const clean = (s: string | null | undefined) => (s ?? "").replace(/\s+/g, " ").trim().slice(0, 300);
+    // 700 characters: long legal questions ("Are you a current employee of the U.S. Government… This includes…")
+    // were cut off mid-sentence at 300 and reached the AI and the Needs-you page half-written.
+    const clean = (s: string | null | undefined) => (s ?? "").replace(/\s+/g, " ").trim().slice(0, 700);
     /** Visible text of a label, without tooltips, popovers or screen-reader-only helper text. */
     const textOf = (n: Element | null | undefined): string => {
       if (!n) return "";
@@ -496,18 +501,41 @@ export function clearanceAnswer(f: Field, a: Applicant): string | null {
   return null;
 }
 
+/** Employers on the resume that are a government / military / public agency. */
+const GOV_EMPLOYER = /\b(government|federal|u\.?s\.? (army|navy|air force|marine|coast guard|department|dept)|department of|dept\.? of|state of [a-z]+|county|city of|municipal|public schools?|army|navy|air force|marine corps|national guard|congress|senate|house of representatives|nasa|usps|postal service|veterans affairs)\b/i;
+
+/**
+ * "Are you / were you an employee of the U.S. Government (incl. military, state or local government)…?" —
+ * answered from the resume: No unless one of the applicant's employers is a government body.
+ */
+export function governmentAnswer(f: Field, a: Applicant): string | null {
+  const l = f.label.toLowerCase();
+  const asks =
+    /(employee|employed|work(ed|ing)? for|served|official|officer).{0,60}(u\.?s\.? government|federal government|government agency|state (or|and) local government|local government|any government|the government|military|armed forces|congress)/.test(l) ||
+    /(current|former|previous|past|retired) (u\.?s\.? |federal |state |local )?(government|federal|military) (employee|official|personnel)/.test(l);
+  if (!asks || /(spouse|relative|family|household|friend|parent|sibling)/.test(l)) return null;
+  if (f.kind === "file") return null;
+  const served = (a.experience ?? []).some((e) => GOV_EMPLOYER.test(`${e.company} ${e.title}`));
+  if (served) return null; // the AI decides with the dates (current vs. past)
+  return f.kind === "text" || f.kind === "textarea" ? "No" : yesNo(f, false);
+}
+
 /** Answers we know without asking the AI (free). */
 export function knownValue(f: Field, a: Applicant): string | null {
+  // SSN, bank / card details, ID numbers, date of birth…: never typed by the agent, never from memory.
+  if (sensitiveField(f.label, f.kind)) return SKIP;
   const fromResume = sectionValue(f, a);
   if (fromResume !== undefined) return fromResume;
   const l = f.label.toLowerCase();
   const clearance = clearanceAnswer(f, a);
   if (clearance) return clearance;
+  const gov = governmentAnswer(f, a);
+  if (gov) return gov;
   const skillPick = skillOptions(f, a);
   if (skillPick) return skillPick;
   // A required cover letter gets one written for this job (opts.coverLetter); optional ones are left empty.
   if (f.kind === "file") return /cover/.test(l) ? (f.required ? "__COVER__" : null) : /resume|cv|attach/.test(l) || f.required ? "__RESUME__" : null;
-  if (/password/.test(l)) return a.portal?.password ?? null;
+  if (/password/.test(l)) return a.portal?.password ?? null; // only reached on a career portal (screenSensitive stops a password box anywhere else)
   // "By entering today's date I acknowledge…" / signature date: today's date.
   if (/today.?s date|enter (the|today.?s|current) date|date of (signature|acknowledg)|signature date|^date\b|\bdate signed\b/.test(l) && f.kind !== "checkbox" && f.kind !== "radio") {
     const d = new Date();
@@ -563,7 +591,9 @@ export function knownValue(f: Field, a: Applicant): string | null {
     const c = a.answers?.country || (a.state ? "United States" : "");
     if (c) return f.options.length ? (pickOption(c, f.options) ?? f.options.find((o) => /^(united states|usa|us)\b/i.test(o)) ?? null) : c;
   }
-  if (/zip|postal/.test(l) && a.answers?.zip) return a.answers.zip;
+  // Only a short "ZIP / Postal code" box — a long question that mentions the U.S. Postal Service is not one
+  // (the ZIP code went into "Are you a current employee of the U.S. Government…?").
+  if (/\b(zip|postal)( ?code)?\b/.test(l) && l.length < 40 && (f.kind === "text" || f.kind === "combobox") && a.answers?.zip) return a.answers.zip;
   // The school name only where a school is asked for — not "Have you ever worked at The American College of…?".
   if (
     /(school|university|college|institution)/.test(l) &&
@@ -920,7 +950,10 @@ function optionsAreComplete(f: Field): boolean {
   if (!f.options.length) return false;
   if (f.kind === "select" || f.kind === "radio" || f.kind === "checkboxes") return true;
   // Comboboxes: a short list is the full list; a long one (schools, cities) is searched by typing.
-  return f.kind === "combobox" && f.options.length < 40 && !/school|university|college|city|location|country|state|discipline|major|field of study/i.test(f.label);
+  // (Only short labels: "Are you an employee of any state or local government?" is a Yes/No list, not a state picker.)
+  if (f.kind !== "combobox" || f.options.length >= 40) return false;
+  if (f.options.length <= 4 && f.options.every((o) => /^(yes|no|n\/a|prefer not|decline|i don.?t know|not sure)/i.test(o.trim()))) return true;
+  return !(f.label.length < 60 && /school|university|college|city|location|country|state|discipline|major|field of study/i.test(f.label));
 }
 
 /**
@@ -955,6 +988,27 @@ export function cleanMemory(memory: Record<string, string>): Record<string, stri
   }
   return out;
 }
+
+/**
+ * Security screen for a form, before anything is typed into it. A box asking for an SSN, bank or card
+ * details, an ID number or the password to one of your accounts (outside a real career portal's sign-in)
+ * means a fake posting: the caller stops without filling or submitting anything. A required date of birth is
+ * legitimate but still left to the applicant.
+ */
+export function screenSensitive(fields: Field[], url: string): { scam: string | null; personal: Field[] } {
+  for (const f of fields) {
+    const hit: SensitiveHit | null = sensitiveField(f.label, f.kind);
+    if (hit?.level === "scam") return { scam: `asked for ${hit.what} ("${f.label.slice(0, 80)}")`, personal: [] };
+    if (suspiciousPassword(f.label, f.kind, url)) return { scam: `asked for a password ("${f.label.slice(0, 80)}") on a plain application form`, personal: [] };
+  }
+  return { scam: null, personal: fields.filter((f) => f.required && !f.filled && sensitiveField(f.label, f.kind)?.level === "private") };
+}
+
+const scamResult = (why: string): ApplyResult => ({
+  status: "closed",
+  detail: `Stopped for your safety: this form ${why}. Real employers don't ask for that on an application — nothing was filled in or sent, and the posting is marked as suspicious.`,
+  suspicious: why,
+});
 
 /**
  * Answers for a set of form fields: profile/known values first (free), then — only if a required
@@ -1004,12 +1058,13 @@ export async function answerFields(
         education: (opts.applicant.education ?? []).map((e) => `${e.degree ?? ""} in ${e.field ?? "?"}, ${e.school ?? "?"} (graduation ${e.graduation ?? "?"})`),
         skills: (opts.applicant.skills ?? []).slice(0, 60),
         links: { linkedin: opts.applicant.linkedin_url, github: opts.applicant.github_url, website: opts.applicant.website_url },
-        saved_answers: opts.applicant.answers ?? {},
+        // Never anything secret in a prompt (an SSN or card number typed into a saved answer by mistake).
+        saved_answers: scrubFacts(opts.applicant.answers ?? {}),
         // Trimmed so the whole prompt fits Groq's 8,000 tokens/minute (and costs Gemini less).
         resume: opts.applicant.resume_text.replace(/\s+/g, " ").slice(0, 4500),
         job_description: (opts.jobDescription ?? "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").slice(0, 2500),
       };
-      try {
+      const ask = async (list: Field[], strict: boolean) => {
         aiCalls++;
         const ai = await geminiJson<Record<string, string | null>>(
           db,
@@ -1018,20 +1073,33 @@ export async function answerFields(
             jobTitle: opts.jobTitle,
             company: opts.company,
             facts,
-            questions: needAi.map((f) => ({ id: f.id, question: f.label, type: f.kind, options: f.options.slice(0, 40), required: f.required })),
+            strict,
+            questions: list.map((f) => ({ id: f.id, question: f.label, type: f.kind, options: f.options.slice(0, 40), required: f.required })),
           }),
           [],
           opts.userId,
           // Groq first (≈2,500 free requests/day vs Gemini's ≈210); Gemini only if Groq can't.
           { prefer: "fallback", maxTokens: 1800 }
         );
-        for (const f of needAi) {
-          const v = ai[f.id];
-          if (v != null && String(v).trim() && !PLACEHOLDER.test(String(v))) {
-            answers[f.id] = String(v);
-            if (f.kind !== "checkbox" && worthRemembering(f.label, String(v), opts)) learned.push({ label: f.label, answer: String(v) });
+        for (const f of list) {
+          let v = ai[f.id] == null ? "" : String(ai[f.id]).trim();
+          // A choice question needs one of its own options — anything else (a ZIP code, "Select one") would be left empty.
+          if (v && f.options.length && optionsAreComplete(f) && f.kind !== "checkboxes") v = pickOption(v, f.options) ?? "";
+          if (v && !PLACEHOLDER.test(v)) {
+            answers[f.id] = v;
+            if (f.kind !== "checkbox" && worthRemembering(f.label, v, opts)) learned.push({ label: f.label, answer: v });
           }
         }
+      };
+      try {
+        await ask(needAi, false);
+        // Required questions the AI still left blank get one more, stricter try (common sense, no blanks)
+        // before anything is handed to the user.
+        const still = required.filter((f) => !answers[f.id]);
+        if (still.length)
+          await ask(still, true).catch((e) => {
+            if (e instanceof FreeTierLimitError) throw e; // anything else: keep the first pass's answers
+          });
       } catch (e) {
         if (e instanceof FreeTierLimitError) return { answers, learned, aiCalls, quota: true };
         throw e;
@@ -1119,6 +1187,15 @@ async function fillAndSubmit(
     if (!fields.some((f) => f.kind === "file") && !fields.some((f) => /e-?mail/i.test(f.label)))
       return { status: "needs_user", detail: "Couldn't find the application form" };
 
+    // Security first: a form that wants your SSN / bank details / an account password is not filled at all.
+    const screen = screenSensitive(fields, `${opts.url} ${page.url()}`);
+    if (screen.scam) return scamResult(screen.scam);
+    if (screen.personal.length)
+      return {
+        status: "needs_user",
+        detail: `This form requires ${screen.personal.map((f) => sensitiveField(f.label, f.kind)?.what).filter(Boolean).join(", ")} — the agent never types personal details like that. Open it and fill that part in yourself if you trust the employer.`,
+      };
+
     const ans = await answerFields(db, fields, opts);
     if (ans.quota) return { status: "needs_user", detail: "AI quota used up today — finish this one yourself or it retries tomorrow", answers: labelled(fields, ans.answers), aiCalls: ans.aiCalls };
     const { answers, learned } = ans;
@@ -1178,6 +1255,8 @@ async function fillAndSubmit(
       const seen = new Set(fields.map((f) => `${f.kind}|${f.label}`));
       const extra = (await collectFields(page)).filter((f) => !seen.has(`${f.kind}|${f.label}`) && !f.filled && f.kind !== "file");
       if (!extra.length) break;
+      const later = screenSensitive(extra, `${opts.url} ${page.url()}`);
+      if (later.scam) return scamResult(later.scam);
       await readComboboxOptions(page, extra);
       const more = await answerFields(db, extra, opts);
       aiCalls += more.aiCalls;
@@ -1229,10 +1308,18 @@ async function fillAndSubmit(
     if (await captchaVisible(page)) return { status: "needs_user", detail: "Site shows a CAPTCHA — please submit this one yourself", answers: labelled(fields, answers), learned, usedPortalLogin, aiCalls };
     if (opts.dryRun) return { status: "needs_user", detail: "Dry run: form filled but not submitted", answers: labelled(fields, answers), learned, usedPortalLogin, aiCalls };
 
-    const submit = page.locator("button[type=submit], input[type=submit], button:has-text('Submit application'), button:has-text('Submit')").last();
+    // The visible Submit button (forms keep hidden copies, and .last() sometimes picked one: "locator.click: Timeout").
+    const submits = page.locator("button[type=submit], input[type=submit], button:has-text('Submit application'), button:has-text('Submit')");
+    const visibleSubmits = page.locator("button[type=submit]:visible, input[type=submit]:visible, button:visible:has-text('Submit application'), button:visible:has-text('Submit')");
+    const submit = (await visibleSubmits.count()) ? visibleSubmits.last() : submits.last();
     if ((await submit.count()) === 0) return { status: "needs_user", detail: "Couldn't find the Submit button", answers: labelled(fields, answers), learned, usedPortalLogin, aiCalls };
     const submittedAt = new Date();
-    await submit.click();
+    await submit.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
+    // Covered by a sticky footer / chat widget: click it anyway, then as a last resort fire the click event.
+    await submit
+      .click({ timeout: 8000 })
+      .catch(() => submit.click({ force: true, timeout: 4000 }))
+      .catch(() => submit.dispatchEvent("click"));
     await page.waitForTimeout(6000);
 
     // Some sites (Greenhouse especially) email a security code after Submit and wait for it.

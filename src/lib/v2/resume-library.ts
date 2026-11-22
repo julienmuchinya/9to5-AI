@@ -16,7 +16,14 @@ export interface ResumeEntry {
 }
 export interface ResumeLibrary {
   resumes: ResumeEntry[];
+  /** The resume the agent prefers when several fit a job about equally (and for jobs with no description). */
+  default_id?: string;
 }
+
+/** The default resume's id: the one picked on the Resumes page, else the main (profile) resume, else the first. */
+export const defaultResumeId = (lib: ResumeLibrary): string | undefined =>
+  (lib.default_id && lib.resumes.some((r) => r.id === lib.default_id) ? lib.default_id : undefined) ??
+  (lib.resumes.some((r) => r.id === "main") ? "main" : lib.resumes[0]?.id);
 
 export const libraryPath = (userId: string) => `${userId}/library.json`;
 export const resumeFilePath = (userId: string, id: string) => (id === "main" ? `${userId}/resume.pdf` : `${userId}/resumes/${id}.pdf`);
@@ -38,16 +45,28 @@ export async function loadLibrary(
   }
   // The profile resume is the source of truth for "main".
   const others = lib.resumes.filter((r) => r.id !== "main");
+  // Resume PDFs uploaded while the list couldn't be saved (the bucket refused library.json) still show up,
+  // as "not read yet" cards the user can read with one click — instead of being silently ignored.
+  const { data: files } = await storage.storage.from("resumes").list(`${userId}/resumes`, { limit: 100 });
+  for (const f of files ?? []) {
+    const id = f.name.replace(/\.pdf$/i, "");
+    if (!/^[a-z0-9]{1,12}$/.test(id) || id === "main" || others.some((r) => r.id === id)) continue;
+    others.push({ id, label: "Uploaded resume", path: `${userId}/resumes/${f.name}`, parsed: null, uploaded_at: f.created_at ?? "" });
+  }
   const mainLabel = lib.resumes.find((r) => r.id === "main")?.label ?? "Main resume";
   const main: ResumeEntry[] = profile.resume_path
     ? [{ id: "main", label: mainLabel, path: profile.resume_path, parsed: profile.resume_parsed ?? null, uploaded_at: profile.resume_updated_at ?? "" }]
     : [];
-  return { resumes: [...main, ...others] };
+  return { resumes: [...main, ...others], default_id: lib.default_id };
 }
 
 export async function saveLibrary(storage: SupabaseClient, userId: string, lib: ResumeLibrary) {
-  const body = JSON.stringify({ resumes: lib.resumes.map((r) => (r.id === "main" ? { ...r, parsed: null } : r)) });
-  const { error } = await storage.storage.from("resumes").upload(libraryPath(userId), new Blob([body], { type: "application/json" }), { upsert: true, contentType: "application/json" });
+  const body = JSON.stringify({ resumes: lib.resumes.map((r) => (r.id === "main" ? { ...r, parsed: null } : r)), default_id: lib.default_id });
+  const put = (type: string) => storage.storage.from("resumes").upload(libraryPath(userId), new Blob([body], { type }), { upsert: true, contentType: type });
+  let { error } = await put("application/json");
+  // The "resumes" bucket only accepts PDFs, which refused library.json — so extra resumes were never saved.
+  // Store the same JSON under the PDF type instead (it's only ever read back by this code). No setup change needed.
+  if (error && /mime|content.?type/i.test(error.message)) ({ error } = await put("application/pdf"));
   if (error) throw new Error(`Couldn't save the resume list: ${error.message}`);
 }
 
@@ -92,11 +111,46 @@ export function jobSkillCoverage(resume: ParsedResume | null, jobText: string): 
   return { coverage: (asked.length - missing.length) / asked.length, missing, asked };
 }
 
+const TITLE_FILLER = /^(and|the|for|with|senior|sr|junior|jr|intern|internship|new|grad|graduate|level|entry|associate|ii|iii|iv|lead|staff|principal|remote|hybrid|onsite|part|time|full|temporary|contract|area|preferred|us|usa)$/;
+
+/**
+ * How well one resume fits one job, 0-100 — the number the agent shows and decides on.
+ *   45% the technologies / tools the posting names that the resume has (all of them when it names none),
+ *   35% how much of the posting's wording the resume covers (30% overlap already counts as full marks),
+ *   20% the job title's words found on the resume (its titles, skills, target roles).
+ * 60 or more: the resume goes out as the original PDF. Below 60 on every resume: the best one is tailored.
+ */
+export function resumeMatchScore(resume: ParsedResume | null, jobText: string): number {
+  if (!resume) return 0;
+  const [titleLine = ""] = jobText.split("\n");
+  const cov = jobSkillCoverage(resume, jobText).coverage;
+  const kw = Math.min(1, resumeJobScore(resume, jobText) / 0.3);
+  const mine = `${resumeToText(resume)} ${(resume.target_roles ?? []).join(" ")} ${(resume.skills ?? []).join(" ")}`.toLowerCase();
+  const words = (titleLine.toLowerCase().match(/[a-z][a-z+#.]{1,}/g) ?? []).filter((w) => w.length > 2 && !TITLE_FILLER.test(w));
+  const title = words.length ? words.filter((w) => mine.includes(w)).length / words.length : 0.5;
+  return Math.round(100 * (0.45 * cov + 0.35 * kw + 0.2 * title));
+}
+
+/** Below this match score on EVERY resume, the best one is tailored to the job (env RESUME_TAILOR_BELOW). */
+export const TAILOR_BELOW = Number(process.env.RESUME_TAILOR_BELOW ?? "60") || 60;
+
+/** Every usable resume scored for this job, best first. The default resume wins near-ties (within 3 points). */
+export function rankResumes(lib: ResumeLibrary, jobText: string): { entry: ResumeEntry; score: number }[] {
+  const usable = lib.resumes.filter((r) => r.parsed?.experience?.length || r.parsed?.skills?.length);
+  const def = defaultResumeId(lib);
+  if (!usable.length) {
+    const fallback = lib.resumes.find((r) => r.id === def) ?? lib.resumes[0];
+    return fallback ? [{ entry: fallback, score: 0 }] : [];
+  }
+  const bonus = (r: ResumeEntry) => (r.id === def ? 3 : 0);
+  return usable
+    .map((entry) => ({ entry, score: resumeMatchScore(entry.parsed, jobText) }))
+    .sort((a, b) => b.score + bonus(b.entry) - (a.score + bonus(a.entry)));
+}
+
 /** The resume (of several) that best fits this job. */
 export function pickResume(lib: ResumeLibrary, jobText: string): ResumeEntry | null {
-  const usable = lib.resumes.filter((r) => r.parsed?.experience?.length || r.parsed?.skills?.length);
-  if (!usable.length) return lib.resumes[0] ?? null;
-  return usable.map((r) => ({ r, s: resumeJobScore(r.parsed, jobText) })).sort((a, b) => b.s - a.s)[0].r;
+  return rankResumes(lib, jobText)[0]?.entry ?? null;
 }
 
 /** Bold the words the job asks for, on bullets that carry no bold of their own. Free. */
@@ -124,28 +178,69 @@ const numbers = (s: string) => new Set(s.match(/\d+(?:[.,]\d+)?%?\+?/g) ?? []);
 export async function aiTailorResume(db: SupabaseClient, r: ParsedResume, job: { title: string; company: string; description: string }, userId?: string): Promise<ParsedResume> {
   const exp = r.experience ?? [];
   const proj = r.projects ?? [];
-  const prompt = `You tailor a resume to one job without lying. Job: "${job.title}" at ${job.company}.
+  // Technologies the posting names that the resume lacks: the only new skills the AI may add (at most 4).
+  const missing = jobSkillCoverage(r, `${job.title}\n${job.description}`).missing;
+  const prompt = `You tailor a resume to one job. Only the WORDS change: the layout, sections, jobs, titles, dates and bullet count stay exactly the same. Job: "${job.title}" at ${job.company}.
 JOB DESCRIPTION: ${job.description.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").slice(0, 2500)}
 RESUME BULLETS (JSON): ${JSON.stringify({ experience: exp.map((e) => ({ company: e.company, title: e.title, bullets: e.bullets })), projects: proj.map((p) => ({ name: p.name, bullets: p.bullets })) })}
 SKILLS: ${JSON.stringify(r.skill_groups?.length ? r.skill_groups : r.skills ?? [])}
+JOB TECHNOLOGIES NOT ON THE RESUME YET: ${JSON.stringify(missing.slice(0, 12))}
 RULES:
-- Rewrite each bullet so it mirrors the job's wording and priorities where the original work honestly supports it. Keep the same facts, tools and numbers; never add a metric, tool, employer, title or achievement that isn't in that bullet or elsewhere on the resume.
-- Same number of bullets per job/project, same order of jobs. Keep each bullet about the same length (the resume must stay one page).
+- Bullet i of a job is ALWAYS about the same work as original bullet i — never move content between bullets, never merge or split them.
+- XYZ style, written naturally: strong past-tense verb + the result / goal achieved (X) + how it was measured (Y) + "by" + what was done, naming the technology used (Z). Example: "Cut report build time 40% by automating SQL pipelines in Python and Airflow". Do NOT write the literal words "Accomplished" or "as measured by".
+- If an original bullet already reads like that, keep it almost word for word and only swap in the job's own terms for the same thing (e.g. "LLM" -> "generative AI" when the job says that).
+- Numbers: only the numbers already in that bullet. If it has none, name the concrete outcome in plain words; never invent a metric, a rate or a measurement.
+- Technologies: only those already in that bullet or in the same job's other bullets. Never attach a tool to work that didn't use it. Never add an employer, title, degree or achievement.
+- Same number of bullets per job/project, same order. Keep each bullet about the same length as the original (the resume must stay one page).
 - Mark the 1-3 most job-relevant phrases in each bullet with **double asterisks**.
-- Skills: reorder so the job's most-wanted ones come first; keep the same groups.
+- Skills: reorder so the job's most-wanted ones come first; keep the same groups. You MAY add up to 4 items from JOB TECHNOLOGIES NOT ON THE RESUME YET, only ones closely related to what the resume already shows (e.g. PostgreSQL next to MySQL, Azure next to AWS), into the group they belong to.
 Return JSON: {"experience":[{"bullets":[...]}...], "projects":[{"bullets":[...]}...], "skills": <same shape as SKILLS>}`;
   const out = await geminiJson<{ experience?: { bullets?: string[] }[]; projects?: { bullets?: string[] }[]; skills?: unknown }>(db, prompt, [], userId, { prefer: "fallback-only", maxTokens: 1500 });
   const allText = `${resumeToText(r)} ${(r.skills ?? []).join(" ")} ${(r.skill_groups ?? []).flatMap((g) => g.items).join(" ")}`.toLowerCase();
-  const allNums = numbers(allText);
-  const ok = (orig: string, next: unknown): string => {
-    if (typeof next !== "string" || !next.trim()) return orig;
-    const clean = next.trim();
-    if (clean.replace(/\*\*/g, "").length > orig.replace(/\*\*/g, "").length * 1.25 + 20) return orig; // would push to a 2nd page
-    for (const n of numbers(clean)) if (!allNums.has(n)) return orig; // invented metric
-    return clean;
+  const techIn = (t: string) => new Set(tokens(t.replace(/\*\*/g, "")).map((w) => w.replace(/[.,;:]+$/, "")).filter((w) => TECH_SET.has(w)));
+  const words = (t: string) => new Set(tokens(t.replace(/\*\*/g, "")).filter((w) => w.length > 3 && !/^\d/.test(w)));
+  /** Checked in code, not just asked of the AI: a rewrite that fails any check keeps the original bullet. */
+  const ok = (orig: string, next: unknown, sameEntry: string): string => {
+    const r = check(orig, next, sameEntry);
+    if (process.env.TAILOR_DEBUG && r.why) console.log(`[tailor] kept original (${r.why}): ${String(next).slice(0, 140)}`);
+    return r.text;
   };
-  const mergeBullets = (orig: string[], next?: string[]) => (Array.isArray(next) && next.length === orig.length ? orig.map((b, i) => ok(b, next[i])) : orig);
-  const known = (s: string) => allText.includes(s.toLowerCase().replace(/\*\*/g, ""));
+  const check = (orig: string, next: unknown, sameEntry: string): { text: string; why?: string } => {
+    const keep = (why: string) => ({ text: orig, why });
+    if (typeof next !== "string" || !next.trim()) return keep("empty");
+    const clean = next.trim();
+    const plain = clean.replace(/\*\*/g, "");
+    if (plain.length > orig.replace(/\*\*/g, "").length * 1.25 + 20) return keep("too long for one page");
+    if (/^accomplished\b|as measured by/i.test(plain)) return keep("template wording");
+    const own = numbers(orig);
+    for (const n of numbers(clean)) if (!own.has(n)) return keep(`new number ${n}`);
+    const entryTech = techIn(sameEntry);
+    for (const t of techIn(clean)) if (!entryTech.has(t)) return keep(`tool not used in this job: ${t}`);
+    // Still about the same work: at least 40% of the original's words survive (the AI moved bullets around).
+    const o = words(orig);
+    const n = words(clean);
+    if (o.size >= 4 && [...o].filter((w) => n.has(w)).length / o.size < 0.4) return keep("different work");
+    return { text: clean };
+  };
+  const mergeBullets = (orig: string[], next: string[] | undefined, extra = "") => {
+    if (!Array.isArray(next) || next.length !== orig.length) return orig;
+    const sameEntry = `${orig.join(" ")} ${extra}`;
+    return orig.map((b, i) => ok(b, next[i], sameEntry));
+  };
+  // A skill may stay if the resume already mentions it, or if it is one of the job's named, concrete
+  // technologies (max 4 added) — not vague ones like "security" or "agile".
+  const VAGUE = /^(security|observability|api|apis|sdlc|agile|scrum|devops|sre|oop|tdd|ai|ml|llm|llms|nlp|rag|machine-learning|deep-learning|computer-vision|microservices|rest|ci\/cd|git|linux|unix|excel)$/;
+  const allowedNew = new Set(missing.map((m) => m.toLowerCase()).filter((m) => !VAGUE.test(m)));
+  let added = 0;
+  const known = (s: string) => {
+    const k = s.toLowerCase().replace(/\*\*/g, "").trim();
+    if (allText.includes(k)) return true;
+    if (allowedNew.has(k) && added < 4) {
+      added++;
+      return true;
+    }
+    return false;
+  };
   let skill_groups = r.skill_groups;
   let skills = r.skills;
   if (r.skill_groups?.length && Array.isArray(out.skills)) {
@@ -163,7 +258,7 @@ Return JSON: {"experience":[{"bullets":[...]}...], "projects":[{"bullets":[...]}
     ...r,
     skills,
     skill_groups,
-    experience: exp.map((e, i) => ({ ...e, bullets: mergeBullets(e.bullets, out.experience?.[i]?.bullets) })),
-    projects: proj.map((p, i) => ({ ...p, bullets: mergeBullets(p.bullets, out.projects?.[i]?.bullets) })),
+    experience: exp.map((e, i) => ({ ...e, bullets: mergeBullets(e.bullets, out.experience?.[i]?.bullets, e.title) })),
+    projects: proj.map((p, i) => ({ ...p, bullets: mergeBullets(p.bullets, out.projects?.[i]?.bullets, `${p.name} ${(p.tech ?? []).join(" ")}`) })),
   };
 }

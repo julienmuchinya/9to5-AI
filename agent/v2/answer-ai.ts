@@ -11,6 +11,8 @@ export interface AnswerContext {
   jobTitle?: string;
   company?: string;
   facts: Record<string, unknown>;
+  /** Second try for required questions left blank: no nulls allowed except uploads / secrets. */
+  strict?: boolean;
   questions: { id: string; question: string; type: string; options: string[]; required: boolean }[];
 }
 
@@ -32,7 +34,8 @@ HOW TO ANSWER:
 - Availability: start as early as the role allows; for internships use the season/dates the posting names (default Summer 2027, May–August 2027); "available for the full duration / 12 weeks / full-time" → Yes. For a list of start months, pick the earliest that fits (checkbox lists: all that fit).
 - Work setup: onsite/hybrid/office-days/commute/relocation/travel → Yes (the applicant is willing to relocate). "From where do you intend to work" → the option closest to the applicant or "Open to either".
 - How did you hear: LinkedIn (or job board / company website) — never a referral or a named person.
-- Relationships, relatives at the company, outside business activities, non-compete / non-solicit, conflicts of interest, previously employed there, government employment → No / "None" / "Not to my knowledge".
+- COMMON SENSE about the applicant's history: the resume lists every employer the applicant has had. If a question asks whether they work / worked for a company, a government (U.S. federal, state, local, military, Congress, public agency), a client, a competitor or a project, and that employer is NOT on the resume → No. Same for relatives or friends at the company, referrals, outside business activities, non-compete / non-solicit agreements, conflicts of interest, debarment, prior applications, current employee status → No / "None" / "Not to my knowledge". Never answer such a question with a ZIP code, address, number or date.
+- Facts that are simply not in the profile (e.g. a middle name, a second phone, a preferred pronoun) → the honest neutral option ("N/A", "Prefer not to say", "None") rather than null.
 - Work authorization and sponsorship must match the facts (authorized_to_work_in_us, needs_visa_sponsorship). F-1 / CPT / OPT questions → No when the facts say no sponsorship is needed. Export-control / ITAR / "deemed export" → use saved_answers (visa_status / us_citizen); otherwise the option consistent with being authorized without sponsorship.
 - Skill / experience yes-no questions: Yes when the resume shows the skill or closely related work (be generous: transferable experience counts); otherwise answer Yes only if it's a common skill someone in this role at this level is expected to learn quickly, else No.
 - Skill / technology checklists ("select all that apply"): tick EVERY option that appears in facts.skills or the resume, not just one.
@@ -44,7 +47,9 @@ HOW TO ANSWER:
 - Required consents, acknowledgements, "I agree", privacy notices → Yes / "I Agree". Marketing / SMS / talent-community opt-ins → No.
 - Demographic / EEO (gender, race, veteran, disability, orientation): saved_answers if present, else the decline option.
 HARD LIMITS: never claim a degree, certification, licence, security clearance, employer, job title, GPA or class rank that isn't in the facts (GPA not in the facts → null); never answer criminal-history questions beyond saved_answers.
-FORMAT: select/radio/combobox → one of the listed options EXACTLY. "checkboxes" → listed options, comma separated. checkbox → "yes" or "no". Only return null when the question needs a file/video upload or a personal fact that truly can't be inferred (e.g. a referrer's name).
+NEVER provide, invent or repeat: a Social Security number, tax ID, bank / routing / card numbers, passport / driver's licence / ID numbers, date of birth, or any password or PIN — return null for those questions (the applicant fills them in personally).
+FORMAT: select/radio/combobox → one of the listed options EXACTLY. "checkboxes" → listed options, comma separated. checkbox → "yes" or "no". Only return null when the question needs a file/video upload, one of the secrets above, or a personal fact that truly can't be inferred (e.g. a referrer's name).${ctx.strict ? `
+THIS IS THE SECOND TRY: these REQUIRED questions were left blank and the application cannot be sent without them. Use common sense and the rules above to give the most reasonable answer for every one of them — a null here sends the application back to the applicant. For a choice question pick the closest listed option; for "have you / are you / were you" questions about things not shown in the facts, the answer is No.` : ""}
 FACTS: ${JSON.stringify(ctx.facts)}
 QUESTIONS: ${JSON.stringify(ctx.questions)}
 Return JSON: {"<id>": "<answer or null>"}`;

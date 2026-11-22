@@ -9,7 +9,7 @@ import { bumpUsage, readUsage, SAFETY_RATIO } from "./freeTier";
  * Groq's free tier (measured from its x-ratelimit headers, Nov 2026) is PER MODEL:
  *   1,000 requests/day — refilled gradually (one back every ~86 s), not at midnight
  *   8,000 tokens/minute — prompt + answer; this is the limit that actually bites
- * So each model gets the same guard rails as Gemini: a daily stop at SAFETY_RATIO (85%) of its own
+ * So each model gets the same guard rails as Gemini: a daily stop at SAFETY_RATIO (99%) of its own
  * limit, a per-minute token pacer, and Groq's own "remaining" headers trusted over our counters
  * (the website and the agent share one key).
  */
@@ -109,7 +109,7 @@ export interface FallbackStatus {
   name: string;
   /** Requests our counters saw today, all models. */
   used: number;
-  /** Our daily stop, all models together (85% of the free limit). */
+  /** Our daily stop, all models together (SAFETY_RATIO, 99% of the free limit). */
   stopAt: number;
   limit: number;
   models: number;

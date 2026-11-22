@@ -2,10 +2,10 @@ import Link from "next/link";
 import { timeFmt } from "@/lib/tz";
 import { requireUser } from "@/lib/v2/session";
 import { Badge, Card, EmptyState, Notice, PageHeader, buttonCls } from "@/components/ui";
-import { loadLibrary } from "@/lib/v2/resume-library";
+import { defaultResumeId, loadLibrary, TAILOR_BELOW } from "@/lib/v2/resume-library";
 import { statusRows, statsByResume } from "@/lib/v2/pipeline";
 import { fallbackConfigured } from "@/lib/v2/fallback-ai";
-import { RenameDelete, UploadResume } from "./resume-manager";
+import { MakeDefault, RenameDelete, UploadResume } from "./resume-manager";
 
 export const dynamic = "force-dynamic";
 
@@ -24,19 +24,21 @@ export default async function ResumesPage() {
   );
   const best = [...stats.entries()].filter(([, s]) => s.sent >= 5).sort((a, b) => b[1].rate - a[1].rate)[0];
   const aiTailor = fallbackConfigured();
+  const defaultId = defaultResumeId(lib);
 
   return (
     <div className="max-w-5xl">
       <PageHeader
         eyebrow="Resumes"
         title="Your resumes"
-        description="Keep one resume per kind of role. For every job the agent picks the resume that fits best, keeps your layout on one page, and puts the job’s keywords in bold."
+        description="Upload a resume per kind of role. For every job the agent scores each one (0–100) and sends the best fit as your original PDF. Your default resume wins when two fit about the same."
       />
 
       <Notice tone="info">
+        {`Your resumes go out untouched whenever one scores ${TAILOR_BELOW} or more for the job. Only when every resume scores below ${TAILOR_BELOW} does the agent tailor the best one — same layout and design, `}
         {aiTailor
-          ? "Tailoring is on: the backup AI rewords your real bullets toward each job description (same facts and numbers, nothing invented), then the agent checks it in code before sending."
-          : "Free tailoring is on: the agent reorders your bullets and skills for each job and bolds the keywords it asks for. Add a free GROQ_API_KEY to also reword bullets per job — it never uses your Gemini quota."}
+          ? "bullets reworded in XYZ style (goal achieved, how it was measured, what you did and with which technology), using only numbers already on your resume, plus up to 4 closely related skills the job names."
+          : "skills reordered and the job’s keywords in bold. Add a free GROQ_API_KEY to also reword bullets in XYZ style — it never uses your Gemini quota."}
       </Notice>
 
       {best && lib.resumes.length > 1 && (
@@ -51,17 +53,20 @@ export default async function ResumesPage() {
             <EmptyState message="No resume yet. Upload your main resume to start." />
           </div>
         )}
-        {lib.resumes.map((r) => {
+        {lib.resumes.map((r, i) => {
           const s = stats.get(r.label);
+          const isDefault = r.id === defaultId;
           const parsed = r.parsed;
           const groups = parsed?.skill_groups?.length ?? 0;
           return (
-            <Card key={r.id} className="flex flex-col gap-3 p-4">
+            <Card key={r.id} className={`flex flex-col gap-3 p-4 ${isDefault ? "ring-1 ring-[var(--accent)]" : ""}`}>
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0">
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-[var(--muted)]">Resume {i + 1}</p>
                   <div className="flex flex-wrap items-center gap-2">
                     <h2 className="truncate font-semibold">{r.label}</h2>
-                    {r.id === "main" && <Badge variant="accent">Main · fills your profile</Badge>}
+                    {isDefault && <Badge variant="accent">Default</Badge>}
+                    {r.id === "main" && <Badge>Fills your profile</Badge>}
                   </div>
                   <p className="mt-0.5 text-xs text-[var(--muted)]">
                     {parsed ? `${parsed.experience?.length ?? 0} jobs · ${parsed.projects?.length ?? 0} projects · ${parsed.skills?.length ?? 0} skills` : "Not read yet"}
@@ -69,6 +74,7 @@ export default async function ResumesPage() {
                   </p>
                   {parsed?.target_roles?.length ? <p className="mt-1 truncate text-xs text-[var(--muted)]">Best for: {parsed.target_roles.slice(0, 3).join(", ")}</p> : null}
                 </div>
+                {!isDefault && <MakeDefault id={r.id} />}
               </div>
 
               <div className="grid grid-cols-4 gap-2 text-center">
@@ -113,7 +119,7 @@ export default async function ResumesPage() {
                 <div className="flex flex-wrap items-start gap-2">
                   <span className="w-14 pt-1.5 text-[11px] uppercase tracking-wide text-[var(--muted)]">Manage</span>
                   <div className="flex min-w-0 flex-1 flex-wrap items-start justify-between gap-2">
-                    <UploadResume id={r.id} cta="Replace PDF" />
+                    <UploadResume id={r.id} cta="Replace PDF" unread={!parsed} />
                     <RenameDelete id={r.id} label={r.label} canDelete={r.id !== "main"} />
                   </div>
                 </div>
@@ -121,20 +127,23 @@ export default async function ResumesPage() {
             </Card>
           );
         })}
-      </div>
 
-      <Card className="mt-6">
-        <h2 className="mb-1 font-semibold">Add another resume</h2>
-        <p className="mb-3 text-sm text-[var(--muted)]">
-          e.g. one focused on AI/ML, one on embedded or full-stack. Your profile and contact details stay the same — only the resume changes. {lib.resumes.length === 0 && "Upload your main resume first on "}
-          {lib.resumes.length === 0 && (
-            <Link href="/profile" className="text-[var(--accent)] hover:underline">
-              Resume & profile
-            </Link>
-          )}
-        </p>
-        <UploadResume id={lib.resumes.length === 0 ? "main" : "new"} cta={lib.resumes.length === 0 ? "Upload main resume (PDF)" : "Upload PDF"} canReread={false} />
-      </Card>
+        <Card className="flex flex-col gap-2 border-dashed p-4">
+          <p className="text-[11px] font-semibold uppercase tracking-wide text-[var(--muted)]">Resume {lib.resumes.length + 1}</p>
+          <h2 className="font-semibold">{lib.resumes.length === 0 ? "Upload your main resume" : "Add another resume"}</h2>
+          <p className="text-sm text-[var(--muted)]">
+            e.g. one focused on AI/ML, one on embedded or full-stack. Your profile and contact details stay the same — only the resume changes. {lib.resumes.length === 0 && "Or upload it on "}
+            {lib.resumes.length === 0 && (
+              <Link href="/profile" className="text-[var(--accent)] hover:underline">
+                Resume & profile
+              </Link>
+            )}
+          </p>
+          <div className="mt-auto pt-2">
+            <UploadResume id={lib.resumes.length === 0 ? "main" : "new"} cta={lib.resumes.length === 0 ? "Upload main resume (PDF)" : "Upload PDF"} canReread={false} offerDefault={lib.resumes.length > 0} />
+          </div>
+        </Card>
+      </div>
     </div>
   );
 }

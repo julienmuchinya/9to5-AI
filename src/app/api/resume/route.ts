@@ -11,6 +11,7 @@ export const maxDuration = 60;
 
 const newId = () => Math.random().toString(36).slice(2, 10);
 const cleanLabel = (s: unknown) => String(s ?? "").replace(/\s+/g, " ").trim().slice(0, 40);
+const MAX_RESUMES = 10;
 const validId = (s: string | null | undefined): s is string => Boolean(s && /^[a-z0-9]{1,12}$/.test(s));
 
 /**
@@ -27,6 +28,7 @@ export async function POST(req: Request) {
   const form = await req.formData().catch(() => null);
   const file = form?.get("resume");
   const requested = String(form?.get("id") ?? "main");
+  const makeDefault = String(form?.get("makeDefault") ?? "") === "1";
   const id = requested === "new" ? newId() : validId(requested) ? requested : "main";
   const label = cleanLabel(form?.get("label"));
   const path = resumeFilePath(user.id, id);
@@ -74,7 +76,9 @@ export async function POST(req: Request) {
   const existing = lib.resumes.find((r) => r.id === id);
   const fallbackLabel = id === "main" ? "Main resume" : parsed.target_roles?.[0] ? `${parsed.target_roles[0]} resume` : "Resume";
   const entry = { id, label: label || existing?.label || fallbackLabel, path, parsed: id === "main" ? null : parsed, uploaded_at: new Date().toISOString() };
+  if (!existing && lib.resumes.length >= MAX_RESUMES) return NextResponse.json({ error: `You can keep up to ${MAX_RESUMES} resumes. Delete one first.`, saved: true }, { status: 400 });
   lib.resumes = existing ? lib.resumes.map((r) => (r.id === id ? entry : r)) : [...lib.resumes, entry];
+  if (makeDefault) lib.default_id = id;
   try {
     await saveLibrary(supabase, user.id, lib);
   } catch (e) {
@@ -166,17 +170,21 @@ export async function GET(req: Request) {
   return NextResponse.redirect(data.signedUrl);
 }
 
-/** Rename: JSON { id, label }. */
+/** Rename: JSON { id, label }. Make it the default resume: JSON { id, makeDefault: true }. */
 export async function PATCH(req: Request) {
   const auth = await apiUser();
   if (!auth) return NextResponse.json({ error: "Not signed in" }, { status: 401 });
-  const body = (await req.json().catch(() => ({}))) as { id?: string; label?: string };
-  const label = cleanLabel(body.label);
-  if (!label) return NextResponse.json({ error: "Give it a name" }, { status: 400 });
+  const body = (await req.json().catch(() => ({}))) as { id?: string; label?: string; makeDefault?: boolean };
   const { data: p } = await auth.supabase.from("profiles").select("resume_path,resume_parsed,resume_updated_at").eq("id", auth.user.id).maybeSingle();
   const lib = await loadLibrary(auth.supabase, auth.user.id, p ?? {});
-  if (!lib.resumes.some((r) => r.id === body.id)) return NextResponse.json({ error: "Resume not found" }, { status: 404 });
-  lib.resumes = lib.resumes.map((r) => (r.id === body.id ? { ...r, label } : r));
+  if (!validId(body.id) || !lib.resumes.some((r) => r.id === body.id)) return NextResponse.json({ error: "Resume not found" }, { status: 404 });
+  if (body.makeDefault) {
+    lib.default_id = body.id;
+  } else {
+    const label = cleanLabel(body.label);
+    if (!label) return NextResponse.json({ error: "Give it a name" }, { status: 400 });
+    lib.resumes = lib.resumes.map((r) => (r.id === body.id ? { ...r, label } : r));
+  }
   await saveLibrary(auth.supabase, auth.user.id, lib);
   return NextResponse.json({ ok: true });
 }
@@ -190,6 +198,7 @@ export async function DELETE(req: Request) {
   const { data: p } = await auth.supabase.from("profiles").select("resume_path,resume_parsed,resume_updated_at").eq("id", auth.user.id).maybeSingle();
   const lib = await loadLibrary(auth.supabase, auth.user.id, p ?? {});
   lib.resumes = lib.resumes.filter((r) => r.id !== id);
+  if (lib.default_id === id) lib.default_id = undefined; // back to the main resume
   await auth.supabase.storage.from("resumes").remove([resumeFilePath(auth.user.id, id)]);
   await saveLibrary(auth.supabase, auth.user.id, lib);
   return NextResponse.json({ ok: true });

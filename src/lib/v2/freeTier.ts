@@ -1,11 +1,13 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 /**
- * Free-tier limits this app stays under. Each service is stopped at
- * SAFETY_RATIO of its limit so we never get near a bill. Override any value
- * with the matching env var if a provider changes its free tier.
+ * Free-tier limits this app stays under. Each service (Gemini, the backup AIs, GitHub minutes, Supabase)
+ * is stopped at SAFETY_RATIO of its limit — 99%, so almost the whole free allowance gets used while the
+ * last 1% stays as headroom for counting lag. Override with SAFETY_RATIO (e.g. 0.9) or the per-limit env vars
+ * if a provider changes its free tier.
  */
-export const SAFETY_RATIO = 0.85;
+const ratioEnv = Number(process.env.SAFETY_RATIO);
+export const SAFETY_RATIO = ratioEnv > 0 && ratioEnv <= 1 ? ratioEnv : 0.99;
 
 const num = (v: string | undefined, d: number) => (v && !Number.isNaN(Number(v)) ? Number(v) : d);
 

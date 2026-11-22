@@ -2,6 +2,7 @@ import { Card, inputCls } from "@/components/ui";
 import { SubmitButton } from "@/components/submit-button";
 import Link from "next/link";
 import { isFollowUp, type PendingQuestion } from "@/lib/v2/app-questions";
+import { sensitiveField } from "@/lib/v2/sensitive";
 import { answerPendingQuestions } from "../actions";
 
 export interface AskedQuestion extends PendingQuestion {
@@ -41,6 +42,23 @@ export function PendingQuestions({
           {questions.map((q) => {
             const name = `pq_${q.key}`;
             const opts = q.options.filter(Boolean);
+            const secret = sensitiveField(q.label, q.kind);
+            if (secret)
+              return (
+                <div key={q.key} className="rounded-xl border border-red-400/40 bg-red-400/[0.06] p-3">
+                  <p className="text-sm font-medium">{q.label}</p>
+                  <p className="mt-1 text-xs text-[var(--muted)]">
+                    Asked by {q.companies.slice(0, 4).join(", ")}
+                    {q.companies.length > 4 ? ` and ${q.companies.length - 4} more` : ""}
+                  </p>
+                  <p className="mt-2 text-sm text-red-400">
+                    🔒 This asks for {secret.what}. The agent never fills that in or sends it to an AI, and you shouldn’t type it here either.
+                    {secret.level === "scam"
+                      ? " Real employers don’t ask for it on an application — treat this posting as a likely scam."
+                      : " If you trust the employer, open the application on their site and enter it there yourself."}
+                  </p>
+                </div>
+              );
             return (
               <div
                 key={q.key}

@@ -15,9 +15,10 @@ async function call(url: string, init: RequestInit) {
 }
 
 /** Upload a resume: "main" replaces the profile resume, "new" adds one, an id replaces that one. */
-export function UploadResume({ id, label, cta, canReread = true }: { id: string; label?: string; cta: string; canReread?: boolean }) {
+export function UploadResume({ id, label, cta, canReread = true, offerDefault = false, unread = false }: { id: string; label?: string; cta: string; canReread?: boolean; offerDefault?: boolean; unread?: boolean }) {
   const [busy, setBusy] = useState(false);
   const [name, setName] = useState(label ?? "");
+  const [asDefault, setAsDefault] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const isNew = id === "new";
 
@@ -28,6 +29,7 @@ export function UploadResume({ id, label, cta, canReread = true }: { id: string;
     if (file) form.append("resume", file);
     form.append("id", id);
     if (name.trim()) form.append("label", name.trim());
+    if (asDefault) form.append("makeDefault", "1");
     try {
       const d = await call("/api/resume", { method: "POST", body: form });
       if (!d) return;
@@ -62,11 +64,46 @@ export function UploadResume({ id, label, cta, canReread = true }: { id: string;
         </label>
         {!isNew && canReread && (
           <button type="button" disabled={busy} onClick={() => send()} className={buttonCls("ghost", "sm")} title="Read the stored PDF again (picks up skill groups, bold phrases and your tagline)">
-            Read it again
+            {unread ? "Read it now" : "Read it again"}
           </button>
         )}
       </div>
+      {isNew && offerDefault && (
+        <label className="mt-2 flex items-center gap-2 text-sm text-[var(--muted)]">
+          <input type="checkbox" checked={asDefault} onChange={(e) => setAsDefault(e.target.checked)} className="accent-[var(--accent)]" />
+          Make it my default resume
+        </label>
+      )}
       {msg && <p className={`mt-2 text-sm ${msg.ok ? "text-emerald-400" : "text-red-400"}`}>{msg.text}</p>}
+    </div>
+  );
+}
+
+/** "Make default": the agent prefers this resume when several fit a job about equally. */
+export function MakeDefault({ id }: { id: string }) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  return (
+    <div className="shrink-0 text-right">
+      <button
+        type="button"
+        disabled={busy}
+        className={buttonCls("secondary", "sm")}
+        onClick={async () => {
+          setBusy(true);
+          setErr(null);
+          try {
+            await call("/api/resume", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id, makeDefault: true }) });
+            window.location.reload();
+          } catch (e) {
+            setErr((e as Error).message);
+            setBusy(false);
+          }
+        }}
+      >
+        {busy ? "Saving…" : "Make default"}
+      </button>
+      {err && <p className="mt-1 text-xs text-red-400">{err}</p>}
     </div>
   );
 }

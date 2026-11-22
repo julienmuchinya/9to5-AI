@@ -8,6 +8,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { geminiJson, FreeTierLimitError } from "../../src/lib/v2/gemini";
 import { isFollowUp, isJobSpecific, memoryKey, pickOption, type AppAnswers, type PendingQuestion } from "../../src/lib/v2/app-questions";
 import { answerPrompt, salaryFacts } from "./answer-ai";
+import { scrubFacts, sensitiveField } from "../../src/lib/v2/sensitive";
 
 interface Waiting {
   id: string;
@@ -15,9 +16,10 @@ interface Waiting {
   jobs: { company_name: string; title: string } | null;
 }
 
-/** Only an upload or a named person can't be answered by the agent. */
+/** Only an upload, a named person or a personal secret (SSN, ID numbers, date of birth — never sent to an AI) can't be answered by the agent. */
 export const needsHuman = (q: PendingQuestion) =>
-  q.kind === "file" || /(video|upload|attach|record)\b.{0,40}(cover letter|answer|response|introduction)|\b(their|referrer'?s?) (name|email)|who referred you|name of (the )?(person|employee|referr)/i.test(q.label);
+  q.kind === "file" ||
+  Boolean(sensitiveField(q.label, q.kind)) || /(video|upload|attach|record)\b.{0,40}(cover letter|answer|response|introduction)|\b(their|referrer'?s?) (name|email)|who referred you|name of (the )?(person|employee|referr)/i.test(q.label);
 
 export async function answerWaitingQuestions(
   sb: SupabaseClient,
@@ -59,7 +61,7 @@ export async function answerWaitingQuestions(
         sb,
         answerPrompt({
           name: ctx.name,
-          facts: { ...ctx.facts, saved_answers: ctx.answers, preferences: salaryFacts(ctx.answers, ctx.custom) },
+          facts: { ...ctx.facts, saved_answers: scrubFacts(ctx.answers), preferences: salaryFacts(ctx.answers, ctx.custom) },
           questions: batch.map(([k, q], n) => ({ id: `q${n}`, question: q.label, type: q.kind, options: (q.options ?? []).slice(0, 40), required: true })),
         }),
         [],

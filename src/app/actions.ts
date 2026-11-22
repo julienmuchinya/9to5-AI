@@ -1,5 +1,6 @@
 "use server";
 
+import { looksLikeSecretValue, sensitiveField } from "@/lib/v2/sensitive";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { requireUser } from "@/lib/v2/session";
@@ -205,8 +206,10 @@ export async function answerPendingQuestions(form: FormData) {
       .filter(Boolean)
       .join(", ")
       .slice(0, 2000);
-    const q = String(form.get(`pl_${key}`) ?? key).slice(0, 300);
+    const q = String(form.get(`pl_${key}`) ?? key).slice(0, 700);
     if (!a || !key) continue;
+    // Never store a secret (SSN, card / account number, ID number, date of birth) as a reusable answer.
+    if (sensitiveField(q) || looksLikeSecretValue(a)) continue;
     custom[key] = { q, a, at: now };
     saved++;
   }

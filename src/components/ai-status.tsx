@@ -8,7 +8,7 @@ function Bar({ used, stopAt, limit }: { used: number; stopAt: number; limit: num
   return (
     <div className="relative mt-1.5 h-1.5 overflow-hidden rounded-full bg-[var(--border)]">
       <div className={`h-full ${color}`} style={{ width: `${pct}%` }} />
-      <div className="absolute inset-y-0 w-px bg-[var(--muted)]/60" style={{ left: `${stopPct}%` }} title="Agent stops here (85%)" />
+      <div className="absolute inset-y-0 w-px bg-[var(--muted)]/60" style={{ left: `${stopPct}%` }} title={`Agent stops here (${Math.round(stopPct)}%)`} />
     </div>
   );
 }

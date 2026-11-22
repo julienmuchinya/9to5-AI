@@ -11,7 +11,7 @@ import { agentCanSubmit, AUTO_SUBMIT_OR } from "@/lib/v2/verify";
 import { ago, COMPANY_DAILY_CAP, freshness, MAX_DAILY_APPLY_CAP, priorityScore } from "@/lib/v2/priority";
 import { needsKind, NEEDS_LABEL } from "@/lib/v2/needs";
 import { customStore, findSimilarAnswer, memoryKey, type CustomAnswers, type PendingQuestion } from "@/lib/v2/app-questions";
-import { jobSkillCoverage } from "@/lib/v2/resume-library";
+import { jobSkillCoverage, resumeMatchScore, TAILOR_BELOW } from "@/lib/v2/resume-library";
 import { expectedChanges, expectedLookups } from "./intent";
 import { compact, summarizeActions, SYSTEM_BASE, TOOLS } from "./tools";
 import { fieldMatcher } from "@/lib/v2/fields";
@@ -278,6 +278,7 @@ async function runTool(name: string, args: Args, sb: SupabaseClient, userId: str
       if (!j) return { error: "No matched job like that" };
       const parsed = (prof?.resume_parsed ?? null) as ParsedResume | null;
       const cover = jobSkillCoverage(parsed, `${j.title}\n${j.job_postings.description ?? ""}`);
+      const matchScore = resumeMatchScore(parsed, `${j.title}\n${j.job_postings.description ?? ""}`);
       return {
         job: { id: j.id, title: j.title, company: j.company_name, fit: j.fit_score, posted: ago(j.job_postings.posted_at), pay_up_to: j.job_postings.salary_max, location: j.job_postings.is_remote ? "Remote" : j.job_postings.locations.slice(0, 2).join("; "), link: j.url, agent_can_submit: agentCanSubmit(j.job_postings) },
         fit_reasons: j.fit_reasons ?? [],
@@ -285,7 +286,11 @@ async function runTool(name: string, args: Args, sb: SupabaseClient, userId: str
         on_your_resume: cover.asked.filter((t) => !cover.missing.includes(t)),
         missing_from_your_resume: cover.missing,
         coverage_percent: Math.round(cover.coverage * 100),
-        resume_the_agent_sends: cover.coverage >= 0.8 ? "your original PDF, untouched (strong match)" : cover.coverage >= 0.7 ? "a lightly tailored copy (reordered, keywords in bold)" : "a tailored copy (AI rewords bullets toward this job; nothing invented)",
+        resume_match_score: matchScore,
+        resume_the_agent_sends:
+          matchScore >= TAILOR_BELOW
+            ? `your original PDF, untouched (${matchScore}/100 match; tailoring only happens below ${TAILOR_BELOW})`
+            : `a tailored copy of your best resume (${matchScore}/100 is below ${TAILOR_BELOW}): same layout, bullets reworded in XYZ style toward this job, no invented numbers`,
         other_matches: (jobs ?? []).slice(1, 5).map((x) => ({ id: (x as unknown as J).id, title: (x as unknown as J).title, company: (x as unknown as J).company_name })),
       };
     }

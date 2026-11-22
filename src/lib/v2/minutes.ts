@@ -1,7 +1,7 @@
 /**
  * GitHub Actions minutes planner. A private repo gets 2,000 free minutes a month and a full agent run
  * takes ~45, so eight scheduled runs a day would use the month up in about five days. This spreads what's
- * left (up to the 85% stop) evenly over the days left in the month:
+ * left (up to the SAFETY_RATIO stop, 99%) evenly over the days left in the month:
  *  - scheduled runs use today's share, and skip once it's gone (the next day gets a fresh share);
  *  - a run you start yourself always goes ahead (at least 25 minutes) unless the monthly stop is reached.
  * Public repos have unlimited minutes, so nothing is rationed there.

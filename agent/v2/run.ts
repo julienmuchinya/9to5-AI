@@ -24,7 +24,7 @@ import { bumpUsage, freeTierSnapshot, readUsage, SAFETY_RATIO, today } from "../
 import { aiAvailable } from "../../src/lib/v2/gemini";
 import { fallbackConfigured } from "../../src/lib/v2/fallback-ai";
 import { renderClassicResume } from "../../src/lib/v2/resume-render";
-import { aiTailorResume, boldJobKeywords, jobSkillCoverage, loadLibrary, pickResume, resumeJobScore, type ResumeEntry } from "../../src/lib/v2/resume-library";
+import { aiTailorResume, boldJobKeywords, jobSkillCoverage, loadLibrary, rankResumes, resumeMatchScore, TAILOR_BELOW, type ResumeEntry } from "../../src/lib/v2/resume-library";
 import { tailorResume, resumeToText, type ParsedResume } from "../../src/lib/v2/resume";
 import { applyToJob, cleanMemory, type Applicant } from "./apply";
 import { scanInbox } from "./inbox";
@@ -114,10 +114,6 @@ const MANUAL = env("GITHUB_EVENT_NAME") === "workflow_dispatch";
 const RUN_MODE: "user" | "auto" = env("ONLY_USER") ? "user" : "auto";
 /** applications.applying_until exists (migration 010): runs claim a job before applying, so two runs never send the same one. */
 let CLAIMS = false;
-/** Resume already covers this share of the job's words → skip AI rewording (saves one AI call). */
-const TAILOR_SKIP_SCORE = Number(env("TAILOR_SKIP_SCORE", "0.7"));
-/** The resume already has this share of the technologies the job names → send the original PDF untouched. */
-const RESUME_ORIGINAL_SCORE = Number(env("RESUME_ORIGINAL_SCORE", "0.8"));
 /** Set when a run stopped with work left (time budget), so it can hand over to a follow-up run. */
 let moreWorkLeft = false;
 const timeLeft = () => RUN_BUDGET_MS - (Date.now() - startedAt);
@@ -660,6 +656,8 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
     hostCount[h] = (hostCount[h] ?? 0) + 1;
   }
   let submittedThisRun = 0;
+  /** CAPTCHAs per site host in this run (2 → the whole site pauses). */
+  const captchaByHost: Record<string, number> = {};
   let memory: AppAnswers = cleanMemory({ ...(u.answer_memory ?? {}) } as Record<string, string>);
   let memoryChanged = Object.keys(memory).length !== Object.keys(u.answer_memory ?? {}).length;
 
@@ -814,36 +812,33 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
     }
 
     const jobText = `${job.title}\n${p.description ?? ""}`;
-    const entry = pickResume(library, jobText);
+    // Every resume in the library scored 0-100 for this job (the default resume wins near-ties).
+    const ranked = rankResumes(library, jobText);
+    const entry = ranked[0]?.entry ?? null;
+    const score = ranked[0]?.score ?? 0;
     let resumePath = await originalFor(entry);
-    let focus: string | null = null;
+    let focus: string | null = `original · ${score}% match`;
     const parsed = entry?.parsed ?? u.resume_parsed;
-    // How much of what the job asks for (named technologies) the resume already has.
-    const cover = jobSkillCoverage(parsed ?? null, jobText);
-    // Strong match (≥ RESUME_ORIGINAL_SCORE, default 80%): the user's own PDF goes out untouched — faster, and
-    // nothing to review. Below that the resume is tailored: free reorder/bold, and the AI rewords bullets
-    // only below TAILOR_SKIP_SCORE (default 70%).
-    const sendOriginal = cover.coverage >= RESUME_ORIGINAL_SCORE;
-    if (sendOriginal) {
-      bump("resume_original");
-      focus = `original · ${Math.round(cover.coverage * 100)}% match`;
-    }
-    if (parsed?.experience?.length && tailorMode !== "off" && !sendOriginal) {
-      let tailored = tailorResume(parsed, jobText);
-      // Already a decent keyword match: the free tailoring is enough — save the AI call.
-      const strong = cover.coverage >= TAILOR_SKIP_SCORE || resumeJobScore(parsed, jobText) >= TAILOR_SKIP_SCORE;
-      if (strong) bump("tailor_skipped_strong_match");
-      else bump("resume_tailored_ai");
-      if (cover.missing.length) log(`  resume covers ${Math.round(cover.coverage * 100)}% of the job's tech (missing: ${cover.missing.slice(0, 6).join(", ")})`);
-      if (tailorMode === "ai" && !aiOut && !strong) {
+    // A resume scores 60+ → the user's own PDF goes out untouched (their design, their words). Only when EVERY
+    // resume is below 60 is the best one tailored: same layout, reworded in XYZ style toward the job.
+    const tailorIt = score < TAILOR_BELOW && Boolean(parsed?.experience?.length) && tailorMode !== "off";
+    if (!tailorIt) bump("resume_original");
+    if (tailorIt && parsed) {
+      bump("resume_tailored");
+      const cover = jobSkillCoverage(parsed, jobText);
+      if (cover.missing.length) log(`  best resume scores ${score}/100 (missing: ${cover.missing.slice(0, 6).join(", ")}) — tailoring it`);
+      // Same layout: bullets and projects stay in the applicant's order; only the words (AI) and skill order change.
+      let tailored = tailorResume(parsed, jobText, { keepLayout: true });
+      if (tailorMode === "ai" && !aiOut) {
         try {
           tailored = await aiTailorResume(sb, tailored, { title: job.title, company: job.company_name, description: p.description ?? "" }, u.id);
+          bump("resume_tailored_ai");
         } catch (e) {
           log(`  resume tailoring skipped: ${(e as Error).message.slice(0, 120)}`);
         }
       }
       tailored = boldJobKeywords(tailored, jobText);
-      focus = `${resumeFocus(tailored.skills)} · ${Math.round(cover.coverage * 100)}% match`;
+      focus = `tailored · ${score}% → ${resumeMatchScore(tailored, jobText)}% match · ${resumeFocus(tailored.skills)}`;
       // Same layout as the user's own resume, always one page; if it can't fit, send the original PDF.
       const looksLikeUrl = (x?: string | null) => (x && /^https?:|\.(com|io|dev|me)\b/i.test(x) ? x : null);
       const pdf = await renderClassicResume(tailored, {
@@ -874,7 +869,10 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
     // Workday needs a login: make sure one is saved (also on dry runs — the site account is real either way).
     // Any Workday URL (also user-queued jobs still under review): the login is created before the first attempt.
     if (/myworkday(jobs|site).com/i.test(applyUrl)) await ensurePortalLogin(sb, u.id, email, job.company_name, applyUrl);
-    applicant.portal = await portalLogin(sb, u.id, applyUrl);
+    // Each job gets its OWN copy of the applicant: the parallel workers used to share one object, so one job's
+    // portal login (or none) overwrote another's mid-application — "No saved login for this Workday site" on
+    // sites that had one, and the wrong site's password sent to Workday (followed by password resets).
+    const who: Applicant = { ...applicant, portal: await portalLogin(sb, u.id, applyUrl) };
     const { data: acct } = await sb.from("application_accounts").select("account_created").eq("user_id", u.id).eq("portal_host", host).maybeSingle();
     // Retrying this job? Reuse the long written answers ("Why us?", project write-ups) from the last attempt
     // instead of paying for a new AI call. Short answers are re-derived so fixes to the rules apply.
@@ -884,9 +882,9 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
         .filter(([q, v]) => typeof v === "string" && v.length >= 80 && !/^https?:/.test(v) && !/^f\d+/.test(q))
         .map(([q, v]) => [memoryKey(q), v])
     );
-    applicant.memory = { ...memory, ...reuse };
+    who.memory = { ...memory, ...reuse };
     const t0 = Date.now();
-    const r = await applyToJob(browser, sb, { url: applyUrl, ats: p.ats, applicant, resumePath, jobTitle: job.title, company: job.company_name, userId: u.id, dryRun, jobDescription: p.description, emailCode, emailLink, accountExists: Boolean(acct?.account_created),
+    const r = await applyToJob(browser, sb, { url: applyUrl, ats: p.ats, applicant: who, resumePath, jobTitle: job.title, company: job.company_name, userId: u.id, dryRun, jobDescription: p.description, emailCode, emailLink, accountExists: Boolean(acct?.account_created),
       // One password reset per portal per week, remembered across runs (it used to reset on every run).
       passwordReset: {
         allowed: !cooldowns.has(`pwreset:${u.id.slice(0, 8)}:${host}`),
@@ -930,6 +928,35 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
     }
     // Out of AI for today is not the user's problem: keep it queued for the next run.
     if (/AI quota used up/i.test(r.detail)) status = "queued";
+    // CAPTCHA: the site is pushing back on automated browsers right now. Not the user's problem yet — the job
+    // goes back in the queue for a later run (up to 3 tries), and after 2 CAPTCHAs on the same site in one run
+    // the whole site pauses for 12 h, instead of filling (and dumping into Needs you) every job on it.
+    const captcha = r.status === "needs_user" && /captcha/i.test(r.detail);
+    if (captcha) {
+      bump("captcha");
+      captchaByHost[host] = (captchaByHost[host] ?? 0) + 1;
+      cooldowns.set(key, "CAPTCHA shown");
+      if (captchaByHost[host] >= 2 && !cooldowns.has(host)) {
+        cooldowns.set(host, "CAPTCHA shown on several jobs");
+        if (!dryRun) await coolDown(sb, host, 12, `CAPTCHA on ${captchaByHost[host]} jobs this run`);
+      }
+      if (!dryRun) {
+        const { data: row } = await sb.from("applications").select("id,attempts").eq("user_id", u.id).eq("job_id", job.id).maybeSingle();
+        const tries = (row?.attempts ?? 0) + 1;
+        if (row) await sb.from("applications").update({ attempts: tries }).eq("id", row.id);
+        if (tries < 3) {
+          status = "queued";
+          detail = `Waiting: ${host} showed a CAPTCHA — the agent tries again after a pause (try ${tries} of 3)`;
+        } else detail = `${host} showed a CAPTCHA on 3 tries — the answers are filled in below; open it and press Submit yourself.`;
+      }
+    }
+    // A form that asked for an SSN, bank details or an account password: a fake posting. Never again, for anyone.
+    if (r.suspicious && !dryRun) {
+      bump("suspicious_blocked");
+      await sb.from("job_postings").update({ verification_status: "rejected" }).eq("id", job.posting_id);
+      await sb.from("jobs").update({ dismissed: true }).eq("id", job.id);
+      await sb.from("agent_logs").insert({ user_id: u.id, level: "warn", message: `Blocked a suspicious application form (${job.company_name}): it ${r.suspicious}. Nothing was filled in or sent.`, metadata: { area: "security" } });
+    }
     await save({
       ...base,
       status,
@@ -944,7 +971,7 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
       await sb.from("application_accounts").update({ account_created: true, notes: `Used on the ${job.title} application` }).eq("user_id", u.id).eq("portal_host", host);
     // Back off from sites that push back, instead of retrying through them.
     if (!dryRun) {
-      if (/captcha/i.test(r.detail)) await coolDown(sb, key, 12, "CAPTCHA shown");
+      if (captcha) await coolDown(sb, key, 12, "CAPTCHA shown");
       else if (/\b(429|403)\b|too many|rate limit|blocked|access denied/i.test(r.detail)) {
         await coolDown(sb, key, 24, r.detail.slice(0, 120));
         await coolDown(sb, host, 6, "rate limited");
