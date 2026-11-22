@@ -20,7 +20,7 @@ import {
 } from "../../src/lib/v2/discovery/sources";
 import { verifyPosting, canAutoSubmit, AUTO_SUBMIT_OR } from "../../src/lib/v2/verify";
 import { isFocusTitle, matchPosting, type MatchProfile } from "../../src/lib/v2/match";
-import { bumpUsage, freeTierSnapshot, readUsage, SAFETY_RATIO, today } from "../../src/lib/v2/freeTier";
+import { bumpUsage, freeTierSnapshot, readUsage, repoIsPublic, SAFETY_RATIO, today } from "../../src/lib/v2/freeTier";
 import { aiAvailable } from "../../src/lib/v2/gemini";
 import { fallbackConfigured } from "../../src/lib/v2/fallback-ai";
 import { renderClassicResume } from "../../src/lib/v2/resume-render";
@@ -39,7 +39,7 @@ import { familyOf, judgeRoute, learnRoutes, titleKey } from "../../src/lib/v2/le
 import { isAggregator, resolveDirectLink } from "../../src/lib/v2/discovery/resolve";
 import { domainAgeYears, employerDomain } from "../../src/lib/v2/company-age";
 import { EXTRA_BOARDS } from "../../src/lib/v2/discovery/extra-boards";
-import { fetchWorkdayBoard, WORKDAY_BOARDS } from "../../src/lib/v2/discovery/workday";
+import { fetchWorkdayBoard, WORKDAY_BOARDS, type WorkdayBoard } from "../../src/lib/v2/discovery/workday";
 import { setWantedRoles } from "../../src/lib/v2/discovery/filters";
 import { coverLetterPdf, writeCoverLetter } from "../../src/lib/v2/cover-letter";
 import { minutesPlan } from "../../src/lib/v2/minutes";
@@ -99,7 +99,7 @@ const ACCOUNT_SITES = /(myworkdayjobs\.com|myworkdaysite\.com|icims\.com|taleo\.
 // 2–6 s between submissions per worker (was 6–15 s: ~7 minutes of a 25-minute run spent sleeping).
 const PACE_MIN_S = Number(env("PACE_MIN_S", "2"));
 const PACE_MAX_S = Number(env("PACE_MAX_S", "6"));
-const ATS_DAILY_CAP = Number(env("ATS_DAILY_CAP", "150")); // per ATS host, all users combined
+const ATS_DAILY_CAP = Number(env("ATS_DAILY_CAP", "500")); // per ATS host, all users combined (Greenhouse alone did 131 on good days)
 const MAX_DAILY_CAP = MAX_DAILY_APPLY_CAP;
 /** Workday portals: sign in / create the account with the saved login, then apply (set WORKDAY=false to turn off). */
 const WORKDAY_ON = env("WORKDAY", "true") !== "false";
@@ -219,30 +219,83 @@ async function claimJob(sb: SupabaseClient, base: { user_id: string; job_id: str
  * Employers' Workday sites searched for the roles users asked for (focus first), plus each board's
  * newest postings. Postings already saved aren't fetched again — they're only marked as still listed.
  */
+/** Every Workday career site the database has seen in a posting link (hundreds more than the curated list). */
+async function knownWorkdayBoards(sb: SupabaseClient): Promise<WorkdayBoard[]> {
+  const rows = await allRows<{ company_name: string; apply_url: string | null; url: string }>((from, to) =>
+    sb.from("job_postings").select("company_name,apply_url,url").or("apply_url.ilike.%myworkdayjobs.com%,url.ilike.%myworkdayjobs.com%").order("id").range(from, to), 30000);
+  const curated = new Set(WORKDAY_BOARDS.map((b) => b.host));
+  const found = new Map<string, WorkdayBoard>();
+  for (const r of rows) {
+    const u = r.apply_url && /myworkdayjobs/.test(r.apply_url) ? r.apply_url : r.url;
+    const m = u?.match(/https:\/\/([a-z0-9-]+)\.(wd\d+)\.myworkdayjobs\.com\/(?:[a-z]{2}-[A-Z]{2}\/)?([^/?#]+)/);
+    if (!m || /confidential|executive|internal|employee/i.test(m[3])) continue;
+    const host = `${m[1]}.${m[2]}`;
+    if (curated.has(host) || found.has(host)) continue;
+    found.set(host, { company: r.company_name, host, tenant: m[1], site: m[3], sector: sectorOf(r.company_name) });
+  }
+  return [...found.values()];
+}
+
+const SECTOR_HINTS: [WorkdayBoard["sector"], RegExp][] = [
+  ["energy", /oil|gas|petro|energy|drill|offshore|pipeline|midstream|refin|lng|exploration|resources/i],
+  ["mining", /mining|mine|minerals?|metals?|aggregates|materials|steel|copper|gold|coal|quarr|marietta|mosaic|freeport|newmont|alcoa|nucor/i],
+  ["utilities", /electric|power|utilit|water|edison|duke|eversource|grid|nuclear|solar|wind/i],
+];
+const sectorOf = (company: string): WorkdayBoard["sector"] => SECTOR_HINTS.find(([, re]) => re.test(company))?.[0] ?? "services";
+
+/** Sectors the users' roles point at (oil & gas, mining, utilities): those employers are searched first. */
+function wantedSectors(roles: string[]): Set<WorkdayBoard["sector"]> {
+  const t = roles.join(" ").toLowerCase();
+  const out = new Set<WorkdayBoard["sector"]>();
+  if (/oil|gas|offshore|rig\b|roustabout|floorhand|derrick|pipeline|lease operator|process operator|field operator|refin|petro|drill|wellsite|frac/.test(t)) out.add("energy");
+  if (/mining|miner|mineral|quarry|metallurg|geolog/.test(t)) out.add("mining");
+  if (/utilit|lineman|line worker|substation|power plant|electric(al)? (technician|operator)|nuclear/.test(t)) out.add("utilities");
+  if (out.size) out.add("utilities").add("energy"); // the same field crafts are hired across all three
+  return out;
+}
+
+/**
+ * Employers' Workday sites searched for the roles users asked for (focus first), plus each board's
+ * newest postings. Postings already saved aren't fetched again — they're only marked as still listed.
+ * Boards: the curated list + every Workday site seen in a saved posting; employers in the sectors the user's
+ * roles point at (oil & gas, mining, utilities) go first, the rest rotate.
+ */
 async function discoverWorkday(sb: SupabaseClient, roles: string[]): Promise<Posting[]> {
   // Newest postings + up to 10 of the roles users asked for (focus first). Titles are checked before details are fetched.
   const queries = ["", ...roles.slice(0, 10)];
   const seen = await allRows<{ source_key: string }>((from, to) =>
-    sb.from("job_postings").select("source_key").eq("source", "workday").gte("last_seen_at", new Date(Date.now() - 3 * 86400_000).toISOString()).order("id").range(from, to), 10000);
+    sb.from("job_postings").select("source_key").eq("source", "workday").gte("last_seen_at", new Date(Date.now() - 3 * 86400_000).toISOString()).order("id").range(from, to), 20000);
   const known = new Set((seen ?? []).map((r) => r.source_key as string));
   const stillListed: string[] = [];
   const out: Posting[] = [];
-  // At most ~8 minutes here (env WORKDAY_DISCOVER_MIN), so searching never eats the applying time.
-  const deadline = Date.now() + Number(env("WORKDAY_DISCOVER_MIN", "8")) * 60_000;
+  // Public repo (unlimited minutes): 20 minutes of searching; private: 8 (env WORKDAY_DISCOVER_MIN).
+  const minutes = Number(env("WORKDAY_DISCOVER_MIN", "")) || ((await repoIsPublic()) ? 20 : 8);
+  const deadline = Date.now() + minutes * 60_000;
   let scanned = 0;
+  const all = [...WORKDAY_BOARDS, ...(await knownWorkdayBoards(sb).catch(() => [] as WorkdayBoard[]))];
+  const wanted = wantedSectors(roles);
+  const first = all.filter((b) => wanted.has(b.sector));
+  const rest = all.filter((b) => !wanted.has(b.sector));
   // Start at a different employer each hour, so a run cut short by the deadline doesn't always miss the same ones.
-  const start = Math.floor(Date.now() / 3600_000) % WORKDAY_BOARDS.length;
-  const boards = [...WORKDAY_BOARDS.slice(start), ...WORKDAY_BOARDS.slice(0, start)];
+  const rot = (list: WorkdayBoard[]) => {
+    const i = list.length ? Math.floor(Date.now() / 3600_000) % list.length : 0;
+    return [...list.slice(i), ...list.slice(0, i)];
+  };
+  const boards = [...rot(first), ...rot(rest)];
   for (const group of chunk(boards, 10)) {
     if (Date.now() > deadline) break;
     scanned += group.length;
     const res = await Promise.all(
-      group.map((b) => fetchWorkdayBoard(b, queries, { maxAgeDays: TUNING_LIMITS.max_age_days[1], skip: (k) => (known.has(k) ? (stillListed.push(k), true) : false) }))
+      group.map((b) =>
+        fetchWorkdayBoard(b, wanted.has(b.sector) ? queries : queries.slice(0, 6), { maxAgeDays: TUNING_LIMITS.max_age_days[1], perQuery: wanted.has(b.sector) ? 50 : 20, skip: (k) => (known.has(k) ? (stillListed.push(k), true) : false) }).catch(
+          () => [] as Posting[]
+        )
+      )
     );
     for (const list of res) out.push(...list);
   }
   for (const part of chunk(stillListed, 300)) await sb.from("job_postings").update({ last_seen_at: new Date().toISOString(), active: true }).in("source_key", part);
-  log(`workday boards: ${scanned}/${WORKDAY_BOARDS.length} employers × ${queries.length} searches → ${out.length} new US postings (${stillListed.length} already saved)`);
+  log(`workday boards: ${scanned}/${boards.length} employers (${first.length} in your fields first) × ${queries.length} searches → ${out.length} new US postings (${stillListed.length} already saved)`);
   return out;
 }
 
@@ -267,7 +320,7 @@ async function discover(sb: SupabaseClient, roles: string[]): Promise<(Posting &
   for (const b of EXTRA_BOARDS) if (!known.has(`${b.ats}:${b.board}`)) known.set(`${b.ats}:${b.board}`, b);
   const boards = [...known.values()].sort((a, b) => `${a.ats}${a.board}`.localeCompare(`${b.ats}${b.board}`));
   // ~4 s per 40 boards: scan 160 a run so every board is seen about every couple of runs.
-  const batch = Number(env("BOARD_BATCH", "160"));
+  const batch = Number(env("BOARD_BATCH", "300"));
   const slot = Math.floor(Date.now() / (3 * 3600_000)) % Math.max(1, Math.ceil(boards.length / batch));
   const slice = boards.slice(slot * batch, slot * batch + batch);
   const boardPostings: Posting[] = [];
@@ -463,7 +516,7 @@ async function matchUser(
     .filter((x) => x.m.eligible && x.m.score >= 40)
     .sort((a, b) => b.m.score - a.m.score)
     // Every good match is kept (was 300), so "apply to all" really means all.
-    .slice(0, Number(env("MATCH_LIMIT", "1000")));
+    .slice(0, Number(env("MATCH_LIMIT", "3000")));
   if (!matches.length) return 0;
   const rows = matches.map(({ p, m }) => ({
     user_id: u.id,
@@ -559,7 +612,7 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
     .eq("user_id", u.id)
     .or(env("APPLY_ONLY_COMPANY") ? "status.in.(queued,failed,needs_user)" : "status.eq.queued,and(status.eq.failed,or(attempts.is.null,attempts.lt.3))")
     .order("created_at")
-    .limit(400);
+    .limit(1000);
   // Every earlier application: what's taken, and what the agent has learned about which sites go through.
   const existing: { job_id: string; apply_url: string | null; status: string; submitted_at: string | null; status_updated_at: string | null }[] = [];
   for (let from = 0; from < 10000; from += 1000) {
@@ -582,7 +635,7 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
     .eq("job_postings.verification_status", "verified")
     .or(WORKDAY_ON ? AUTO_SUBMIT_OR : AUTO_SUBMIT_OR.replace(",workday", ""), { referencedTable: "job_postings" })
     .order("created_at", { ascending: false })
-    .limit(800);
+    .limit(1000);
 
   type Item = { appId?: string; job: JobRow; company: string; fit: number; postedAt: string | null; userRequested: boolean; routeBonus: number; focus: boolean };
   const isFocus = (j: JobRow) => isFocusTitle(j.title, u.focus_roles, j.job_postings.description ?? "");

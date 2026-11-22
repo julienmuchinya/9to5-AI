@@ -18,7 +18,7 @@ export interface Tuning {
   mine_first: boolean;
 }
 
-export const TUNING_LIMITS = { max_age_days: [3, 30], company_cap: [1, 30] } as const;
+export const TUNING_LIMITS = { max_age_days: [3, 30], company_cap: [1, 50] } as const;
 export const DEFAULT_TUNING: Tuning = { max_age_days: MAX_POSTING_AGE_DAYS, company_cap: COMPANY_DAILY_CAP, order: "balanced", focus_first: true, mine_first: true };
 
 const clamp = (n: unknown, [lo, hi]: readonly [number, number], d: number) => {

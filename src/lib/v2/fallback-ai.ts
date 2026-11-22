@@ -253,6 +253,8 @@ export async function fallbackChat(
               ...(opts.json ? { response_format: { type: "json_object" } } : {}),
               ...(opts.tools?.length ? { tools: opts.tools, tool_choice: "auto" } : {}),
               ...(m.extra ?? {}),
+              // Chat has a hard 60-second limit: think fast there; "medium" is for background work (answers, resumes).
+              ...(opts.deadline && (m.extra as { reasoning_effort?: string } | undefined)?.reasoning_effort === "medium" ? { reasoning_effort: "low" } : {}),
               messages,
             }),
             signal: AbortSignal.timeout(Math.max(3_000, Math.min(55_000, timeLeft() - 2_000))),

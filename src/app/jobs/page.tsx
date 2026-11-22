@@ -433,7 +433,7 @@ export default async function JobsPage({ searchParams }: { searchParams: Promise
                 ? "Nothing saved yet. Tap ♡ on any role to keep it here."
                 : term
                   ? `None of your matches mention “${term}”. Try every role we’ve found, or the live results below.`
-                  : "No matches yet. Add your resume and the work you want — the agent finds roles on its next run, about every two hours."
+                  : "No matches yet. Add your resume and the work you want — the agent finds roles on its next run, about every hour."
             }
             action={
               term ? (

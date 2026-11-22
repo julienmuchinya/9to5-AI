@@ -12,8 +12,10 @@ export const SAFETY_RATIO = ratioEnv > 0 && ratioEnv <= 1 ? ratioEnv : 0.99;
 const num = (v: string | undefined, d: number) => (v && !Number.isNaN(Number(v)) ? Number(v) : d);
 
 export const FREE_LIMITS = {
-  /** Gemini free tier: requests per day for the configured model. */
+  /** Gemini free tier: requests per day, PER MODEL (each Flash model has its own daily quota). */
   geminiRequestsPerDay: num(process.env.FREE_GEMINI_RPD, 250),
+  /** How many Gemini models the agent rotates through (gemini.ts MODEL_CHAIN): the day's total is RPD × this. */
+  geminiModels: num(process.env.FREE_GEMINI_MODELS, 5),
   /** Gemini free tier: requests per minute. */
   geminiRequestsPerMinute: num(process.env.FREE_GEMINI_RPM, 10),
   /** Supabase free: 500 MB database. */
@@ -100,7 +102,8 @@ export function check(used: number, limit: number, label: string): LimitCheck {
 
 export async function checkGemini(db: SupabaseClient): Promise<LimitCheck> {
   const used = await readUsage(db, "gemini_requests");
-  return check(used, FREE_LIMITS.geminiRequestsPerDay, "Gemini requests today");
+  // The total across every model; each model also stops at 99% of its own quota (gemini.ts).
+  return check(used, FREE_LIMITS.geminiRequestsPerDay * FREE_LIMITS.geminiModels, "Gemini requests today");
 }
 
 export interface FreeTierSnapshot {
@@ -113,6 +116,36 @@ export interface FreeTierSnapshot {
   applicationsToday: number;
 }
 
+let repoPublicCache: { value: boolean; at: number } | null = null;
+/**
+ * Is the agent's GitHub repo public (unlimited Actions minutes)? GITHUB_REPO_PUBLIC decides when set (the
+ * workflow sets it); otherwise GitHub is asked once an hour. The dashboard on Vercel never had the variable, so it
+ * treated a public repo as private — "2,000 minutes a month, today's share used up" — and said minutes ran out.
+ * If GitHub can't be reached the answer is "public": a private repo without billing just stops at its limit, it
+ * never charges.
+ */
+export async function repoIsPublic(): Promise<boolean> {
+  const env = process.env.GITHUB_REPO_PUBLIC;
+  if (env === "true" || env === "false") return env === "true";
+  if (repoPublicCache && Date.now() - repoPublicCache.at < 3600_000) return repoPublicCache.value;
+  const repo = process.env.GH_REPO ?? process.env.GITHUB_REPOSITORY ?? "julienmuchinya/9to5-AI";
+  const token = process.env.GH_DISPATCH_TOKEN ?? process.env.GITHUB_TOKEN;
+  let value = true;
+  try {
+    const res = await fetch(`https://api.github.com/repos/${repo}`, {
+      headers: { Accept: "application/vnd.github+json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      signal: AbortSignal.timeout(4000),
+      cache: "no-store",
+    });
+    if (res.ok) value = !(await res.json()).private;
+    else if (res.status === 404 && !token) value = false; // private repos are invisible without a token
+  } catch {
+    // unreachable: keep "public"
+  }
+  repoPublicCache = { value, at: Date.now() };
+  return value;
+}
+
 export async function freeTierSnapshot(db: SupabaseClient): Promise<FreeTierSnapshot> {
   const [gemini, sizesRes, minutes, jobs, apps] = await Promise.all([
     checkGemini(db),
@@ -122,7 +155,7 @@ export async function freeTierSnapshot(db: SupabaseClient): Promise<FreeTierSnap
     readUsage(db, "applications_submitted"),
   ]);
   const sizes = (sizesRes.data ?? {}) as { db_bytes?: number; storage_bytes?: number; users?: number };
-  const publicRepo = process.env.GITHUB_REPO_PUBLIC === "true";
+  const publicRepo = await repoIsPublic();
   return {
     gemini,
     database: check(Number(sizes.db_bytes ?? 0), FREE_LIMITS.supabaseDbBytes, "Database size"),

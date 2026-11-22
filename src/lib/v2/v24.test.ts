@@ -37,8 +37,10 @@ describe("Gemini usage counting", () => {
     const { geminiGenerate } = await import("./gemini");
     await geminiGenerate({} as never, { contents: [{ role: "user", parts: [{ text: "hi" }] }], userId: "u1" });
     const req = bumps.filter((b) => b.metric === "gemini_requests");
+    // Once in total, once for the model that answered (each model has its own free quota), once for the user.
     expect(req).toEqual([
       { metric: "gemini_requests", by: 1, scope: undefined },
+      { metric: "gemini_requests", by: 1, scope: "model:gemini-3.8-flash" },
       { metric: "gemini_requests", by: 1, scope: "u1" },
     ]);
   });

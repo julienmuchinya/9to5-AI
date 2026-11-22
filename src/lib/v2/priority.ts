@@ -4,10 +4,10 @@
  * and no company gets more than COMPANY_DAILY_CAP applications per day.
  */
 
-export const COMPANY_DAILY_CAP = 15;
+export const COMPANY_DAILY_CAP = 25;
 /** Overall per-user daily ceiling; the real brake is the free AI quota (budget guard). */
 /** Highest daily cap the settings allow. The practical ceiling is AI budget and GitHub minutes, not this. */
-export const MAX_DAILY_APPLY_CAP = 500;
+export const MAX_DAILY_APPLY_CAP = 1000;
 /** New accounts (and the settings form) start here: apply to every good match, not a handful. */
 export const DEFAULT_DAILY_CAP = 100;
 export const DEFAULT_MIN_FIT = 55;

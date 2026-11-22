@@ -4,11 +4,11 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { apiUser, serviceClient } from "@/lib/v2/session";
 import { changeNotAsked } from "@/lib/v2/chat-guard";
 import { chatGenerate, FreeTierLimitError, type GeminiContent } from "@/lib/v2/gemini";
-import { freeTierSnapshot } from "@/lib/v2/freeTier";
+import { freeTierSnapshot, repoIsPublic } from "@/lib/v2/freeTier";
 import { logEvent } from "@/lib/v2/log";
 import { dispatchAgentRun, machineStatus } from "@/lib/v2/dispatch";
 import { agentCanSubmit, AUTO_SUBMIT_OR } from "@/lib/v2/verify";
-import { ago, COMPANY_DAILY_CAP, freshness, MAX_DAILY_APPLY_CAP, priorityScore } from "@/lib/v2/priority";
+import { ago, freshness, MAX_DAILY_APPLY_CAP, priorityScore } from "@/lib/v2/priority";
 import { needsKind, NEEDS_LABEL } from "@/lib/v2/needs";
 import { customStore, findSimilarAnswer, memoryKey, type CustomAnswers, type PendingQuestion } from "@/lib/v2/app-questions";
 import { jobSkillCoverage, resumeMatchScore, TAILOR_BELOW } from "@/lib/v2/resume-library";
@@ -96,21 +96,28 @@ async function runTool(name: string, args: Args, sb: SupabaseClient, userId: str
       }
       const a = ((last?.summary as { applications?: Record<string, number> })?.applications ?? {}) as Record<string, number>;
       const minutes = last?.ended_at && last?.started_at ? Math.round((Date.parse(last.ended_at) - Date.parse(last.started_at)) / 60000) : null;
+      const isPublic = await repoIsPublic();
       const explain: string[] = [];
-      if (a.time_budget) explain.push("The run used its whole time budget and left the rest of the queue for the next run (each run gets ~25–40 minutes of GitHub time; a private repo has ~57 free minutes a day, so most scheduled runs are skipped).");
+      if (a.time_budget)
+        explain.push(
+          isPublic
+            ? "The run used its whole time budget (up to 150 minutes) and handed the rest of the queue to a follow-up run. The repo is public, so GitHub minutes are unlimited — minutes are NOT the limit."
+            : "The run used its whole time budget and left the rest of the queue for the next run (a private repo has ~66 free minutes a day)."
+        );
       if (a.cooling_down) explain.push(`${a.cooling_down} jobs skipped because their site showed a CAPTCHA earlier and is cooling down for 24h.`);
-      if (a.company_daily_cap) explain.push(`${a.company_daily_cap} jobs held for a later day: already ${COMPANY_DAILY_CAP} applications to that company today.`);
+      if (a.company_daily_cap) explain.push(`${a.company_daily_cap} jobs held for a later day: the per-company daily cap (Settings → How the agent picks jobs) was reached for that company.`);
       if (a.needs_user) explain.push(`${a.needs_user} applications went to "Needs you" (CAPTCHA at submit, a question the agent couldn't answer, or no confirmation seen).`);
       if (a.failed) explain.push(`${a.failed} failed and will be retried (mostly Workday sign-in / verification emails and required questions).`);
       const skippedRuns = done.filter((r) => !Object.keys((r.summary as { applications?: object })?.applications ?? {}).length).length;
       return {
         last_run: last ? { started_at: last.started_at, minutes, status: last.status, ...a } : null,
-        runs_skipped_recently: skippedRuns ? `${skippedRuns} of the last ${done.length} runs did nothing (usually: the day's GitHub minutes were used up)` : null,
+        runs_skipped_recently: skippedRuns ? `${skippedRuns} of the last ${done.length} runs did nothing${isPublic ? " (not GitHub minutes — the repo is public and unlimited; usually an empty queue or an AI quota)" : " (usually: the day's GitHub minutes were used up)"}` : null,
+        github_minutes: isPublic ? "unlimited (public repo)" : "limited (private repo: 2,000 a month)",
         needs_you_by_kind: kinds,
         sites_cooling_down: (cool ?? []).length,
         explanation: explain,
         what_helps: [
-          "Make the GitHub repo public (unlimited free Actions minutes) or run the agent on your own PC — minutes are the biggest limit.",
+          ...(isPublic ? [] : ["Make the GitHub repo public (unlimited free Actions minutes) — minutes are the biggest limit on a private repo."]),
           "Answer the questions in Needs you (or here in chat) — they're reused on every form.",
           "Finish CAPTCHA applications yourself: the form is already filled, only the human check and Submit are left.",
         ],
@@ -528,7 +535,15 @@ export async function POST(req: Request) {
           try {
             // Changes only when the LATEST message asks for one (an AI once replayed an old "cap of 20" request).
             const blocked = changeNotAsked(name, text);
-            result = blocked ? { error: blocked } : await runTool(name, args ?? {}, supabase, user.id);
+            // A slow tool (a wide job search) must never use up the 60 seconds: past its share it reports back
+            // so the reply is still written (otherwise the request was cut off and the user got no answer at all).
+            const budget = Math.max(5_000, timeLeft() - 10_000);
+            result = blocked
+              ? { error: blocked }
+              : await Promise.race([
+                  runTool(name, args ?? {}, supabase, user.id),
+                  new Promise<Record<string, unknown>>((r) => setTimeout(() => r({ error: `${name} took longer than ${Math.round(budget / 1000)} s and was stopped — ask again (it is usually faster the second time) or narrow the request` }), budget)),
+                ]);
           } catch (err) {
             result = { error: (err as Error).message };
           }

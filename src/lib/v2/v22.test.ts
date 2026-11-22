@@ -122,10 +122,10 @@ describe("form filler (no AI)", () => {
 });
 
 describe("schedule", () => {
-  it("finds the next :17 of every second UTC hour", () => {
+  it("finds the next :17 of every UTC hour", () => {
     expect(nextScheduledRun(new Date("2026-11-06T00:03:00Z")).toISOString()).toBe("2026-11-06T00:17:00.000Z");
-    expect(nextScheduledRun(new Date("2026-11-06T00:20:00Z")).toISOString()).toBe("2026-11-06T02:17:00.000Z");
-    expect(nextScheduledRun(new Date("2026-11-06T23:00:00Z")).toISOString()).toBe("2026-11-07T00:17:00.000Z");
+    expect(nextScheduledRun(new Date("2026-11-06T00:20:00Z")).toISOString()).toBe("2026-11-06T01:17:00.000Z");
+    expect(nextScheduledRun(new Date("2026-11-06T23:20:00Z")).toISOString()).toBe("2026-11-07T00:17:00.000Z");
   });
 });
 

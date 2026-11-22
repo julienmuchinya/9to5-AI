@@ -1,5 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { bumpUsage, checkGemini, FREE_LIMITS } from "./freeTier";
+import { bumpUsage, checkGemini, FREE_LIMITS, readUsage, SAFETY_RATIO } from "./freeTier";
 import { fallbackAvailable, fallbackChat, fallbackConfigured, fallbackJson, type ChatMessage } from "./fallback-ai";
 
 const API = "https://generativelanguage.googleapis.com/v1beta/models";
@@ -10,7 +10,9 @@ const API = "https://generativelanguage.googleapis.com/v1beta/models";
  */
 // Newest Flash first (better answers, same free tier); each model has its own daily free quota, so falling through
 // the list also adds capacity. Pro models are left out: their free quota is tiny.
-const MODEL_CHAIN = ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-flash-latest", "gemini-3.5-flash-lite", "gemini-flash-lite-latest"];
+// Only real model names (no "-latest" aliases, which share a quota with one of these): each one's own free daily
+// quota is counted and used to 99%.
+export const MODEL_CHAIN = ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite"];
 const deadModels = new Set<string>();
 /** Models whose free daily quota ran out in this process (429). */
 const exhausted = new Set<string>();
@@ -87,6 +89,16 @@ export async function geminiGenerate(
   outer: for (let round = 0; round < 2; round++) {
     for (const model of models) {
       if (deadModels.has(model) || exhausted.has(model)) continue;
+      // Each model has its own free daily quota: stop using one at 99% of it and move to the next.
+      const usedByModel = await Promise.resolve()
+        .then(() => readUsage(db, "gemini_requests", `model:${model}`))
+        .catch(() => 0);
+      if (usedByModel >= Math.floor(FREE_LIMITS.geminiRequestsPerDay * SAFETY_RATIO)) {
+        exhausted.add(model);
+        saw429 = true;
+        detail = `${model}: our daily stop (${usedByModel}/${FREE_LIMITS.geminiRequestsPerDay})`;
+        continue;
+      }
       try {
         res = await fetch(`${API}/${model}:generateContent`, {
           method: "POST",
@@ -122,6 +134,7 @@ export async function geminiGenerate(
   // on Google's side; counting them used to burn our own daily budget twice as fast (216 counted vs 112 real).
   if (res?.ok) {
     await bumpUsage(db, "gemini_requests", 1);
+    if (preferred) await bumpUsage(db, "gemini_requests", 1, `model:${preferred}`).catch(() => {});
     if (opts.userId) await bumpUsage(db, "gemini_requests", 1, opts.userId);
   }
 

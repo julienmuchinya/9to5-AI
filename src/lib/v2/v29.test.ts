@@ -98,9 +98,9 @@ describe("more sites the agent submits to", () => {
 describe("higher limits", () => {
   it("starts new accounts on a high daily cap and a lower fit bar", () => {
     expect(DEFAULT_DAILY_CAP).toBe(100);
-    expect(MAX_DAILY_APPLY_CAP).toBe(500);
+    expect(MAX_DAILY_APPLY_CAP).toBe(1000);
     expect(DEFAULT_MIN_FIT).toBe(55);
-    expect(COMPANY_DAILY_CAP).toBe(15);
+    expect(COMPANY_DAILY_CAP).toBe(25);
   });
 });
 

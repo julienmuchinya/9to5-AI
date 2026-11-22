@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("./freeTier", () => ({
-  FREE_LIMITS: { geminiRequestsPerMinute: 100000 },
+  FREE_LIMITS: { geminiRequestsPerMinute: 100000, geminiRequestsPerDay: 250 },
+  SAFETY_RATIO: 0.99,
+  readUsage: async () => 0,
   checkGemini: async () => ({ allowed: true }),
   bumpUsage: async () => {},
 }));

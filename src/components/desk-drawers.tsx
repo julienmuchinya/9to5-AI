@@ -164,7 +164,7 @@ export function ProfileDrawer({ open, tab, onTab, onClose }: { open: boolean; ta
             <>
               <p className="kicker !text-[var(--orange-text)]">Assisted search · your rules</p>
               <p className="display mt-2 text-[26px]">Smart help. Clear boundaries.</p>
-              <p className="mt-1 text-sm text-[var(--muted)]">The agent looks for jobs about every two hours. These rules decide what it may do on its own.</p>
+              <p className="mt-1 text-sm text-[var(--muted)]">The agent looks for jobs about every hour. These rules decide what it may do on its own.</p>
               <ul className="mt-6 border-t border-[var(--foreground)]">
                 <li className="flex items-center justify-between gap-4 border-b border-[var(--border)] py-4">
                   <div>

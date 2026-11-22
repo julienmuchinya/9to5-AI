@@ -5,7 +5,7 @@ run-name: ${{ github.event_name == 'workflow_dispatch' && inputs.only_user != ''
 on:
   schedule:
     # Every 2 hours (UTC); a run with jobs left starts the next one itself. GitHub may delay scheduled runs.
-    - cron: "17 */2 * * *"
+    - cron: "17 * * * *"
   workflow_dispatch:
     inputs:
       discover:
@@ -91,7 +91,7 @@ jobs:
           # Stop starting new applications after this many minutes (job timeout is 175).
           RUN_BUDGET_MIN: ${{ steps.vis.outputs.public == 'false' && '42' || '150' }}
           # Applications filled at the same time (different sites).
-          APPLY_CONCURRENCY: ${{ steps.vis.outputs.public == 'false' && '4' || '6' }}
+          APPLY_CONCURRENCY: ${{ steps.vis.outputs.public == 'false' && '4' || '8' }}
           # Screenshot + page text of every application that didn't go through (kept 3 days).
           # Private repo only: on a public repo anyone could download them (they show your filled-in forms).
           APPLY_DEBUG_DIR: ${{ steps.vis.outputs.public == 'false' && 'debug' || '' }}

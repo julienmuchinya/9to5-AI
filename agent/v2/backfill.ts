@@ -35,7 +35,7 @@ export async function answerWaitingQuestions(
     .eq("user_id", userId)
     .eq("status", "needs_user")
     .not("pending_questions", "is", null)
-    .limit(300);
+    .limit(1000);
   const waiting = (data ?? []) as unknown as Waiting[];
   if (!waiting.length) return out;
 
