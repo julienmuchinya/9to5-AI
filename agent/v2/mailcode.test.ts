@@ -61,3 +61,14 @@ describe("connect with Google", () => {
     expect(closed).toBe(true);
   });
 });
+
+describe("Workday reset / verify links belong to ONE company", () => {
+  const other = `<a href="https://wd5.myworkday.com/russellinvestments/login/reset?token=abcdefghijklmnopqrstuvwxyz123">Reset your password</a>`;
+  it("never takes another company's link (Vertex once used Russell Investments' reset email)", () => {
+    expect(extractLink(other, "", "vrtx.wd501.myworkdayjobs.com")).toBeNull();
+  });
+  it("takes this company's link, on its own address or Workday's shared one", () => {
+    expect(extractLink(`<a href="https://vrtx.wd501.myworkdayjobs.com/vertex_intern/passwordreset/abcdefghijklmnopqrstuvwxyz12">Reset</a>`, "", "vrtx.wd501.myworkdayjobs.com")).toMatch(/vrtx\.wd501/);
+    expect(extractLink(`${other}<a href="https://wd501.myworkday.com/vrtx/login/reset?token=zyxwvutsrqponmlkjihgfedcba987">Reset</a>`, "", "vrtx.wd501.myworkdayjobs.com")).toMatch(/\/vrtx\//);
+  });
+});

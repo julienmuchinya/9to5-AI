@@ -49,16 +49,24 @@ export function extractLink(html: string, text = "", host?: string): string | nu
     (u) => /^https?:/.test(u) && !/unsubscribe|privacy|help|terms|logo|\.(png|jpe?g|gif)(\?|$)/i.test(u)
   );
   const keyword = (u: string) => /(verif|confirm|activat|validate|email-?token|registration|reset|passwordchange|change-?password|forgot)/i.test(u);
-  // With `host` (the portal, e.g. acme.wd5.myworkdayjobs.com) a link to that portal wins, and a portal link
-  // carrying a token counts even without the word "verify" (Workday's ".../activate/<token>" style).
-  const onHost = (u: string) => {
-    try {
-      return Boolean(host) && new URL(u).hostname.toLowerCase() === host!.toLowerCase();
-    } catch {
-      return false;
-    }
-  };
-  return urls.find((u) => onHost(u) && keyword(u)) ?? urls.find(keyword) ?? urls.find((u) => onHost(u) && /(token|code|key)=|\/[A-Za-z0-9_-]{24,}/.test(u)) ?? null;
+  if (host) {
+    // A portal (one company's Workday site): ONLY that company's link. Falling back to "any reset link" opened another
+    // company's password-reset email (Vertex used Russell Investments' link) and changed the wrong account's password.
+    const tenant = host.toLowerCase().split(".")[0];
+    const ours = (u: string) => {
+      try {
+        const x = new URL(u);
+        const h = x.hostname.toLowerCase();
+        if (h === host.toLowerCase()) return true;
+        return /(^|\.)myworkday(jobs|site)?\.com$/.test(h) && (h.startsWith(`${tenant}.`) || x.pathname.toLowerCase().split("/").includes(tenant));
+      } catch {
+        return false;
+      }
+    };
+    const mine = urls.filter(ours);
+    return mine.find(keyword) ?? mine.find((u) => /(token|code|key)=|\/[A-Za-z0-9_-]{24,}/.test(u)) ?? null;
+  }
+  return urls.find(keyword) ?? null;
 }
 
 /** Does the email mention this company (its first distinctive word)? Unknown wording → yes. */
