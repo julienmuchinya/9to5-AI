@@ -231,6 +231,8 @@ export async function fallbackChat(
 
     for (const { m } of candidates) {
       const k = keyOf(p, m);
+      /** After a JSON slip, the retry thinks less (shorter output, less room to go wrong). */
+      let lighter = false;
       for (let attempt = 0; attempt < 2; attempt++) {
         const wait = Math.max(Math.max(0, (blockedUntil.get(k) ?? 0) - Date.now()), tokenWait(k, need, p.tpm));
         if (wait > 65_000) break; // this model is out for longer than a minute — try the next one
@@ -254,7 +256,7 @@ export async function fallbackChat(
               ...(opts.tools?.length ? { tools: opts.tools, tool_choice: "auto" } : {}),
               ...(m.extra ?? {}),
               // Chat has a hard 60-second limit: think fast there; "medium" is for background work (answers, resumes).
-              ...(opts.deadline && (m.extra as { reasoning_effort?: string } | undefined)?.reasoning_effort === "medium" ? { reasoning_effort: "low" } : {}),
+              ...((opts.deadline || lighter) && (m.extra as { reasoning_effort?: string } | undefined)?.reasoning_effort === "medium" ? { reasoning_effort: "low" } : {}),
               messages,
             }),
             signal: AbortSignal.timeout(Math.max(3_000, Math.min(55_000, timeLeft() - 2_000))),
@@ -314,7 +316,16 @@ export async function fallbackChat(
           continue; // short per-minute wait — retry once
         }
         if (res.status === 400) {
-          // Usually a parameter this model doesn't accept; don't keep paying for it in this process.
+          // One answer that wasn't valid JSON (Groq checks JSON mode and answers 400) is NOT a broken model — it used
+          // to disable gpt-oss-120b for the whole run after a single slip. Retry once, thinking less.
+          if (/json_validate_failed|failed to generate json|failed_generation|max completion tokens|max_tokens/i.test(body)) {
+            if (!lighter) {
+              lighter = true;
+              continue;
+            }
+            break;
+          }
+          // A parameter this model doesn't accept: don't keep paying for it in this process.
           dead.add(k);
           break;
         }

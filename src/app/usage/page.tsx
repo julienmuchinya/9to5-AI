@@ -1,5 +1,5 @@
 import { requireUser, serviceClient } from "@/lib/v2/session";
-import { check, freeTierSnapshot, SAFETY_RATIO, type LimitCheck } from "@/lib/v2/freeTier";
+import { check, FREE_LIMITS, freeTierSnapshot, SAFETY_RATIO, type LimitCheck } from "@/lib/v2/freeTier";
 import { fallbackStatus } from "@/lib/v2/fallback-ai";
 import { nextPacificMidnight, nextUtcMidnight } from "@/lib/v2/ai-status";
 import { timeFmt } from "@/lib/tz";
@@ -45,7 +45,7 @@ export default async function UsagePage() {
         <Meter
           title="Gemini AI requests (today)"
           check={s.gemini}
-          note={`Next reset: ${t.dateTime(nextPacificMidnight())} (midnight Pacific). Used for reading resume PDFs and chat${backups.length ? ", and as the backup for application questions" : ", and application questions"}.`}
+          note={`Next reset: ${t.dateTime(nextPacificMidnight())} (midnight Pacific). ${FREE_LIMITS.geminiModels} Gemini models × ${FREE_LIMITS.geminiRequestsPerDay} free requests each; each model stops at ${stop} of its own quota and the next one takes over. Used for reading resume PDFs and chat${backups.length ? ", and as the backup for application questions" : ", and application questions"}.`}
         />
         {backups.map((b) => (
           <Meter

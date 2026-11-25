@@ -9,7 +9,7 @@ import type { Page } from "playwright";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { autoFollowUpAnswer, memoryKey, questionContext, type PendingQuestion } from "../../src/lib/v2/app-questions";
 import { pickOption } from "../../src/lib/v2/app-questions";
-import { SUCCESS, answerFields, captchaVisible, collectFields, fill, labelled, questionsFor, readComboboxOptions, type ApplyOpts, type ApplyResult, type Field } from "./apply";
+import { SUCCESS, formSnapshot, answerFields, captchaVisible, collectFields, fill, labelled, questionsFor, readComboboxOptions, type ApplyOpts, type ApplyResult, type Field } from "./apply";
 
 const WD = (id: string) => `[data-automation-id="${id}"]`;
 const AUTH_FORM = [WD("createAccountSubmitButton"), WD("signInSubmitButton"), WD("signInContent")].join(", ");
@@ -769,7 +769,9 @@ export async function applyWorkday(page: Page, db: SupabaseClient, opts: ApplyOp
         }
         if (unanswered.length) {
           const pending: PendingQuestion[] = questionsFor(unanswered, lastFields);
+          const stuckLabels = new Set(pending.map((q) => q.label));
           return {
+            form: formSnapshot(lastFields, (f) => allAnswers[f.label], (f) => stuckLabels.has(f.label)),
             status: "needs_user",
             detail: `Waiting on your answer to ${pending.length} question${pending.length === 1 ? "" : "s"} (Workday "${stepName}") — answer once on this page and the agent reapplies`,
             answers: allAnswers,
@@ -838,6 +840,7 @@ export async function applyWorkday(page: Page, db: SupabaseClient, opts: ApplyOp
             aiCalls,
             pending,
             accountCreated,
+            form: formSnapshot(fields, (f) => ans.answers[f.id], (f) => missing.includes(f)),
           };
         }
         for (const f of fields) {

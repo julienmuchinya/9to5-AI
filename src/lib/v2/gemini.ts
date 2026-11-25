@@ -12,7 +12,7 @@ const API = "https://generativelanguage.googleapis.com/v1beta/models";
 // the list also adds capacity. Pro models are left out: their free quota is tiny.
 // Only real model names (no "-latest" aliases, which share a quota with one of these): each one's own free daily
 // quota is counted and used to 99%.
-export const MODEL_CHAIN = ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite"];
+export const MODEL_CHAIN = ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"];
 const deadModels = new Set<string>();
 /** Models whose free daily quota ran out in this process (429). */
 const exhausted = new Set<string>();
@@ -88,7 +88,13 @@ export async function geminiGenerate(
   const models = geminiModels();
   outer: for (let round = 0; round < 2; round++) {
     for (const model of models) {
-      if (deadModels.has(model) || exhausted.has(model)) continue;
+      if (deadModels.has(model)) continue;
+      if (exhausted.has(model)) {
+        // Used up earlier in this run: still a quota stop, not "no response" (which sent jobs to Needs you).
+        saw429 = true;
+        detail = `${model}: free quota used up earlier this run`;
+        continue;
+      }
       // Each model has its own free daily quota: stop using one at 99% of it and move to the next.
       const usedByModel = await Promise.resolve()
         .then(() => readUsage(db, "gemini_requests", `model:${model}`))

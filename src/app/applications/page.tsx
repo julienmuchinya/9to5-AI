@@ -7,6 +7,7 @@ import { RouteDrawer } from "@/components/drawer";
 import { customStore, findSimilarAnswer, questionSimilarity, type CustomAnswers, type PendingQuestion } from "@/lib/v2/app-questions";
 import { type AskedQuestion } from "./pending-questions";
 import { ApplicationQuestions, type StuckApplication } from "./application-questions";
+import type { FormRow } from "@/lib/v2/app-questions";
 import { BulkBar } from "./bulk-bar";
 import { AnswersEditor } from "./answers-editor";
 import { STAGE_LABEL, gmailLink, roleFamily } from "@/lib/v2/tracking";
@@ -37,8 +38,28 @@ const hostOf = (u: string | null | undefined) => {
   }
 };
 /** Old rows stored answers under internal field ids ("f3"); hide those and file markers. */
+/**
+ * The rows of a Needs-you card: the form exactly as the agent saved it (answers.__form, in order), with the questions
+ * still open marked; for older applications, the answers it filled followed by the open questions.
+ */
+function formRows(answers: Record<string, unknown> | null, open: PendingQuestion[]): { rows: FormRow[]; inOrder: boolean } {
+  const isOpen = (label: string) => open.some((o) => o.label === label || questionSimilarity(o.label, label) >= 0.9);
+  const saved = Array.isArray(answers?.__form) ? (answers!.__form as FormRow[]) : null;
+  if (saved?.length) {
+    const rows = saved.map((r) => ({ ...r, missing: isOpen(r.label) }));
+    // Open questions the snapshot doesn't have (e.g. found on a later Workday page) go at the end.
+    for (const q of open) if (!rows.some((r) => r.label === q.label)) rows.push({ label: q.label, kind: q.kind, options: q.options ?? [], answer: "", missing: true, required: true });
+    return { rows, inOrder: true };
+  }
+  const rows: FormRow[] = readable(answers as Record<string, string> | null)
+    .filter(([q]) => !isOpen(q))
+    .map(([q, a]) => ({ label: q, kind: String(a).length > 90 ? "textarea" : "text", options: [], answer: String(a), missing: false, required: false, fromResume: /^(employment|education) \d+ — /i.test(q) }));
+  for (const q of open) rows.push({ label: q.label, kind: q.kind, options: q.options ?? [], answer: "", missing: true, required: true });
+  return { rows, inOrder: false };
+}
+
 const readable = (answers: Record<string, string> | null) =>
-  Object.entries(answers ?? {}).filter(([q, v]) => v && v !== "__RESUME__" && !/^f\d+(_\d+)?$/.test(q));
+  Object.entries(answers ?? {}).filter(([q, v]) => typeof v === "string" && v && v !== "__RESUME__" && !q.startsWith("__") && !/^f\d+(_\d+)?$/.test(q));
 
 type Row = {
   id: string;
@@ -94,12 +115,10 @@ export default async function ApplicationsPage({ searchParams }: { searchParams:
         id: r.id,
         company: r.jobs?.company_name ?? "A company",
         title: r.jobs?.title ?? "",
-        answered: readable(r.answers ?? null)
-          .filter(([q2]) => !open.some((o) => o.label === q2))
-          .map(([q2, a2]) => [q2, String(a2)] as [string, string]),
-        open,
+        ...formRows(r.answers as Record<string, unknown> | null, open),
         alsoAsking: 0,
-      });
+        open,
+      } as StuckApplication & { open: PendingQuestion[] });
     const k = needsKind(r.error, open.length);
     kinds.set(r.id, k);
     kindCount[k] = (kindCount[k] ?? 0) + 1;
@@ -115,7 +134,7 @@ export default async function ApplicationsPage({ searchParams }: { searchParams:
   }
   const questions = [...asked.values()].sort((a, b) => b.companies.length - a.companies.length);
   // How many OTHER waiting applications the same answers unblock.
-  for (const a of stuck) {
+  for (const a of stuck as (StuckApplication & { open: PendingQuestion[] })[]) {
     const others = new Set<string>();
     for (const q of a.open) {
       const same = asked.get(q.key) ?? [...asked.values()].find((x) => questionSimilarity(x.label, q.label) >= 0.75);

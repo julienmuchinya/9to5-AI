@@ -4,7 +4,7 @@ import { looksLikeSecretValue, sensitiveField } from "@/lib/v2/sensitive";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { requireUser } from "@/lib/v2/session";
-import { APP_QUESTIONS, customStore, findSimilarAnswer, memoryKey, type CustomAnswers, type PendingQuestion } from "@/lib/v2/app-questions";
+import { APP_QUESTIONS, customStore, findSimilarAnswer, isJobSpecific, memoryKey, type CustomAnswers, type FormRow, type PendingQuestion } from "@/lib/v2/app-questions";
 import { DEFAULT_DAILY_CAP, DEFAULT_MIN_FIT, MAX_DAILY_APPLY_CAP } from "@/lib/v2/priority";
 import { agentCanSubmit } from "@/lib/v2/verify";
 import { readTuning } from "@/lib/v2/tuning";
@@ -224,6 +224,86 @@ export async function answerPendingQuestions(form: FormData) {
     ? `Saved ${saved} answer${saved === 1 ? "" : "s"}. ${requeued} application${requeued === 1 ? "" : "s"} went back in the queue.`
     : "Nothing to save — fill in at least one answer.";
   redirect(`/applications?tab=needs&msg=${encodeURIComponent(msg)}`);
+}
+
+/**
+ * Needs you → one application's whole form: every question in order, any answer changed, the missing ones filled.
+ * Each changed answer is saved as the user's own answer (used on every application asking the same question, and it
+ * overrides what the agent guessed before) unless it's specific to this company; the application goes back in the
+ * queue once nothing is missing, and so do other applications the new answers unblock.
+ */
+export async function saveApplicationForm(form: FormData) {
+  const { supabase, user } = await requireUser();
+  const appId = String(form.get("app_id") ?? "");
+  const back = (msg: string) => redirect(`/applications?tab=needs&msg=${encodeURIComponent(msg)}#app-${appId}`);
+  const [{ data: app }, { data: p }] = await Promise.all([
+    supabase.from("applications").select("id,answers,pending_questions,jobs(company_name)").eq("id", appId).eq("user_id", user.id).maybeSingle(),
+    supabase.from("profiles").select("custom_answers").eq("id", user.id).maybeSingle(),
+  ]);
+  if (!app) back("Couldn't find that application");
+  const company = (app as unknown as { jobs: { company_name: string } | null }).jobs?.company_name ?? "";
+  const answers: Record<string, unknown> = { ...((app!.answers ?? {}) as Record<string, unknown>) };
+  const rows: FormRow[] = Array.isArray(answers.__form) ? [...(answers.__form as FormRow[])] : [];
+  const custom: CustomAnswers = { ...((p?.custom_answers ?? {}) as CustomAnswers) };
+  const now = new Date().toISOString();
+  let changed = 0;
+  let remembered = 0;
+  const n = Math.min(300, Number(form.get("rows") ?? 0) || 0);
+  const stillMissing: string[] = [];
+  for (let i = 0; i < n; i++) {
+    const q = String(form.get(`q_${i}`) ?? "").slice(0, 700);
+    if (!q) continue;
+    const before = String(form.get(`o_${i}`) ?? "");
+    const wasMissing = form.get(`m_${i}`) === "1";
+    const fromResume = form.get(`r_${i}`) === "1";
+    const a = form
+      .getAll(`a_${i}`)
+      .map((v) => String(v ?? "").trim())
+      .filter(Boolean)
+      .join(", ")
+      .slice(0, 2000);
+    if (!a) {
+      if (wasMissing) stillMissing.push(q);
+      continue;
+    }
+    if (a === before && !wasMissing) continue;
+    // Never store a secret (SSN, card / account number, ID number, date of birth) anywhere.
+    if (sensitiveField(q) || looksLikeSecretValue(a)) {
+      if (wasMissing) stillMissing.push(q);
+      continue;
+    }
+    changed++;
+    answers[q] = a;
+    const row = rows.find((r) => r.label === q);
+    if (row) Object.assign(row, { answer: a, missing: false });
+    // Reused on every application — except company-specific questions and resume blocks (those come from the resume).
+    if (!fromResume && !isJobSpecific(q, company)) {
+      custom[memoryKey(q)] = { q, a, at: now };
+      remembered++;
+    }
+  }
+  if (rows.length) answers.__form = rows;
+  const pending = ((app!.pending_questions ?? []) as PendingQuestion[]).filter((pq) => stillMissing.includes(pq.label) || (!answers[pq.label] && !customStore(custom)[pq.key]));
+  const done = pending.length === 0 && stillMissing.length === 0;
+  const { error } = await supabase
+    .from("applications")
+    .update(done ? { answers, status: "queued", pending_questions: null, attempts: 0, error: "Your answers are saved — reapplying on the next run" } : { answers, pending_questions: pending })
+    .eq("id", appId)
+    .eq("user_id", user.id);
+  if (error) back(`Couldn't save: ${error.message}`);
+  if (remembered) {
+    const { error: e2 } = await supabase.from("profiles").update({ custom_answers: custom }).eq("id", user.id);
+    if (e2) back(`Saved on this application, but not for future ones: ${e2.message}`);
+  }
+  const requeued = await requeueAnswered(supabase, user.id, custom);
+  revalidatePath("/applications");
+  revalidatePath("/profile");
+  if (!changed) back("Nothing changed — edit an answer or fill in the missing ones first.");
+  back(
+    `Saved ${changed} answer${changed === 1 ? "" : "s"}${remembered ? ` (${remembered} reused on every application from now on)` : ""}. ` +
+      (done ? "This application goes back in the queue" : `${stillMissing.length || pending.length} still missing on this one`) +
+      (requeued ? `; ${requeued} other application(s) were unblocked by the same answers.` : ".")
+  );
 }
 
 /** Edit or delete saved answers (Profile → Your answers to other questions). Empty = delete. */

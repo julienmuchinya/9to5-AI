@@ -129,6 +129,27 @@ describe("resume PDFs", () => {
   });
 });
 
+describe("bugs found in live runs (Nov 23-24)", () => {
+  it("maps degree abbreviations to the dropdown's wording (132 'needs Degree' rejections)", async () => {
+    const { degreeChoices } = await import("../../../agent/v2/apply");
+    expect(degreeChoices("M.S.")).toContain("Master's Degree");
+    expect(degreeChoices("B.S.")).toContain("Bachelor's Degree");
+    expect(degreeChoices("BSc")).toContain("Bachelor's Degree");
+    expect(degreeChoices("MBA")).toContain("Master's Degree");
+    expect(degreeChoices("Ph.D.")).toContain("Doctor of Philosophy");
+  });
+  it("the user's own answer beats the built-in rules", () => {
+    const f = field("Are you a current employee of the U.S. Government or any state or local government?");
+    expect(knownValue(f, applicant)).toBe("No");
+    const mine = { ...applicant, custom: { "are you a current employee of the u s government or any state or local government": "Yes" } };
+    expect(knownValue(f, mine)).toBe("Yes");
+  });
+  it("always attaches a written cover letter where the form has a slot for one", () => {
+    expect(knownValue(field("cover letter", "file", [], false), applicant)).toBe("__COVER__");
+    expect(knownValue(field("resume", "file", []), applicant)).toBe("__RESUME__");
+  });
+});
+
 describe("employer-site jobs", () => {
   it("applies to Greenhouse jobs listed on the employer's own page through Greenhouse's form", async () => {
     const { greenhouseApplyUrl } = await import("./discovery/sources");

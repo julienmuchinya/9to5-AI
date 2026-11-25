@@ -157,6 +157,6 @@ describe("reading Greenhouse resume blocks", () => {
     expect(files.some((l) => /cover letter/i.test(l))).toBe(true);
     // The resume never goes into the cover-letter slot.
     const cover = f.find((x) => x.kind === "file" && /cover/i.test(x.label))!;
-    expect(knownValue(cover, me)).toBeNull();
+    expect(knownValue(cover, me)).toBe("__COVER__"); // a cover-letter slot always gets a written letter (some forms require it only visually)
   });
 });

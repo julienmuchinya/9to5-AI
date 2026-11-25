@@ -1106,7 +1106,13 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
     // A timeout or crash on a queued job goes back in the queue (up to 3 tries) instead of being lost.
     let status: string = r.status;
     let detail = r.detail;
-    if (r.status === "failed" && !dryRun) {
+    // An AI outage (Google overloaded, every model busy) is not the job's fault: back in the queue, no try used up.
+    const aiTrouble = /AI request failed|AI is overloaded|overloaded right now|Backup AI|groq|openrouter|Google's AI/i.test(r.detail);
+    if (aiTrouble && r.status !== "submitted") {
+      status = "queued";
+      detail = "Waiting: the AI was busy or out for a moment — reapplying on the next run";
+      bump("ai_busy_requeued");
+    } else if (r.status === "failed" && !dryRun) {
       const { data: row } = await sb.from("applications").select("id,attempts").eq("user_id", u.id).eq("job_id", job.id).maybeSingle();
       const attempts = (row?.attempts ?? 0) + 1;
       if (row) await sb.from("applications").update({ attempts }).eq("id", row.id);
@@ -1157,7 +1163,8 @@ async function applyForUser(sb: SupabaseClient, u: UserRow, s: Settings, browser
       ...base,
       status,
       error: r.status === "submitted" ? null : detail,
-      answers: r.answers ?? {},
+      // answers.__form: the whole form in order, so Needs you can show (and let you edit) every question.
+      answers: r.form?.length && status === "needs_user" ? { ...(r.answers ?? {}), __form: r.form } : (r.answers ?? {}),
       // Also after the third failed try (status becomes needs_user): the questions it was stuck on, with their choices.
       pending_questions: status === "needs_user" && r.pending?.length ? r.pending : null,
       submitted_at: r.status === "submitted" ? new Date().toISOString() : null,

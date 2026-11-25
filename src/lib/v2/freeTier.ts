@@ -15,7 +15,7 @@ export const FREE_LIMITS = {
   /** Gemini free tier: requests per day, PER MODEL (each Flash model has its own daily quota). */
   geminiRequestsPerDay: num(process.env.FREE_GEMINI_RPD, 250),
   /** How many Gemini models the agent rotates through (gemini.ts MODEL_CHAIN): the day's total is RPD × this. */
-  geminiModels: num(process.env.FREE_GEMINI_MODELS, 5),
+  geminiModels: num(process.env.FREE_GEMINI_MODELS, 6),
   /** Gemini free tier: requests per minute. */
   geminiRequestsPerMinute: num(process.env.FREE_GEMINI_RPM, 10),
   /** Supabase free: 500 MB database. */

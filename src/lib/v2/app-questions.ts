@@ -318,6 +318,24 @@ export interface PendingQuestion {
   context?: { label: string; answer?: string }[];
 }
 
+/**
+ * One question of a form the agent stopped on, in the form's own order, with what it filled in. Saved with the
+ * application (answers.__form) so "Needs you" can show the whole form — the questions before and after the one
+ * it's stuck on — and let the user change any answer.
+ */
+export interface FormRow {
+  label: string;
+  kind: string;
+  options: string[];
+  /** What the agent filled in ("" when it couldn't). */
+  answer: string;
+  /** Required and still unanswered (or rejected by the site): the user's turn. */
+  missing: boolean;
+  required: boolean;
+  /** Filled from the resume's Employment / Education blocks (edit the resume / profile to change). */
+  fromResume?: boolean;
+}
+
 /** Does this question depend on the one before it? ("If yes, please explain", "Please specify", "Other — which?") */
 export function isFollowUp(label: string): boolean {
   const l = label.replace(/[*:]+\s*$/, "").trim();

@@ -4,6 +4,7 @@ import { geminiJson, FreeTierLimitError } from "../../src/lib/v2/gemini";
 import { applyWorkday, TRACES } from "./workday";
 import { answerPrompt, salaryFacts } from "./answer-ai";
 import { scrubFacts, sensitiveField, suspiciousPassword, type SensitiveHit } from "../../src/lib/v2/sensitive";
+import type { FormRow } from "../../src/lib/v2/app-questions";
 import { answerFromProfile, autoFollowUpAnswer, commonSenseAnswer, findSimilarAnswer, isFollowUp, memoryKey, pickOption, questionContext, questionFor, type AppAnswers, type PendingQuestion } from "../../src/lib/v2/app-questions";
 
 export interface Applicant {
@@ -85,6 +86,24 @@ export interface ApplyResult {
   confirmation?: string[];
   /** Step-by-step record of the attempt (Workday sign-in etc.), saved privately when it didn't go through. */
   trace?: string[];
+  /** The whole form in order with what was filled, when it stopped for the user (shown on Needs you). */
+  form?: FormRow[];
+}
+
+/** The form as the agent left it: every question in order, its choices, the answer, and which ones need the user. */
+export function formSnapshot(fields: Field[], answerOf: (f: Field) => string | undefined, isMissing: (f: Field) => boolean): FormRow[] {
+  const seen = new Set<string>();
+  const rows: FormRow[] = [];
+  for (const f of fields) {
+    if (f.kind === "file" || /password/i.test(f.label) || !f.label.trim()) continue;
+    const k = `${f.kind}|${f.label}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    const raw = answerOf(f) ?? "";
+    const answer = raw.startsWith("__") ? "" : raw.split(ALT)[0];
+    rows.push({ label: f.label.slice(0, 700), kind: f.kind, options: (f.kind === "checkbox" ? ["Yes", "No"] : f.options).slice(0, 60), answer, missing: isMissing(f), required: f.required, ...(f.section ? { fromResume: true } : {}) });
+  }
+  return rows.slice(0, 120);
 }
 
 /** Text of the page AND its frames (embedded application forms show their thank-you inside an iframe). */
@@ -246,7 +265,12 @@ export async function collectFields(page: Page): Promise<Field[]> {
       // Workday: the question is the formField's <label>, which isn't tied to the button by for=.
       const wdField = el.closest("[data-automation-id^=formField-]");
       const wdLabel = wdField ? textOf(wdField.querySelector("label, legend")) : "";
-      return clean(textOf(byFor) || aria || lb || textOf(el.closest("label")) || wdLabel || questionText(el) || el.getAttribute("placeholder") || el.getAttribute("name") || "");
+      // Words a widget calls itself ("Search", "textbox", "Select...") are not the question (Rippling): skip them and use
+      // the question text above the box instead.
+      const generic = (x: string) => /^\s*(search|textbox|text box|input|combobox|select\.*|select an option|choose\.*|type to search|type here|enter text|start typing\.*)\s*$/i.test(x);
+      const picks = [textOf(byFor), aria, lb, textOf(el.closest("label")), wdLabel];
+      const own = picks.find((x) => x && !generic(x));
+      return clean(own || questionText(el) || picks.find(Boolean) || el.getAttribute("placeholder") || el.getAttribute("name") || "");
     };
     const titleMarked = (el: Element) => {
       const id = el.getAttribute("id");
@@ -438,10 +462,16 @@ const degreeYears = (deg?: string | null) => (/ph\.?d|doctor/i.test(deg ?? "") ?
 /** What to type for a degree, with simpler fallbacks for pickers that don't have the exact wording. */
 export function degreeChoices(deg: string): string[] {
   const d = straight(deg);
-  if (/master/i.test(d)) return [d, "Master's Degree", "Master of Science", "Master's", "Master"];
-  if (/bachelor/i.test(d)) return [d, "Bachelor's Degree", "Bachelor of Science", "Bachelor's", "Bachelor"];
-  if (/ph\.?d|doctor/i.test(d)) return [d, "Doctor of Philosophy", "Ph.D.", "PhD", "Doctorate"];
-  if (/associate/i.test(d)) return [d, "Associate's Degree", "Associate"];
+  // Abbreviations too: a resume read as "M.S." / "B.S." left Greenhouse's Degree dropdown (which only lists
+  // "Master's Degree", "Bachelor's Degree"…) empty, and 132 forms were rejected with "needs Degree".
+  const k = d.toLowerCase().replace(/[^a-z]/g, "");
+  if (/master/i.test(d) || /^(ms|msc|ma|mba|meng|mpa|mph|mfa|mps|mcs|mse|msee|msba)$/.test(k) || /^m\.?\s?(s|sc|a|eng)\b/i.test(d))
+    return [d, "Master's Degree", "Master of Science", "Master's", "Master", "Masters"];
+  if (/bachelor/i.test(d) || /^(bs|bsc|ba|bba|beng|bse|bsee|bfa|bas|bscs)$/.test(k) || /^b\.?\s?(s|sc|a|eng)\b/i.test(d))
+    return [d, "Bachelor's Degree", "Bachelor of Science", "Bachelor's", "Bachelor", "Bachelors"];
+  if (/ph\.?d|doctor/i.test(d) || /^(phd|dphil|edd|dba)$/.test(k)) return [d, "Doctor of Philosophy", "Ph.D.", "PhD", "Doctorate"];
+  if (/associate/i.test(d) || /^(as|aa|aas)$/.test(k)) return [d, "Associate's Degree", "Associate"];
+  if (/high school|ged|diploma/i.test(d)) return [d, "High School", "High School Diploma", "GED"];
   return [d];
 }
 
@@ -576,6 +606,12 @@ export function knownValue(f: Field, a: Applicant): string | null {
   if (sensitiveField(f.label, f.kind)) return SKIP;
   const fromResume = sectionValue(f, a);
   if (fromResume !== undefined) return fromResume;
+  // The user's own answer to this exact (or nearly identical) question beats every built-in rule: a correction made
+  // on the Needs-you page must change what the agent fills from then on.
+  if (!isFollowUp(f.label) && f.kind !== "file") {
+    const own = findSimilarAnswer(f.label, f.kind === "checkbox" ? ["Yes", "No"] : f.options, a.custom ?? {}, 0.9);
+    if (own) return own;
+  }
   const l = f.label.toLowerCase();
   const clearance = clearanceAnswer(f, a);
   if (clearance) return clearance;
@@ -584,7 +620,9 @@ export function knownValue(f: Field, a: Applicant): string | null {
   const skillPick = skillOptions(f, a);
   if (skillPick) return skillPick;
   // A required cover letter gets one written for this job (opts.coverLetter); optional ones are left empty.
-  if (f.kind === "file") return /cover/.test(l) ? (f.required ? "__COVER__" : null) : /resume|cv|attach/.test(l) || f.required ? "__RESUME__" : null;
+  // A cover-letter slot always gets a letter written for this job: some forms mark it required only visually ("Cover
+  // Letter*" without a required flag) and rejected the application, and a tailored letter never hurts.
+  if (f.kind === "file") return /cover/.test(l) ? "__COVER__" : /resume|cv|attach/.test(l) || f.required ? "__RESUME__" : null;
   if (/password/.test(l)) return a.portal?.password ?? null; // only reached on a career portal (screenSensitive stops a password box anywhere else)
   // "By entering today's date I acknowledge…" / signature date: today's date.
   if (/today.?s date|enter (the|today.?s|current) date|date of (signature|acknowledg)|signature date|^date\b|\bdate signed\b/.test(l) && f.kind !== "checkbox" && f.kind !== "radio") {
@@ -810,7 +848,13 @@ export async function fill(page: Page, f: Field, value: string, resumePath: stri
         const norm = (x: string) => x.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
         let idx = texts.findIndex((t) => t && norm(t) === norm(value));
         if (idx < 0) {
-          const hit = pickOption(value, texts.filter(Boolean));
+          // Names (schools, employers, cities): every real word must be there — a fuzzy match picked "Alabama State
+          // University" for "Kennesaw State University" because they share "State University".
+          const isName = /school|university|college|institution|employer|company|city|location/i.test(f.label);
+          const words = norm(value).split(" ").filter((w) => w.length > 2 && !/^(the|and|of|for|university|college|state|school|institute)$/.test(w));
+          const hit = isName
+            ? texts.find((t) => t && words.length > 0 && words.every((w) => norm(t).includes(w)))
+            : pickOption(value, texts.filter(Boolean));
           idx = hit ? texts.indexOf(hit) : -1;
         }
         if (idx < 0) return false;
@@ -825,9 +869,12 @@ export async function fill(page: Page, f: Field, value: string, resumePath: stri
       else await page.keyboard.type(value, { delay: 30 });
       await page.waitForTimeout(800);
       if (await choose()) return;
-      // Free-text search box (cities, schools): take the site's suggestion only when there is exactly one.
-      const shown = await page.locator("[role=option]:visible, [class*='select__option']:visible").count().catch(() => 0);
-      if (shown >= 1) await page.keyboard.press("Enter");
+      // Free-text search box (cities, schools): a suggestion is taken only if it really is the answer (choose() above
+      // already tried that). Pressing Enter on the top suggestion put "Alabama State University" in place of a school
+      // missing from the list — wrong data on a real application. Use the list's "Other" if it has one, else leave it.
+      await page.keyboard.press("Escape").catch(() => {});
+      if (/school|university|college|institution|employer|company/i.test(f.label)) await pickFromSearch(page, sel, ["Other"]);
+      else await page.fill(sel, "").catch(() => {});
       return;
     }
   }
@@ -861,12 +908,27 @@ async function pickFromSearch(page: Page, sel: string, choices: string[]) {
     }
     await page.keyboard.press("Escape").catch(() => {});
   }
-  // Nothing matched cleanly: type the first choice and take the site's top suggestion.
-  await page.click(sel).catch(() => {});
+  // Nothing matched: NEVER take the site's top suggestion (that put "Alabama State University" in place of a school
+  // missing from the list). Use the list's own "Other" choice when it has one; otherwise leave it empty.
+  for (const other of ["Other", "Other - Not Listed", "Not listed"]) {
+    await page.click(sel).catch(() => {});
+    await page.fill(sel, "").catch(() => {});
+    await page.keyboard.type(other, { delay: 25 });
+    await page.waitForTimeout(800);
+    const list = await page.getAttribute(sel, "aria-controls").catch(() => null);
+    const scope = list ? `[id="${list}"] ` : "";
+    const opts = await page
+      .locator(`${scope}[role=option]`)
+      .evaluateAll((els) => els.filter((e) => (e as HTMLElement).offsetParent !== null).map((e) => (e.textContent ?? "").replace(/\s+/g, " ").trim()))
+      .catch(() => [] as string[]);
+    const hit = opts.find((o) => /^other\b|not listed/i.test(o));
+    if (hit) {
+      await page.locator(`${scope}[role=option]`).filter({ hasText: hit }).first().click().catch(() => {});
+      return;
+    }
+    await page.keyboard.press("Escape").catch(() => {});
+  }
   await page.fill(sel, "").catch(() => {});
-  await page.keyboard.type(choices[0], { delay: 25 });
-  await page.waitForTimeout(900);
-  await page.keyboard.press("Enter").catch(() => {});
 }
 
 /**
@@ -1284,6 +1346,7 @@ async function fillAndSubmit(
         learned,
         aiCalls,
         pending,
+        form: formSnapshot(fields, (f) => answers[f.id], (f) => missing.includes(f)),
       };
     }
 
@@ -1447,7 +1510,8 @@ async function fillAndSubmit(
       // The server took it but the page showed no thank-you: very likely sent. The confirmation email (inbox scan)
       // settles it; until then it's marked submitted with that caveat instead of going to Needs you.
       return { status: "submitted", detail: "Application submitted — the site accepted the form (no thank-you message shown; the confirmation email will settle it)", confirmation: ["the site accepted the form"], answers: labelled(fields, answers), learned, usedPortalLogin, aiCalls };
-    return { status: "needs_user", detail: err ? `Form rejected: ${err}` : "Submitted but no confirmation seen — please check", answers: labelled(fields, answers), learned, usedPortalLogin, aiCalls, pending: pending.length ? pending : undefined };
+    const rejected = new Set(pending.map((q) => q.label));
+    return { status: "needs_user", detail: err ? `Form rejected: ${err}` : "Submitted but no confirmation seen — please check", answers: labelled(fields, answers), learned, usedPortalLogin, aiCalls, pending: pending.length ? pending : undefined, form: pending.length ? formSnapshot(fields, (f) => answers[f.id], (f) => rejected.has(f.label)) : undefined };
   } catch (e) {
     return { status: "failed", detail: (e as Error).message.slice(0, 300), aiCalls };
   }

@@ -194,7 +194,7 @@ export function ProfileDrawer({ open, tab, onTab, onClose }: { open: boolean; ta
                     onChange={(e) => agent({ dailyCap: Number(e.target.value) })}
                     className="min-h-[40px] rounded-sm border border-[var(--border-strong)] bg-[var(--card)] px-2 text-sm"
                   >
-                    {[...new Set([5, 10, 25, 50, 100, 200, data.agent.dailyCap])].sort((a, b) => a - b).map((n) => (
+                    {[...new Set([5, 10, 25, 50, 100, 200, 300, 500, 1000, data.agent.dailyCap])].sort((a, b) => a - b).map((n) => (
                       <option key={n} value={n}>
                         {n} a day
                       </option>
